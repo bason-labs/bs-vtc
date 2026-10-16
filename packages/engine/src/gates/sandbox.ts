@@ -321,7 +321,9 @@ export interface GateJailSpec extends GateSandboxSpec {
   /**
    * The run's dependency download caches (`GOMODCACHE`, Cargo's `registry` and `git`, and each
    * phase's `CARGO_HOME`), writable in both phases: what `go mod download` and `cargo fetch`
-   * download in the install phase, the verify phase builds from (spine §5 reading 252).
+   * download in the install phase, the verify phase builds from (spine §5 reading 252). Their
+   * extracted contents are hashed with the checkout (`GateCommandJail.downloadCaches`, reading
+   * 253), so a change after the scripts-free fetch fails the verify gates.
    */
   readonly deps?: string;
 }
@@ -1119,6 +1121,30 @@ export class GateCommandJail {
       this.verifyHome = home;
     }
     return this.verifyHome;
+  }
+
+  /**
+   * The directories gate commands can write besides the checkout (spine §5 reading 253): the
+   * run's private root (each phase's home, the temp directories and the download caches), or
+   * everything when commands run unsandboxed. A link of the checkout into one of them fails the
+   * run's verify gates (`workspaceTree`).
+   */
+  writableRoots(): string[] {
+    return this.sandbox.kind === "none" ? ["/"] : [this.rootDir()];
+  }
+
+  /**
+   * The download caches verify gates build from (spine §5 reading 253), hashed with the checkout:
+   * Go's module cache without its own download cache (`cache/`: zips, lock files), Cargo's
+   * extracted registry sources and its git checkouts.
+   */
+  downloadCaches(): { label: string; dir: string; skip?: string[] }[] {
+    const deps = join(this.rootDir(), "deps");
+    return [
+      { label: "go-mod", dir: join(deps, "go-mod"), skip: ["cache"] },
+      { label: "cargo-registry/src", dir: join(deps, "cargo-registry", "src") },
+      { label: "cargo-git/checkouts", dir: join(deps, "cargo-git", "checkouts") },
+    ];
   }
 
   private dirs(phase: GatePhase): {

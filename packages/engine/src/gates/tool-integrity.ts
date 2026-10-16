@@ -13,12 +13,18 @@
  *   no two passes) and `bun install` (`--ignore-scripts`, then `bun install --force`: a
  *   second plain `bun install` of a workspace skips its packages' dependency scripts); `go mod download` and `cargo fetch` run no project code as they are. Any other
  *   install (Yarn, `npm install`, `uv sync`, a custom script) has no scripts-free form here.
- * - {@link workspaceTree}, {@link compareInstall} and {@link compareGate} (spine §5 reading 252):
- *   the check every verify gate depends on. Every file and link of the checkout is hashed, the
- *   dependency trees (`node_modules`, `.yarn`, `.pnp.*`, `__pypackages__`, every Python virtual
- *   environment) and the checkout's own files alike, without parsing any gate command or choosing
- *   which files matter; what the install phase's scripts changed and what changed before each
- *   verify gate is diffed against it.
+ * - {@link perPackageBuild} (spine §5 reading 253): the second pass one writer at a time, each
+ *   pending dependency on its own and then each of the checkout's own projects' scripts (npm and
+ *   pnpm), so what each wrote is attributed to it; the whole second pass where there is no such
+ *   form (Bun), allowing no package to rebuild itself.
+ * - {@link workspaceTree}, {@link compareInstall} and {@link compareGate} (spine §5 readings 252
+ *   and 253): the check every verify gate depends on. Every file and link of the checkout is
+ *   hashed, the dependency trees (`node_modules`, `.yarn`, `.pnp.*`, `__pypackages__`, every
+ *   Python virtual environment) and the checkout's own files alike, and the Go and Cargo download
+ *   caches verify gates build from, without parsing any gate command or choosing which files
+ *   matter; what cannot be listed or read, and a link out of the checkout into a directory gate
+ *   commands can write, fail closed; what each writer's install scripts changed and what changed
+ *   before each verify gate is diffed against it.
  * - {@link hashTool}: the hash of the tool a gate's command names, one line per file (its
  *   checkout-relative path and the SHA-256 of its bytes, or `link:<target>` for a symbolic link,
  *   which is never followed), sorted by path: display detail in `ToolIntegrity.sha256`. A glob's
@@ -273,8 +279,9 @@ const CHUNK = Buffer.allocUnsafe(1024 * 1024);
 
 /**
  * The line of one regular file (`stat` from its listing): the SHA-256 of its bytes, read through a
- * descriptor that never follows a link, or `changed-while-hashing` when it was replaced since the
- * listing. Its size is checked against the byte limit before it is read.
+ * descriptor that never follows a link, `changed-while-hashing` when it was replaced since the
+ * listing, or `refused:unreadable` when it may not be read. Its size is checked against the byte
+ * limit before it is read.
  */
 const fileLine = (budget: Budget, rel: string, abs: string, stat: Stats): string => {
   if (budget.bytes + stat.size > budget.limits.maxBytes) throw tooBig(budget, rel);
@@ -282,7 +289,10 @@ const fileLine = (budget: Budget, rel: string, abs: string, stat: Stats): string
   try {
     fd = openSync(abs, constants.O_RDONLY | NOFOLLOW);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ELOOP") throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    // a file the runner may not read fails closed (spine §5 reading 253), never skipped
+    if (code === "EACCES" || code === "EPERM") return UNREADABLE;
+    if (code !== "ELOOP") throw error;
     return RACED;
   }
   try {
@@ -942,6 +952,44 @@ export interface PackageInfo {
    * pnpm then run `node-gyp rebuild` as its install script).
    */
   readonly scripts: readonly string[];
+  /** Its package.json `name`, when that is a package name; `null` otherwise. */
+  readonly name: string | null;
+  /** Whether its package.json has a `pnpm` key: pnpm's settings (spine §5 reading 253). */
+  readonly pnpmSettings: boolean;
+}
+
+/**
+ * The prefix of every line that fails closed (spine §5 reading 253): a path the snapshot could
+ * not list or read (`refused:unreadable`), a link that leads out of the checkout into a directory
+ * a gate command can write (`refused:link-out:<target>`), and an entry of the checkout named
+ * {@link DOWNLOAD_CACHE_PREFIX} (`refused:reserved`). In the baseline no verify gate runs
+ * (`infra`); in any later snapshot the path is tampering, changed or not.
+ */
+const REFUSED = "refused:";
+const UNREADABLE = `${REFUSED}unreadable`;
+
+/** Whether a snapshot line is one that fails closed (see {@link REFUSED}). */
+export const isRefusedLine = (line: string | undefined): boolean =>
+  line?.startsWith(REFUSED) === true;
+
+/**
+ * The top-level name under which {@link workspaceTree} hashes the run's dependency download
+ * caches (spine §5 reading 253): `.vtc-deps/<label>/<path>`. The checkout's own entry of that
+ * name is refused, so a cache line never collides with a file of the checkout.
+ */
+export const DOWNLOAD_CACHE_PREFIX = ".vtc-deps";
+
+/**
+ * A download cache outside the checkout that verify gates build from (Go's module cache, Cargo's
+ * extracted registry sources and git checkouts), hashed with the checkout ({@link workspaceTree}).
+ */
+export interface DownloadCache {
+  /** Its name under {@link DOWNLOAD_CACHE_PREFIX} (`go-mod`, `cargo-registry/src`). */
+  readonly label: string;
+  /** Its absolute directory; a missing one hashes nothing. */
+  readonly dir: string;
+  /** Top-level entries left out (Go's `cache/`, its own download cache with lock files). */
+  readonly skip?: readonly string[];
 }
 
 /** One snapshot of the whole checkout (H-14, spine §5 reading 252; {@link workspaceTree}). */
@@ -949,7 +997,8 @@ export interface WorkspaceTree {
   /**
    * Every file and symbolic link of the checkout, `.git` left out, one line each: the SHA-256 of
    * a file's bytes, `link:<target>` for a link (never followed), `special:<mode>` for anything
-   * else. Directories are walked, never lines.
+   * else, a {@link REFUSED} line for what fails closed. Directories are walked, never lines,
+   * unless they cannot be listed. The download caches follow under {@link DOWNLOAD_CACHE_PREFIX}.
    */
   readonly snapshot: ToolSnapshot;
   /** Each regular file's size, times and inode when it was hashed (the fast path's key). */
@@ -960,6 +1009,8 @@ export interface WorkspaceTree {
   readonly venvs: readonly string[];
   /** Each `node_modules/.bin` entry: the installed package directory it starts, or `null`. */
   readonly binOwners: ReadonlyMap<string, string | null>;
+  /** Every path whose line fails closed ({@link REFUSED}), sorted. */
+  readonly refused: readonly string[];
 }
 
 /** Path segments that start a dependency tree (Node, Yarn's cache and unplugged, PEP 582). */
@@ -967,11 +1018,12 @@ const DEPENDENCY_SEGMENTS = new Set(["node_modules", ".yarn", "__pypackages__"])
 
 /**
  * Whether a checkout-relative path is in a dependency tree: below a `node_modules`, `.yarn` or
- * `__pypackages__`, one of Yarn PnP's `.pnp.*` files, or inside a virtual environment of `venvs`.
- * Everything else is the checkout's own.
+ * `__pypackages__`, one of Yarn PnP's `.pnp.*` files, inside a virtual environment of `venvs`, or
+ * in a download cache ({@link DOWNLOAD_CACHE_PREFIX}). Everything else is the checkout's own.
  */
 export const inDependencyTree = (path: string, venvs: readonly string[]): boolean => {
   const parts = path.split("/");
+  if (parts[0] === DOWNLOAD_CACHE_PREFIX) return true;
   if (parts.some((part) => DEPENDENCY_SEGMENTS.has(part))) return true;
   if ((parts.at(-1) ?? "").startsWith(".pnp.")) return true;
   return venvs.some((venv) => path === venv || path.startsWith(`${venv}/`));
@@ -1006,6 +1058,19 @@ const isBinEntry = (path: string): boolean => {
   return parts.length >= 3 && parts.at(-2) === ".bin" && parts.at(-3) === "node_modules";
 };
 
+/**
+ * pnpm's configuration in the checkout (spine §5 reading 253), protected in the install-phase
+ * and per-gate comparisons whatever `isProtected` says: any `pnpm-workspace.yaml`, and a
+ * package.json with a `pnpm` key (as `tree` read it). Adding one would change what pnpm runs.
+ */
+const isPnpmConfig = (path: string, tree: WorkspaceTree): boolean => {
+  const name = (path.split("/").at(-1) ?? "").toLowerCase();
+  if (name === "pnpm-workspace.yaml") return true;
+  if (name !== "package.json") return false;
+  const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  return tree.packages.get(dir)?.pnpmSettings === true;
+};
+
 /** The installed package a `.bin` entry starts (a link's target, a shim's script), or `null`. */
 const binOwner = (root: string, abs: string): string | null => {
   const stat = lstatOrNull(abs);
@@ -1029,14 +1094,20 @@ const packageInfo = (
 ): PackageInfo => {
   const installed = rel.split("/").includes("node_modules");
   const scripts: string[] = [];
+  let name: string | null = null;
+  let pnpmSettings = false;
   const text = readSmall(root, join(dir, "package.json"));
   if (text !== null) {
     try {
-      const declared = (JSON.parse(text) as { scripts?: unknown }).scripts;
+      const json = JSON.parse(text) as { scripts?: unknown; name?: unknown; pnpm?: unknown };
+      if (typeof json.name === "string" && NODE_NAME.test(json.name)) name = json.name;
+      pnpmSettings = json.pnpm !== undefined;
+      const declared = json.scripts;
       if (declared !== null && typeof declared === "object") {
         const wanted: readonly string[] = installed ? INSTALL_SCRIPTS : OWN_INSTALL_SCRIPTS;
-        for (const name of wanted) {
-          if (typeof (declared as Record<string, unknown>)[name] === "string") scripts.push(name);
+        for (const script of wanted) {
+          if (typeof (declared as Record<string, unknown>)[script] === "string")
+            scripts.push(script);
         }
       }
     } catch {
@@ -1044,7 +1115,54 @@ const packageInfo = (
     }
   }
   if (installed && names.includes("binding.gyp")) scripts.push("binding.gyp");
-  return { installed, scripts };
+  return { installed, scripts, name, pnpmSettings };
+};
+
+/** The real path of `abs`, or, where it does not exist, of its nearest existing ancestor joined to the rest. */
+const realAsFarAsItExists = (abs: string): string => {
+  try {
+    return realpathSync(abs);
+  } catch {
+    const parent = dirname(abs);
+    return parent === abs ? abs : join(realAsFarAsItExists(parent), basename(abs));
+  }
+};
+
+/**
+ * Whether the link at `abs` leads out of the checkout into a directory a gate command can write
+ * (spine §5 reading 253): where it resolves (as far as it exists, for a dangling one), unless that
+ * is inside one of `homes` (the checkout, or the download cache being walked), inside one of
+ * `writable`. A link to a place no gate command can write (a system interpreter) is a line.
+ */
+const leadsToWritable = (
+  abs: string,
+  homes: readonly string[],
+  writable: readonly string[],
+): boolean => {
+  let real: string;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    let target: string;
+    try {
+      target = readlinkSync(abs);
+    } catch {
+      return true;
+    }
+    real = realAsFarAsItExists(isAbsolute(target) ? target : join(dirname(abs), target));
+  }
+  const under = (dir: string): boolean => real === dir || insideRoot(dir, real) !== null;
+  if (homes.some(under)) return false;
+  return writable.some(under);
+};
+
+/** The real path of `abs`, or `abs` itself when it does not exist. */
+const realOrSelf = (abs: string): string => {
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
 };
 
 /**
@@ -1053,6 +1171,12 @@ const packageInfo = (
  * each virtual environment whole (site-packages included), and the checkout's own files. Nothing
  * is chosen by what a gate command runs. `.git` is never walked and no link is followed.
  *
+ * Nothing is skipped silently (spine §5 reading 253): a directory that cannot be listed, an entry
+ * that cannot be looked at and a file that cannot be read are each a `refused:unreadable` line,
+ * and a link that resolves outside the checkout into one of `writable` (the directories gate
+ * commands can write; by default everything) a `refused:link-out:<target>` line. Each `caches`
+ * directory is hashed the same way under {@link DOWNLOAD_CACHE_PREFIX}.
+ *
  * With `previous`, a regular file whose size, modification and change times and inode are what
  * `previous` recorded keeps its line without being read again (the fast path between verify
  * gates); the snapshots the install phase is compared with are taken without it, from content.
@@ -1060,73 +1184,130 @@ const packageInfo = (
  */
 export const workspaceTree = (
   rootIn: string,
-  options: { readonly limits?: ToolHashLimits; readonly previous?: WorkspaceTree } = {},
+  options: {
+    readonly limits?: ToolHashLimits;
+    readonly previous?: WorkspaceTree;
+    readonly writable?: readonly string[];
+    readonly caches?: readonly DownloadCache[];
+  } = {},
 ): WorkspaceTree => {
-  let root = rootIn;
-  try {
-    root = realpathSync(rootIn);
-  } catch {
-    // a missing checkout hashes nothing
-  }
+  const root = realOrSelf(rootIn);
   const budget: Budget = {
     limits: options.limits ?? WORKSPACE_HASH_LIMITS,
     files: 0,
     bytes: 0,
     what: "checkout",
   };
+  const writable = (options.writable ?? ["/"]).map(realOrSelf);
   const previous = options.previous;
   const files = new Map<string, string>();
   const stats = new Map<string, string>();
   const packages = new Map<string, PackageInfo>();
   const venvs: string[] = [];
   const binOwners = new Map<string, string | null>();
-  const queue: string[] = [""];
+  const refused: string[] = [];
+  /** Where a walk starts: the checkout (`own`) or a download cache under its prefix. */
+  interface Base {
+    readonly abs: string;
+    readonly prefix: string;
+    readonly own: boolean;
+    readonly skip: ReadonlySet<string>;
+  }
+  const bases: Base[] = [
+    { abs: root, prefix: "", own: true, skip: new Set([DOWNLOAD_CACHE_PREFIX]) },
+    ...(options.caches ?? []).map((cache) => ({
+      abs: realOrSelf(cache.dir),
+      prefix: `${DOWNLOAD_CACHE_PREFIX}/${cache.label}`,
+      own: false,
+      skip: new Set(cache.skip ?? []),
+    })),
+  ];
+  const refuse = (path: string, line: string): void => {
+    countLine(budget, path);
+    files.set(path, line);
+    refused.push(path);
+  };
+  const queue: { base: Base; rel: string }[] = bases.map((base) => ({ base, rel: "" }));
   for (let at = 0; at < queue.length; at++) {
-    const rel = queue[at] ?? "";
+    const { base, rel } = queue[at] ?? { base: bases[0] as Base, rel: "" };
+    const pathOf = (r: string): string =>
+      base.prefix === "" ? r : r === "" ? base.prefix : `${base.prefix}/${r}`;
     if (at >= WORKSPACE_MAX_DIRS) {
       throw new ToolHashLimitError(
-        rel,
+        pathOf(rel) || ".",
         `the checkout has more than ${String(WORKSPACE_MAX_DIRS)} directories, more than the gate runner walks`,
       );
     }
-    const abs = rel === "" ? root : join(root, rel);
+    const abs = rel === "" ? base.abs : join(base.abs, rel);
     let names: string[];
     try {
       names = readdirSync(abs).sort();
-    } catch {
+    } catch (error) {
+      // gone (a missing checkout or cache hashes nothing); anything else fails closed
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      refuse(pathOf(rel) || ".", UNREADABLE);
       continue;
     }
-    if (rel !== "" && names.includes("pyvenv.cfg")) venvs.push(rel);
-    if (names.includes("package.json")) packages.set(rel, packageInfo(root, abs, rel, names));
-    const binDir = isBinEntry(`${rel}/x`);
+    if (base.own && rel !== "" && names.includes("pyvenv.cfg")) venvs.push(rel);
+    if (base.own && names.includes("package.json")) {
+      packages.set(rel, packageInfo(root, abs, rel, names));
+    }
+    const binDir = base.own && isBinEntry(`${rel}/x`);
     for (const name of names) {
-      if (name === ".git") continue;
-      const child = rel === "" ? name : `${rel}/${name}`;
-      const childAbs = join(abs, name);
-      const stat = lstatOrNull(childAbs);
-      if (stat === null) continue;
-      if (stat.isDirectory()) {
-        queue.push(child);
+      if (base.own && name === ".git") continue;
+      const childRel = rel === "" ? name : `${rel}/${name}`;
+      const child = pathOf(childRel);
+      if (rel === "" && base.skip.has(name)) {
+        // the checkout's own `.vtc-deps` would collide with the caches' lines
+        if (base.own) refuse(child, `${REFUSED}reserved`);
         continue;
       }
-      countLine(budget, child);
+      const childAbs = join(abs, name);
+      let stat: Stats;
+      try {
+        stat = lstatSync(childAbs);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") refuse(child, UNREADABLE);
+        continue;
+      }
+      if (stat.isDirectory()) {
+        queue.push({ base, rel: childRel });
+        continue;
+      }
       if (stat.isSymbolicLink()) {
-        files.set(child, `link:${readlinkSync(childAbs)}`);
+        const target = readlinkSync(childAbs);
+        if (leadsToWritable(childAbs, [root, base.abs], writable)) {
+          refuse(child, `${REFUSED}link-out:${target}`);
+        } else {
+          countLine(budget, child);
+          files.set(child, `link:${target}`);
+        }
       } else if (stat.isFile()) {
+        countLine(budget, child);
         const key = `${String(stat.size)}:${String(stat.mtimeMs)}:${String(stat.ctimeMs)}:${String(stat.ino)}:${String(stat.dev)}`;
         const kept =
           previous !== undefined && previous.stats.get(child) === key
             ? previous.snapshot.files.get(child)
             : undefined;
-        files.set(child, kept ?? fileLine(budget, child, childAbs, stat));
+        const line = kept ?? fileLine(budget, child, childAbs, stat);
+        files.set(child, line);
         stats.set(child, key);
+        if (isRefusedLine(line)) refused.push(child);
       } else {
+        countLine(budget, child);
         files.set(child, `special:${String(stat.mode)}`);
       }
       if (binDir) binOwners.set(child, binOwner(root, childAbs));
     }
   }
-  return { snapshot: snapshotOf(files), stats, packages, venvs, binOwners };
+  return {
+    snapshot: snapshotOf(files),
+    stats,
+    packages,
+    venvs,
+    binOwners,
+    refused: [...new Set(refused)].sort(),
+  };
 };
 
 /** The files a package's own install script changed or added in its own directory. */
@@ -1146,6 +1327,14 @@ export interface InstallComparison {
   readonly managerState: readonly string[];
 }
 
+/**
+ * Whose lifecycle scripts ran between two snapshots (spine §5 reading 253): an installed
+ * dependency by its package name, one of the checkout's own projects by its checkout-relative
+ * directory (`""`: the root), or `null` when nobody can be named (a package manager that runs
+ * every script at once): then nothing but the package manager's state may change.
+ */
+export type InstallWriter = { readonly dependency: string } | { readonly project: string } | null;
+
 /** The nearest directory at or above `path`'s holding one of the checkout's own packages. */
 const ownPackageOf = (path: string, tree: WorkspaceTree): string | null => {
   let dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
@@ -1158,32 +1347,40 @@ const ownPackageOf = (path: string, tree: WorkspaceTree): string | null => {
 };
 
 /**
- * The install phase's scripts against the snapshot taken before them (H-14, spine §5 reading
- * 252), both from content. Every path whose line differs is tampering, except:
- * - inside the directory of an installed package that declared an install script (or a
- *   `binding.gyp`) before the scripts ran, a change or an addition: that package rebuilt itself;
- *   a `.bin` entry that started that package before and still does may change with it (pnpm
- *   relinks the bin of a package it rebuilt);
- * - a file added in the directory of one of the checkout's own packages that declares an install
- *   or `prepare` script (never in a nested package or dependency tree of it, never a file that
- *   `isProtected` names, such as a check or gate-command config);
+ * What one writer's lifecycle scripts did, against the snapshot taken just before them (H-14,
+ * spine §5 readings 252 and 253), both from content. Every path whose line differs is tampering,
+ * and so is every refused line of `after`, except:
+ * - for a `dependency` writer, a change or an addition inside the directory of an installed
+ *   package of that name that declared an install script (or a `binding.gyp`) before, and a
+ *   `.bin` entry that started that package before and still does (pnpm relinks the bin of a
+ *   package it rebuilt): that package rebuilt itself;
+ * - for a `project` writer, a file added in that project's own directory (never in a nested
+ *   package or dependency tree of it, never a file that `isProtected` names or pnpm's
+ *   configuration, never a change to a file that was there);
  * - the package manager's own state files ({@link MANAGER_STATE}).
- * Anything else changed, removed or added (another package's files, a new `.bin` entry or
- * directory, a config file of the checkout, a virtual environment's file) is tampering.
+ * A change is allowed by who made it, never by where it is: another package's files, a file of
+ * the checkout's own a dependency wrote, a new `.bin` entry or directory, a virtual environment's
+ * file, a download cache's file, anything at all for the `null` writer, is tampering.
  */
 export const compareInstall = (
   before: WorkspaceTree,
   after: WorkspaceTree,
   isProtected: (path: string) => boolean = () => false,
+  writer: InstallWriter = null,
 ): InstallComparison => {
   const venvs = [...new Set([...before.venvs, ...after.venvs])];
-  const tampered: string[] = [];
+  const tampered = new Set<string>(after.refused);
   const managerState: string[] = [];
   const rebuilt = new Map<string, string[]>();
-  const rebuilds = (pkg: string | null | undefined): pkg is string => {
-    if (pkg === null || pkg === undefined) return false;
+  const dependency = writer !== null && "dependency" in writer ? writer.dependency : null;
+  const project = writer !== null && "project" in writer ? writer.project : null;
+  /** Whether `pkg` is the writer's own installed package, with an install script before. */
+  const writes = (pkg: string | null | undefined): pkg is string => {
+    if (dependency === null || pkg === null || pkg === undefined) return false;
     const info = before.packages.get(pkg);
-    return info !== undefined && info.installed && info.scripts.length > 0;
+    return (
+      info !== undefined && info.installed && info.scripts.length > 0 && info.name === dependency
+    );
   };
   const allow = (pkg: string, path: string): void => {
     const list = rebuilt.get(pkg) ?? [];
@@ -1191,6 +1388,10 @@ export const compareInstall = (
     rebuilt.set(pkg, list);
   };
   for (const path of changedToolFiles(before.snapshot, after.snapshot)) {
+    if (isRefusedLine(after.snapshot.files.get(path))) {
+      tampered.add(path);
+      continue;
+    }
     if (MANAGER_STATE.some((state) => state.test(path))) {
       managerState.push(path);
       continue;
@@ -1198,32 +1399,28 @@ export const compareInstall = (
     if (inDependencyTree(path, venvs)) {
       if (isBinEntry(path)) {
         const was = before.binOwners.get(path);
-        if (after.snapshot.files.has(path) && was === after.binOwners.get(path) && rebuilds(was)) {
+        if (after.snapshot.files.has(path) && was === after.binOwners.get(path) && writes(was)) {
           allow(was, path);
         } else {
-          tampered.push(path);
+          tampered.add(path);
         }
         continue;
       }
       const pkg = installedPackageOf(path);
-      if (pkg !== null && path.startsWith(`${pkg}/`) && rebuilds(pkg)) allow(pkg, path);
-      else tampered.push(path);
+      if (pkg !== null && path.startsWith(`${pkg}/`) && writes(pkg)) allow(pkg, path);
+      else tampered.add(path);
       continue;
     }
-    if (before.snapshot.files.has(path) || isProtected(path)) {
-      tampered.push(path);
+    if (before.snapshot.files.has(path) || isProtected(path) || isPnpmConfig(path, after)) {
+      tampered.add(path);
       continue;
     }
     const own = ownPackageOf(path, before);
-    const info = own === null ? undefined : before.packages.get(own);
-    if (own !== null && info !== undefined && info.scripts.length > 0) {
-      allow(own === "" ? "." : own, path);
-    } else {
-      tampered.push(path);
-    }
+    if (project !== null && own === project) allow(own === "" ? "." : own, path);
+    else tampered.add(path);
   }
   return {
-    tampered,
+    tampered: [...tampered].sort(),
     selfRebuilt: [...rebuilt]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([pkg, list]) => ({ package: pkg, files: list })),
@@ -1233,14 +1430,17 @@ export const compareInstall = (
 
 /**
  * The checkout just before a verify gate against the snapshot taken when the install phase
- * ended (H-14, spine §5 reading 252): every path whose line differs is tampering, except
+ * ended (H-14, spine §5 reading 252): every path whose line differs is tampering, and so is every
+ * refused line of `now` (reading 253), except
  * - a check tool's own cache ({@link isVolatileCache}) and what `ignore` names (the runner's
  *   hidden acceptance tests);
  * - a file of the checkout's own added since (build outputs, reports, coverage), unless
- *   `isProtected` names it (a check or gate-command config that would change what a gate runs);
+ *   `isProtected` names it or it is pnpm's configuration (a check or gate-command config that
+ *   would change what a gate runs);
  * - a file of the checkout's own in `mayChange` (what a package's install script built, which a
  *   build gate rebuilds).
- * Any change in a dependency tree, and any change or removal of the checkout's own files, fails.
+ * Any change in a dependency tree or a download cache, and any change or removal of the
+ * checkout's own files, fails.
  */
 export const compareGate = (
   afterInstall: WorkspaceTree,
@@ -1252,13 +1452,256 @@ export const compareGate = (
   } = {},
 ): string[] => {
   const venvs = [...new Set([...afterInstall.venvs, ...now.venvs])];
-  const tampered: string[] = [];
+  const tampered = new Set<string>(now.refused);
   for (const path of changedToolFiles(afterInstall.snapshot, now.snapshot)) {
-    if (options.ignore?.(path) === true || isVolatileCache(path)) continue;
-    if (inDependencyTree(path, venvs)) tampered.push(path);
+    if (isRefusedLine(now.snapshot.files.get(path))) tampered.add(path);
+    else if (options.ignore?.(path) === true || isVolatileCache(path)) continue;
+    else if (inDependencyTree(path, venvs)) tampered.add(path);
     else if (afterInstall.snapshot.files.has(path)) {
-      if (options.mayChange?.has(path) !== true) tampered.push(path);
-    } else if (options.isProtected?.(path) === true) tampered.push(path);
+      if (options.mayChange?.has(path) !== true) tampered.add(path);
+    } else if (options.isProtected?.(path) === true || isPnpmConfig(path, now)) tampered.add(path);
   }
-  return tampered;
+  return [...tampered].sort();
+};
+
+// ------------------------------------------- lifecycle scripts one writer at a time (reading 253)
+
+/** One command of an install's scripts pass, and whose scripts it runs. */
+export interface BuildStep {
+  readonly argv: readonly string[];
+  readonly writer: Exclude<InstallWriter, null>;
+}
+
+/**
+ * The lifecycle scripts each pnpm workspace project runs on install, in pnpm's order (checked
+ * against the real pnpm 10.11: `prepublish` is not one of them).
+ */
+const PNPM_PROJECT_SCRIPTS = OWN_INSTALL_SCRIPTS;
+/** What npm 10 runs for the root project on `npm ci`, in its order. */
+const NPM_ROOT_SCRIPTS = [
+  "preinstall",
+  "install",
+  "postinstall",
+  "prepublish",
+  "preprepare",
+  "prepare",
+  "postprepare",
+] as const;
+/**
+ * What npm 10 runs for a workspace project on `npm ci` besides its `prepare`, which npm runs
+ * when it links the workspace, even with `--ignore-scripts` (so in the scripts-free pass).
+ */
+const NPM_WORKSPACE_SCRIPTS = INSTALL_SCRIPTS;
+/** npm flags that move an install or pick its workspaces: no per-package form is derived. */
+const NPM_MOVING = [
+  "--prefix",
+  "-C",
+  "--workspace",
+  "-w",
+  "--workspaces",
+  "-ws",
+  "--include-workspace-root",
+  "--global",
+  "-g",
+];
+
+/** The `pendingBuilds` of a pnpm `.modules.yaml`, or `null` when there is none to read. */
+const pendingBuilds = (text: string): string[] | null => {
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((line) => /^pendingBuilds:/.test(line));
+  if (at < 0) return null;
+  if (/^pendingBuilds:\s*\[\s*\]\s*$/.test(lines[at] ?? "")) return [];
+  if (!/^pendingBuilds:\s*$/.test(lines[at] ?? "")) return null;
+  const found: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    const item = /^\s+-\s+(.+?)\s*$/.exec(line);
+    if (item === null) break;
+    found.push((item[1] ?? "").replace(/^(['"])(.*)\1$/, "$2"));
+  }
+  return found;
+};
+
+/** The package name of a pnpm dependency path (`esbuild@0.25.0`, `@swc/core@1.0.0(peer)`). */
+const depPathName = (depPath: string): string | null => {
+  const path = depPath.startsWith("/") ? depPath.slice(1) : depPath;
+  const at = path.indexOf("@", path.startsWith("@") ? 1 : 0);
+  const name = at <= 0 ? null : path.slice(0, at);
+  // never a word the package manager would take for a flag
+  return name !== null && NODE_NAME.test(name) && !name.startsWith("-") ? name : null;
+};
+
+/** The scripts of `wanted` a package.json declares, in that order. */
+const declaredScripts = (root: string, dir: string, wanted: readonly string[]): string[] => {
+  const text = readSmall(root, join(root, dir, "package.json"));
+  if (text === null) return [];
+  try {
+    const scripts = (JSON.parse(text) as { scripts?: unknown }).scripts;
+    if (scripts === null || typeof scripts !== "object") return [];
+    return wanted.filter((s) => typeof (scripts as Record<string, unknown>)[s] === "string");
+  } catch {
+    return [];
+  }
+};
+
+/** A checkout-relative directory joined to a relative one, or `null` when it leaves the checkout. */
+const within = (root: string, base: string, rel: string): string | null => {
+  const abs = join(root, base, rel);
+  if (abs === root) return "";
+  return insideRoot(root, abs);
+};
+
+/** The relative path from `from` to `to` (both checkout-relative), `.` for the same directory. */
+const relativeDir = (from: string, to: string): string => relative(from || ".", to || ".") || ".";
+
+/**
+ * The scripts pass of a two-pass install (see {@link scriptsFreeInstall}) one writer at a time
+ * (spine §5 reading 253), once its scripts-free pass ran, so what each lifecycle script wrote is
+ * attributed to it ({@link compareInstall} after each step): each pending dependency on its own
+ * (`pnpm rebuild --recursive <name>`, `npm rebuild <name>`; the package manager's own policy,
+ * such as pnpm's `onlyBuiltDependencies`, still decides whether it builds), then each of the
+ * checkout's own projects, one lifecycle script at a time (`pnpm run` with pre/post scripts off,
+ * `npm run --ignore-scripts`). The dependencies come from what the install left: pnpm's
+ * `pendingBuilds` in `node_modules/.modules.yaml`, or, for npm, every installed package of
+ * `tree` with an install script. `null` when VTC knows no per-package form (Bun, an npm install
+ * that moves or picks workspaces, a pnpm install that left no `pendingBuilds`): the runner then
+ * runs the whole second pass and allows no package to rebuild itself.
+ */
+export const perPackageBuild = (
+  argv: readonly string[],
+  rootIn: string,
+  cwd: string,
+  tree: WorkspaceTree,
+): BuildStep[] | null => {
+  const first = argv[0];
+  const passes = scriptsFreeInstall(argv);
+  if (first === undefined || passes === null || passes.build === null) return null;
+  const root = realOrSelf(rootIn);
+  const steps: BuildStep[] = [];
+  switch (command(first)) {
+    case "pnpm": {
+      const pnpm = pnpmInstall(argv);
+      if (pnpm === null) return null;
+      const dirValue = pnpm.dirFlags.at(-1);
+      const dirArg = dirValue ?? ".";
+      if (dirValue !== undefined && isAbsolute(dirValue)) return null;
+      const installDir = within(root, cwd, dirArg);
+      if (installDir === null) return null;
+      const yaml = readSmall(
+        root,
+        join(root, installDir, "node_modules", ".modules.yaml"),
+        16 * 1024 * 1024,
+      );
+      const pending = yaml === null ? null : pendingBuilds(yaml);
+      if (pending === null) return null;
+      const names = new Set<string>();
+      const projects = new Set<string>();
+      for (const entry of pending) {
+        const project = within(root, installDir, entry);
+        const info = project === null ? undefined : tree.packages.get(project);
+        if (project !== null && info !== undefined && !info.installed) {
+          projects.add(project);
+          continue;
+        }
+        const name = depPathName(entry);
+        if (name === null) return null;
+        names.add(name);
+      }
+      for (const name of [...names].sort()) {
+        steps.push({
+          argv: [first, ...pnpm.dirFlags, "rebuild", "--recursive", name],
+          writer: { dependency: name },
+        });
+      }
+      for (const project of [...projects].sort()) {
+        for (const script of declaredScripts(root, project, PNPM_PROJECT_SCRIPTS)) {
+          steps.push({
+            argv: [
+              first,
+              "--config.enable-pre-post-scripts=false",
+              "--dir",
+              relativeDir(cwd, project),
+              "run",
+              script,
+            ],
+            writer: { project },
+          });
+        }
+      }
+      return steps;
+    }
+    case "npm": {
+      if (
+        argv.some((token) =>
+          NPM_MOVING.includes(token.includes("=") ? (token.split("=")[0] ?? "") : token),
+        )
+      ) {
+        return null;
+      }
+      const installDir = within(root, cwd, ".");
+      if (installDir === null) return null;
+      const under = (dir: string): string | null =>
+        installDir === ""
+          ? dir
+          : dir === installDir
+            ? ""
+            : dir.startsWith(`${installDir}/`)
+              ? dir.slice(installDir.length + 1)
+              : null;
+      const names = new Set<string>();
+      for (const [dir, info] of tree.packages) {
+        if (info.installed && info.scripts.length > 0 && info.name !== null && under(dir) !== null)
+          names.add(info.name);
+      }
+      // never a word npm would take for a flag
+      if ([...names].some((name) => name.startsWith("-"))) return null;
+      for (const name of [...names].sort()) {
+        steps.push({ argv: [first, "rebuild", name], writer: { dependency: name } });
+      }
+      const manifest = readSmall(root, join(root, installDir, "package.json"));
+      let globs: string[] = [];
+      try {
+        const declared =
+          manifest === null
+            ? undefined
+            : (JSON.parse(manifest) as { workspaces?: unknown }).workspaces;
+        const list = Array.isArray(declared)
+          ? declared
+          : declared !== null && typeof declared === "object"
+            ? (declared as { packages?: unknown }).packages
+            : undefined;
+        if (Array.isArray(list)) globs = list.filter((g): g is string => typeof g === "string");
+      } catch {
+        // no workspaces
+      }
+      const workspaces = [...tree.packages]
+        .filter(([dir, info]) => {
+          const rel = under(dir);
+          return (
+            !info.installed &&
+            rel !== null &&
+            rel !== "" &&
+            globs.some((g) => globMatch(g.replace(/^\.\//, "").replace(/\/$/, ""), rel))
+          );
+        })
+        .map(([dir]) => dir)
+        .sort();
+      for (const project of workspaces) {
+        for (const script of declaredScripts(root, project, NPM_WORKSPACE_SCRIPTS)) {
+          steps.push({
+            argv: [first, "--prefix", relativeDir(cwd, project), "run", "--ignore-scripts", script],
+            writer: { project },
+          });
+        }
+      }
+      for (const script of declaredScripts(root, installDir, NPM_ROOT_SCRIPTS)) {
+        steps.push({
+          argv: [first, "run", "--ignore-scripts", script],
+          writer: { project: installDir },
+        });
+      }
+      return steps;
+    }
+    default:
+      return null;
+  }
 };

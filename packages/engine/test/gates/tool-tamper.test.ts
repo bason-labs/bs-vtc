@@ -4,6 +4,7 @@
  * each check gate's `project` tool, the install with its scripts, the re-hash just before the
  * gate, and a pinned tool run from the store.
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,12 +14,21 @@ import { ScannerUnavailableError } from "../../src/gates/index.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
 import { commitAll, config, fakeScanners, harness, leaksGate, NODE, TOOLS } from "./fixture.js";
 
-afterEach(cleanupDirs);
+/** Repositories a test locked a directory in, made removable again first. */
+const unlock: string[] = [];
+
+afterEach(() => {
+  for (const dir of unlock.splice(0)) execFileSync("chmod", ["-R", "u+rwx", dir]);
+  cleanupDirs();
+});
 
 /**
  * A fake npm: `ci` installs the committed `vendor/lint.mjs` as the package `lint-tool` (with a
- * `.bin` link) and, unless `--ignore-scripts`, runs the committed `postinstall.mjs` like a
- * dependency's lifecycle script would.
+ * `.bin` link) and, when the checkout has a `postinstall.mjs`, the dependency `postinstall-dep`
+ * whose postinstall runs it from the checkout's root; unless `--ignore-scripts`, it then runs
+ * every installed package's install scripts. `rebuild <name>` runs the install scripts of the
+ * installed packages named `<name>` in their own directory, as npm does; `run` runs a package
+ * script (`--ignore-scripts`: without its pre and post scripts).
  */
 const FAKE_NPM = `#!/usr/bin/env node
 const { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
@@ -30,6 +40,40 @@ const prefix = args.indexOf("--prefix");
 if (prefix >= 0) {
   process.chdir(args[prefix + 1]);
   args = [...args.slice(0, prefix), ...args.slice(prefix + 2)];
+}
+const ignoring = args.includes("--ignore-scripts");
+args = args.filter((a) => a !== "--ignore-scripts");
+/** Runs the install scripts of the installed package in \`dir\` there, as npm does. */
+const lifecycle = (dir) => {
+  const scripts = JSON.parse(readFileSync(dir + "/package.json", "utf8")).scripts ?? {};
+  for (const name of ["preinstall", "install", "postinstall"]) {
+    if (typeof scripts[name] !== "string") continue;
+    const r = spawnSync("/bin/sh", ["-c", scripts[name]], { stdio: "inherit", cwd: dir });
+    if (r.status !== 0) process.exit(r.status ?? 1);
+  }
+};
+/** Every installed package directory under node_modules (scoped ones included). */
+const installed = () => {
+  const { readdirSync, lstatSync } = require("node:fs");
+  const found = [];
+  const walk = (modules) => {
+    if (!existsSync(modules)) return;
+    for (const name of readdirSync(modules)) {
+      if (name.startsWith(".")) continue;
+      const dir = modules + "/" + name;
+      if (lstatSync(dir).isSymbolicLink()) continue;
+      if (name.startsWith("@")) { walk(dir); continue; }
+      if (existsSync(dir + "/package.json")) { found.push(dir); walk(dir + "/node_modules"); }
+    }
+  };
+  walk("node_modules");
+  return found;
+};
+if (args[0] === "rebuild") {
+  for (const dir of installed()) {
+    if (JSON.parse(readFileSync(dir + "/package.json", "utf8")).name === args[1]) lifecycle(dir);
+  }
+  process.exit(0);
 }
 if (args[0] === "run") {
   // \`npm run <script>\`: the script through the npmrc's script-shell (default sh) and with its
@@ -56,6 +100,14 @@ symlinkSync("../lint-tool/lint.mjs", "node_modules/.bin/lint-tool");
 if (existsSync("vendor/node_modules")) cpSync("vendor/node_modules", "node_modules", { recursive: true });
 // a workspace: \`vendor/tree\` copied over the checkout, then \`vendor/links.json\`'s [link, target] bins
 if (existsSync("vendor/tree")) cpSync("vendor/tree", ".", { recursive: true });
+// a package kept in a store under $HOME and linked in (pnpm's global virtual store)
+if (existsSync("vendor/home-store")) {
+  const store = resolvePath(process.env.HOME, "store");
+  cpSync("vendor/home-store", store, { recursive: true });
+  for (const name of require("node:fs").readdirSync("vendor/home-store")) {
+    symlinkSync(resolvePath(store, name), "node_modules/" + name);
+  }
+}
 if (existsSync("vendor/links.json")) {
   for (const [link, target] of JSON.parse(readFileSync("vendor/links.json", "utf8"))) {
     mkdirSync(dirname(link), { recursive: true });
@@ -64,10 +116,11 @@ if (existsSync("vendor/links.json")) {
     chmodSync(resolvePath(dirname(link), target), 0o755);
   }
 }
-if (!args.includes("--ignore-scripts") && existsSync("postinstall.mjs")) {
-  const r = spawnSync(process.execPath, ["postinstall.mjs"], { stdio: "inherit" });
-  process.exit(r.status ?? 1);
+if (existsSync("postinstall.mjs")) {
+  mkdirSync("node_modules/postinstall-dep", { recursive: true });
+  writeFileSync("node_modules/postinstall-dep/package.json", JSON.stringify({ name: "postinstall-dep", scripts: { postinstall: "cd ../.. && node postinstall.mjs" } }));
 }
+if (!ignoring) for (const dir of installed()) lifecycle(dir);
 `;
 
 /** A dependency's install script that swaps the linter for one that never finds anything. */
@@ -351,10 +404,10 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       // the dependency's own install script builds it in its own directory (reading 252)
       "vendor/node_modules/native-dep/package.json": JSON.stringify({
         name: "native-dep",
-        scripts: { postinstall: "node postinstall.mjs" },
+        scripts: { postinstall: "node build.mjs" },
       }),
-      "postinstall.mjs":
-        'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/native-dep/.built", "native");\n',
+      "vendor/node_modules/native-dep/build.mjs":
+        'import { writeFileSync } from "node:fs";\nwriteFileSync(".built", "native");\n',
       "tools/gen.mjs":
         'import { existsSync, mkdirSync, writeFileSync } from "node:fs";\nif (!existsSync("node_modules/native-dep/.built")) process.exit(3);\nmkdirSync("node_modules/.prisma", { recursive: true });\nwriteFileSync("node_modules/.prisma/client.js", "generated");\n',
       "tools/check.mjs":
@@ -370,7 +423,8 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       .filter((a) => a[0] === npm || a.includes("tools/gen.mjs"))
       .slice(0, 3)
       .map((a) => (a[0] === npm ? a.slice(1).join(" ") : "gen"));
-    expect(order).toEqual(["ci --ignore-scripts", "ci", "gen"]);
+    // the dependency's scripts run on their own (spine §5 reading 253)
+    expect(order).toEqual(["ci --ignore-scripts", "rebuild native-dep", "gen"]);
     expect(report.results.map((r) => [r.gate_id, r.status])).toEqual([
       ["install", "pass"],
       ["generate", "pass"],
@@ -1083,14 +1137,17 @@ writeFileSync(join(home, ".bunfig.toml"), "preload = [\\"" + join(home, "p.cjs")
     expect(verify?.home).not.toBe(install?.home);
   });
 
-  /** The fake npm's tree plus esbuild, whose postinstall rebuilds its own binary. */
+  /**
+   * The fake npm's tree plus esbuild, whose own postinstall writes each `[path, text]` (from the
+   * checkout's root): rebuilding its own binary, and whatever else a test has it write.
+   */
   const esbuild = (postinstall: [string, string][]): Record<string, string> => ({
     "vendor/node_modules/esbuild/package.json": pkg("esbuild", {
-      scripts: { postinstall: "node install.js" },
+      scripts: { postinstall: "cd ../.. && node esbuild-install.mjs" },
       bin: { esbuild: "bin/esbuild" },
     }),
     "vendor/node_modules/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
-    "postinstall.mjs": writes(postinstall),
+    "esbuild-install.mjs": writes(postinstall),
   });
 
   it("lets an esbuild-style package rebuild itself in its own directory, with a warning", async () => {
@@ -1148,5 +1205,250 @@ writeFileSync(join(home, ".bunfig.toml"), "preload = [\\"" + join(home, "p.cjs")
     });
     expect(lint.findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
     expect(lintRan(h.argvs)).toBe(false);
+  });
+});
+
+describe("H-14: the round-8 findings (h14-open2, spine §5 reading 253), end to end", () => {
+  const pkg = (name: string, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ name, version: "1.0.0", ...extra });
+
+  /** Package managers and a `go` that fetch into the run's caches, on PATH and allowed. */
+  const tools = (): { bin: string; npm: string; bun: string; go: string } => {
+    const { bin, npm } = fakePackageManagers();
+    // a fake bun: the fake npm's `ci` as `bun install`, `--force` running the scripts again
+    const bun = join(bin, "bun");
+    writeFile(
+      bin,
+      "bun",
+      FAKE_NPM.replace(
+        "let args = process.argv.slice(2);",
+        'let args = process.argv.slice(2).map((a) => (a === "install" ? "ci" : a)).filter((a) => a !== "--force");',
+      ),
+    );
+    chmodSync(bun, 0o755);
+    // a fake go: `go mod download` extracts an assertion library into GOMODCACHE, as Go does
+    const go = join(bin, "go");
+    writeFile(
+      bin,
+      "go",
+      `#!/usr/bin/env node
+const { mkdirSync, writeFileSync } = require("node:fs");
+const dir = process.env.GOMODCACHE + "/example.com/assert@v1.0.0";
+mkdirSync(dir, { recursive: true });
+writeFileSync(dir + "/assert.go", "package assert\\nfunc Equal(a, b any) bool { return a == b }\\n");
+`,
+    );
+    chmodSync(go, 0o755);
+    for (const name of ["make"]) {
+      writeFile(bin, name, "#!/bin/sh\nexit 0\n");
+      chmodSync(join(bin, name), 0o755);
+    }
+    return { bin, npm, bun, go };
+  };
+
+  /** The run of `install` gates then one verify gate (`check`, L0) running `command`. */
+  const run = async (
+    install: string[][],
+    command: string[],
+    files: Record<string, string>,
+  ): Promise<{
+    report: GateReport;
+    h: ReturnType<typeof harness>;
+    t: ReturnType<typeof tools>;
+  }> => {
+    const t = tools();
+    const argv = install.map((a) => a.map((w) => (w in t ? t[w as keyof typeof t] : w)));
+    const h = harness(
+      { "vendor/lint.mjs": LINT, "src/a.ts": "export const a = 1;\n", ...files },
+      config([
+        ...argv.map((a, i) => ({
+          id: `install-${String(i + 1)}`,
+          layer: "L0" as const,
+          phase: "install" as const,
+          command: a,
+        })),
+        { id: "check", layer: "L0", command },
+      ]),
+      {
+        allow: [[NODE], [command[0] ?? ""], ...argv.map((a) => [a[0] ?? ""])],
+        env: { ...process.env, PATH: `${t.bin}:${process.env.PATH ?? ""}` },
+      },
+    );
+    unlock.push(h.repo);
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    return { report: await h.run({ head: commitAll(h.repo), layers: ["L0"] }), h, t };
+  };
+
+  const tamperedRun = (report: GateReport, h: ReturnType<typeof harness>, paths: string[]) => {
+    const check = result(report, "check");
+    expect(check).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { source: "project", tampered: paths },
+    });
+    expect(check.findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
+    expect(h.argvs.some((a) => a[0] === "make")).toBe(false);
+  };
+
+  it.skipIf(process.getuid?.() === 0)(
+    "h14-unlistable-dir-hidden-from-tree: a .bin planted in packages/app and made execute-only, under pnpm --filter app test",
+    async () => {
+      const files = {
+        "package.json": pkg("root"),
+        "packages/app/package.json": pkg("app", { scripts: { test: "vitest run" } }),
+        "vendor/tree/packages/app/node_modules/dep/package.json": pkg("dep"),
+        "postinstall.mjs": `import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+mkdirSync("packages/app/node_modules/.bin", { recursive: true });
+writeFileSync("packages/app/node_modules/.bin/vitest", "#!/bin/sh\\nexit 0\\n", { mode: 0o755 });
+chmodSync("packages/app/node_modules/.bin", 0o111);
+`,
+      };
+      const { report, h } = await run([["npm", "ci"]], ["make", "test"], files);
+      tamperedRun(report, h, ["packages/app/node_modules/.bin"]);
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0)(
+    "h14-unlistable-dir-hidden-from-tree: a directory the baseline cannot list runs no verify gate (infra)",
+    async () => {
+      const files = {
+        "package.json": pkg("root"),
+        "tools/lock.mjs": `import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+mkdirSync("generated/bin", { recursive: true });
+writeFileSync("generated/bin/tool", "#!/bin/sh\\nexit 0\\n", { mode: 0o755 });
+chmodSync("generated/bin", 0o111);
+`,
+      };
+      const { report, h } = await run(
+        [
+          [NODE, "tools/lock.mjs"],
+          ["npm", "ci"],
+        ],
+        ["make", "test"],
+        files,
+      );
+      expect(result(report, "check")).toMatchObject({ status: "error", failure_class: "infra" });
+      expect(h.argvs.some((a) => a[0] === "make")).toBe(false);
+    },
+  );
+
+  /** esbuild with its JavaScript API and a postinstall that rebuilds its own binary. */
+  const ESBUILD = {
+    "vendor/node_modules/esbuild/package.json": pkg("esbuild", {
+      scripts: { postinstall: "node install.mjs" },
+      bin: { esbuild: "bin/esbuild" },
+    }),
+    "vendor/node_modules/esbuild/install.mjs":
+      'import { writeFileSync } from "node:fs";\nwriteFileSync("bin/esbuild", "\\u007fELF native");\n',
+    "vendor/node_modules/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
+    "vendor/node_modules/esbuild/lib/main.js": "export const transform = (code) => code;\n",
+  };
+
+  it("h14-self-rebuild-allowance-not-attributed-to-writer: the root postinstall rewriting esbuild's lib/main.js fails", async () => {
+    const files = {
+      ...ESBUILD,
+      "package.json": pkg("root", { scripts: { postinstall: "node root-postinstall.mjs" } }),
+      "root-postinstall.mjs": `import { writeFileSync } from "node:fs";
+writeFileSync("node_modules/esbuild/lib/main.js", "export const transform = (code) => code.replace(/expect\\(/g, 'void (');\\n");
+`,
+    };
+    const { report, h, t } = await run([["npm", "ci"]], ["make", "test"], files);
+    tamperedRun(report, h, ["node_modules/esbuild/lib/main.js"]);
+    // esbuild's own rebuild is still its own, and each writer ran on its own
+    expect(result(report, "check").tool?.self_rebuilt).toEqual([
+      {
+        package: "node_modules/esbuild",
+        files: ["node_modules/esbuild/bin/esbuild"],
+        file_count: 1,
+      },
+    ]);
+    const npm = h.argvs.filter((a) => a[0] === t.npm).map((a) => a.slice(1).join(" "));
+    expect(npm.slice(0, 3)).toEqual([
+      "ci --ignore-scripts",
+      "rebuild esbuild",
+      "run --ignore-scripts postinstall",
+    ]);
+  });
+
+  it("h14-self-rebuild-allowance-not-attributed-to-writer: esbuild's own rebuild alone passes", async () => {
+    const { report } = await run([["npm", "ci"]], ["make", "test"], {
+      ...ESBUILD,
+      "package.json": pkg("root"),
+    });
+    expect(result(report, "check")).toMatchObject({ status: "pass", tool: { tampered: [] } });
+  });
+
+  it("h14-self-rebuild-allowance-not-attributed-to-writer: Bun's scripts pass, run all at once, allows no rebuild", async () => {
+    const { report, h } = await run([["bun", "install"]], ["make", "test"], {
+      ...ESBUILD,
+      "package.json": pkg("root"),
+    });
+    tamperedRun(report, h, ["node_modules/esbuild/bin/esbuild"]);
+    expect(result(report, "check").tool?.baseline).toBe("after_scripts");
+    expect(result(report, "check").tool?.self_rebuilt).toBeUndefined();
+    expect(evidenceLog(h.repo, "_tool-integrity-install.log")).toMatch(
+      /install gate\(s\) install-1 ran their lifecycle scripts all at once/,
+    );
+  });
+
+  it("h14-shared-download-cache-unhashed: a postinstall patching a Go assertion library in GOMODCACHE fails", async () => {
+    const files = {
+      "package.json": pkg("root"),
+      "postinstall.mjs": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.GOMODCACHE + "/example.com/assert@v1.0.0/assert.go", "package assert\\nfunc Equal(a, b any) bool { return true }\\n");
+`,
+    };
+    const { report, h } = await run(
+      [
+        ["go", "mod", "download"],
+        ["npm", "ci"],
+      ],
+      ["make", "test"],
+      files,
+    );
+    tamperedRun(report, h, [".vtc-deps/go-mod/example.com/assert@v1.0.0/assert.go"]);
+  });
+
+  it("h14-shared-download-cache-unhashed: an untouched module cache passes", async () => {
+    const { report } = await run(
+      [
+        ["go", "mod", "download"],
+        ["npm", "ci"],
+      ],
+      ["make", "test"],
+      { "package.json": pkg("root") },
+    );
+    expect(result(report, "check")).toMatchObject({ status: "pass", tool: { tampered: [] } });
+  });
+
+  it("h14-links-out-of-checkout-not-followed: a package the scripts-free install linked from a store in the install home runs no verify gate", async () => {
+    // the link is in the baseline; a later install script can rewrite what it points to
+    const files = {
+      "package.json": pkg("root"),
+      "vendor/home-store/lint-core/package.json": pkg("lint-core"),
+      "vendor/home-store/lint-core/index.js": "export const check = (v) => v;\n",
+      "postinstall.mjs": `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+writeFileSync(join(process.env.HOME, "store/lint-core/index.js"), "export const check = () => true;\\n");
+`,
+    };
+    const { report, h } = await run([["npm", "ci"]], ["make", "test"], files);
+    expect(result(report, "check")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(h.argvs.some((a) => a[0] === "make")).toBe(false);
+  });
+
+  it("h14-links-out-of-checkout-not-followed: the root postinstall adding a pnpm-workspace.yaml fails", async () => {
+    const files = {
+      "package.json": pkg("root", { scripts: { postinstall: "node root-postinstall.mjs" } }),
+      "root-postinstall.mjs": `import { writeFileSync } from "node:fs";
+writeFileSync("pnpm-workspace.yaml", "enableGlobalVirtualStore: true\\n");
+writeFileSync("dist.js", "built");
+`,
+    };
+    const { report, h } = await run([["npm", "ci"]], ["make", "test"], files);
+    tamperedRun(report, h, ["pnpm-workspace.yaml"]);
+    expect(result(report, "check").tool?.self_rebuilt).toEqual([
+      { package: ".", files: ["dist.js"], file_count: 1 },
+    ]);
   });
 });

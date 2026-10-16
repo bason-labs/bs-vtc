@@ -22,6 +22,7 @@ import {
   gateCommandAllowed,
   GateRunRequestSchema,
   GatesConfigSchema,
+  TOOL_TAMPER_RULE_ID,
   VisualAppSchema,
   type GateReport,
   type GateSandbox,
@@ -112,6 +113,29 @@ export const flakyBetween = (
 ): string[] => {
   const ids = new Set([...first.keys(), ...second.keys()]);
   return [...ids].filter((id) => first.get(id) !== second.get(id)).sort();
+};
+
+/** A code generator's output outside its own package (Prisma's client in `node_modules/.prisma`). */
+const PRISMA_CLIENT = /(^|\/)node_modules\/\.prisma\//;
+
+/**
+ * What `vtc calibrate` says when check gates fail on the base commit as tampering (H-14, spine §5
+ * reading 253(a)): an install script that wrote outside its own package, most often a code
+ * generator, is never allowed, so the project runs the generator as an install gate of its own
+ * after the install instead. `null` when no gate failed so.
+ */
+export const tamperAdvice = (report: GateReport): string | null => {
+  const failed = report.results.filter((r) =>
+    r.findings.some((f) => f.rule_id === TOOL_TAMPER_RULE_ID),
+  );
+  if (failed.length === 0) return null;
+  const paths = [...new Set(failed.flatMap((r) => r.tool?.tampered ?? []))].sort();
+  const shown = `${paths.slice(0, 10).join(", ")}${paths.length > 10 ? ", ..." : ""}`;
+  const gates = failed.map((r) => r.gate_id).join(", ");
+  if (paths.some((p) => PRISMA_CLIENT.test(p))) {
+    return `WARNING: gate(s) ${gates} fail on the base commit as tampering: an install script wrote ${shown} outside its own package. That is Prisma's client generator, which H-14 does not allow in the install's scripts (spine §5 reading 253). Keep its install script from running (pnpm: leave @prisma/client and prisma out of onlyBuiltDependencies; or make the install scripts-free with --ignore-scripts), add the generator as an install gate after the install in .vtc/gates.yml, for example { id: generate, layer: L0, phase: install, command: [npx, prisma, generate] }, and calibrate again`;
+  }
+  return `WARNING: gate(s) ${gates} fail on the base commit as tampering: the install phase changed ${shown}, which no package's own install script may (H-14, spine §5 reading 253). If an install script generates code outside its own package, keep it from running in the install and add the generator as an install gate after the install in .vtc/gates.yml, then calibrate again`;
 };
 
 /**
@@ -419,9 +443,13 @@ export const calibrate = async (
       .filter((g) => g.phase === "install" && scriptsFreeInstall(g.command) === null)
       .map((g) => g.id);
     deps.out(
-      `WARNING: gate(s) ${afterScripts.map((g) => g.id).join(", ")}: the tools were hashed only after install gate(s) ${installs.join(", ")} ran their scripts (VTC knows no scripts-free form for them), so what those scripts wrote before the hash is not detected: runs mark these gates after_scripts and warn on their reports (H-14). Changes after the hash still fail them. An install command VTC can run scripts-free (npm ci, pnpm install, bun install, go mod download, cargo fetch) or a pinned tool removes the warning`,
+      installs.length > 0
+        ? `WARNING: gate(s) ${afterScripts.map((g) => g.id).join(", ")}: the tools were hashed only after install gate(s) ${installs.join(", ")} ran their scripts (VTC knows no scripts-free form for them), so what those scripts wrote before the hash is not detected: runs mark these gates after_scripts and warn on their reports (H-14). Changes after the hash still fail them. An install command VTC can run scripts-free (npm ci, pnpm install, bun install, go mod download, cargo fetch) or a pinned tool removes the warning`
+        : `WARNING: gate(s) ${afterScripts.map((g) => g.id).join(", ")}: the install ran every package's scripts at once (VTC knows no per-package form for that package manager, as for Bun), so no package may rebuild itself and any change outside the package manager's state fails them: runs mark these gates after_scripts and warn on their reports (H-14, spine §5 reading 253). An install VTC can run one package at a time (npm ci, pnpm install) removes the warning`,
     );
   }
+  const advice = tamperAdvice(first);
+  if (advice !== null) deps.out(advice);
   const gates = proposed.gates.filter((g) => !broken.includes(g));
   if (gates.length === 0)
     throw new Error("no gate could run on the base commit; fix the toolchain and calibrate again");

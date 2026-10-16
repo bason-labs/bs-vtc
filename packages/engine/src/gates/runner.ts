@@ -128,11 +128,13 @@ import {
   compareInstall,
   deriveProjectTool,
   hashTool,
+  perPackageBuild,
   scriptsFreeInstall,
   sha256File,
   ToolHashLimitError,
   toolPathsCover,
   workspaceTree,
+  type InstallWriter,
   type SelfRebuilt,
   type ToolSnapshot,
   type WorkspaceTree,
@@ -389,8 +391,10 @@ class Run {
    * with no scripts-free form ran its scripts, before or after that hash), and again when the
    * install phase ended (`afterInstall`). `installChanged` is what its scripts changed that no rule
    * allows (tampering for every verify gate), `selfRebuilt` the packages that rebuilt themselves
-   * (a warning), `mayChange` the checkout's own files those packages built. `problem` when it
-   * could not be hashed, and no verify gate then runs.
+   * (a warning), `mayChange` the checkout's own files those packages built. `steps` is the
+   * snapshot after the last scripts step (spine §5 reading 253: each writer's step is diffed
+   * against the one before it), `unattributed` the install gates whose scripts pass ran whole.
+   * `problem` when it could not be hashed, and no verify gate then runs.
    */
   private workspace:
     | {
@@ -400,6 +404,9 @@ class Run {
         installChanged: readonly string[];
         selfRebuilt: readonly SelfRebuilt[];
         mayChange: ReadonlySet<string>;
+        steps: WorkspaceTree | null;
+        managerState: readonly string[];
+        unattributed: readonly string[];
         /** The latest snapshot before a verify gate: the fast path's source, never the baseline. */
         lastSeen: WorkspaceTree | null;
       }
@@ -646,7 +653,10 @@ class Run {
     ): Promise<boolean> => {
       const result = await this.runGate({ ...gate, command: [...command] }, config, pass);
       const passed = result.status === "pass";
-      if (last || !passed) results.set(gate.id, { ...result, gate_id: gate.id });
+      // a scripts pass with no step to run leaves the scripts-free pass as the gate's result
+      if (last || !passed || !results.has(gate.id)) {
+        results.set(gate.id, { ...result, gate_id: gate.id });
+      }
       return passed;
     };
     const plans = install.map((gate) => ({ gate, passes: scriptsFreeInstall(gate.command) }));
@@ -672,7 +682,31 @@ class Run {
     for (const { gate, passes } of freed) {
       if (failed !== null) break;
       const build = passes?.build ?? null;
-      if (build !== null && !(await run(gate, build, true))) failed = gate.id;
+      if (build === null) continue;
+      const ws = this.workspace !== null && "baseline" in this.workspace ? this.workspace : null;
+      const steps =
+        ws === null
+          ? null
+          : perPackageBuild(
+              gate.command,
+              this.checkoutAbs,
+              gate.cwd ?? "",
+              ws.steps ?? ws.baseline,
+            );
+      if (steps === null) {
+        // no per-package form (Bun): the whole pass, with no package allowed to rebuild itself
+        if (!(await run(gate, build, true))) failed = gate.id;
+        else if (ws !== null) this.attributeStep(null, gate.id);
+        continue;
+      }
+      // spine §5 reading 253: one writer at a time, each diffed against the step before it
+      for (const [i, step] of steps.entries()) {
+        if (!(await run(gate, step.argv, i === steps.length - 1, `scripts-${String(i + 1)}`))) {
+          failed = gate.id;
+          break;
+        }
+        this.attributeStep(step.writer);
+      }
     }
     if (failed === null && install.length > 0) this.workspaceAfterScripts();
     const trailing = plans.slice(end);
@@ -769,14 +803,24 @@ class Run {
     if (verify.some((g) => this.mayHaveProjectTool(g))) {
       try {
         this.workspace = {
-          baseline: workspaceTree(this.checkoutAbs),
+          baseline: workspaceTree(this.checkoutAbs, this.treeOptions()),
           afterScripts,
           afterInstall: null,
           installChanged: [],
           selfRebuilt: [],
           mayChange: new Set(),
+          steps: null,
+          managerState: [],
+          unattributed: [],
           lastSeen: null,
         };
+        const refused = this.workspace.baseline.refused;
+        if (refused.length > 0) {
+          // spine §5 reading 253: what the baseline cannot vouch for fails closed, as infra
+          this.workspace = {
+            problem: `the checkout could not be hashed: ${String(refused.length)} path(s) could not be listed or read, or link out of the checkout into a directory gate commands can write: ${refused.slice(0, 20).join(", ")}${refused.length > 20 ? ", ..." : ""}`,
+          };
+        }
       } catch (error) {
         this.workspace = {
           problem: `the checkout could not be hashed: ${errorText(error)}`,
@@ -790,48 +834,88 @@ class Run {
     }
   }
 
+  /** Where gate commands can write and the download caches to hash (spine §5 reading 253). */
+  private treeOptions(): Parameters<typeof workspaceTree>[1] {
+    return this.jail === null
+      ? {}
+      : { writable: this.jail.writableRoots(), caches: this.jail.downloadCaches() };
+  }
+
   /**
-   * The checkout once the two-pass installs' scripts ran (H-14, spine §5 reading 252), hashed from
-   * content and diffed against the baseline (`compareInstall`): what no rule allows fails every
-   * verify gate as tampering, the packages that rebuilt themselves are a warning, and this
-   * snapshot is what each verify gate's comparison starts from.
+   * After one step of an install's scripts pass (spine §5 reading 253): the checkout hashed from
+   * content and diffed against the snapshot before the step (`compareInstall`), allowing only what
+   * `writer` may change; `null` allows nothing but the package manager's state, and, for the
+   * scripts pass of install gate `whole` run all at once, marks every verify gate
+   * `after_scripts`. What no rule allows is tampering for every verify gate.
+   */
+  private attributeStep(writer: InstallWriter, whole?: string): void {
+    const ws = this.workspace;
+    if (ws === null || "problem" in ws) return;
+    const before = ws.steps ?? ws.baseline;
+    try {
+      const after = workspaceTree(this.checkoutAbs, this.treeOptions());
+      const compared = compareInstall(before, after, this.protectedPath, writer);
+      ws.steps = after;
+      ws.installChanged = [...new Set([...ws.installChanged, ...compared.tampered])].sort();
+      const merged = new Map(ws.selfRebuilt.map((r) => [r.package, [...r.files]]));
+      for (const r of compared.selfRebuilt) {
+        merged.set(r.package, [...new Set([...(merged.get(r.package) ?? []), ...r.files])]);
+      }
+      ws.selfRebuilt = [...merged]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([pkg, files]) => ({ package: pkg, files }));
+      ws.managerState = [...new Set([...ws.managerState, ...compared.managerState])].sort();
+      if (whole !== undefined) {
+        ws.afterScripts = true;
+        ws.unattributed = [...ws.unattributed, whole];
+      }
+    } catch (error) {
+      if (error instanceof ToolHashLimitError) {
+        ws.installChanged = [...new Set([...ws.installChanged, error.path])].sort();
+        return;
+      }
+      this.workspace = {
+        problem: `the checkout could not be hashed after the install phase's scripts: ${errorText(error)}`,
+      };
+    }
+  }
+
+  /**
+   * The checkout once the two-pass installs' scripts ran (H-14, spine §5 readings 252 and 253):
+   * each step was diffed as it ran (`attributeStep`); when none ran, the checkout is hashed from
+   * content and diffed against the baseline with nothing allowed. The packages that rebuilt
+   * themselves are a warning, and this snapshot is what each verify gate's comparison starts from.
    */
   private workspaceAfterScripts(): void {
     const ws = this.workspace;
     if (ws === null || "problem" in ws) return;
-    try {
-      const after = workspaceTree(this.checkoutAbs);
-      const compared = compareInstall(ws.baseline, after, this.protectedPath);
-      ws.afterInstall = after;
-      ws.installChanged = compared.tampered;
-      ws.selfRebuilt = compared.selfRebuilt;
-      ws.mayChange = new Set(
-        compared.selfRebuilt
-          .filter((r) => !r.package.split("/").includes("node_modules"))
-          .flatMap((r) => r.files),
+    // no scripts step ran: still diffed from content, with nothing allowed
+    if (ws.steps === null) this.attributeStep(null);
+    const done = this.workspace;
+    if (done === null || "problem" in done) return;
+    done.afterInstall = done.steps ?? done.baseline;
+    done.mayChange = new Set(
+      done.selfRebuilt
+        .filter((r) => !r.package.split("/").includes("node_modules"))
+        .flatMap((r) => r.files),
+    );
+    const notes: string[] = [];
+    if (done.selfRebuilt.length > 0) {
+      notes.push(
+        `packages whose own install scripts changed files in their own directory during the install phase (allowed, shown as a warning on each verify gate):\n${done.selfRebuilt.map((r) => `${r.package}: ${r.files.join(", ")}`).join("\n")}`,
       );
-      const notes: string[] = [];
-      if (compared.selfRebuilt.length > 0) {
-        notes.push(
-          `packages that rebuilt themselves in their own directory during the install phase (allowed, shown as a warning on each verify gate):\n${compared.selfRebuilt.map((r) => `${r.package}: ${r.files.join(", ")}`).join("\n")}`,
-        );
-      }
-      if (compared.managerState.length > 0) {
-        notes.push(
-          `package-manager state the install phase rewrote (allowed): ${compared.managerState.join(", ")}`,
-        );
-      }
-      if (notes.length > 0) this.note(`${TOOL_INTEGRITY_NOTE}-install`, notes.join("\n"));
-    } catch (error) {
-      if (error instanceof ToolHashLimitError) {
-        ws.afterInstall = ws.baseline;
-        ws.installChanged = [error.path];
-        return;
-      }
-      this.workspace = {
-        problem: `the checkout could not be hashed after the install phase: ${errorText(error)}`,
-      };
     }
+    if (done.unattributed.length > 0) {
+      notes.push(
+        `install gate(s) ${done.unattributed.join(", ")} ran their lifecycle scripts all at once (VTC knows no per-package form for that package manager), so no package was allowed to rebuild itself: any change outside the package manager's state is tampering, and the verify gates are marked after_scripts (spine §5 reading 253)`,
+      );
+    }
+    if (done.managerState.length > 0) {
+      notes.push(
+        `package-manager state the install phase rewrote (allowed): ${done.managerState.join(", ")}`,
+      );
+    }
+    if (notes.length > 0) this.note(`${TOOL_INTEGRITY_NOTE}-install`, notes.join("\n"));
   }
 
   /**
@@ -844,7 +928,7 @@ class Run {
     if (ws === null || "problem" in ws) return;
     ws.afterScripts = true;
     try {
-      ws.afterInstall = workspaceTree(this.checkoutAbs);
+      ws.afterInstall = workspaceTree(this.checkoutAbs, this.treeOptions());
     } catch (error) {
       if (error instanceof ToolHashLimitError) {
         ws.installChanged = [...ws.installChanged, error.path];
@@ -870,7 +954,10 @@ class Run {
     if ("problem" in ws) return { refused: `not run: ${ws.problem}` };
     const from = ws.afterInstall ?? ws.baseline;
     try {
-      const now = workspaceTree(this.checkoutAbs, { previous: ws.lastSeen ?? from });
+      const now = workspaceTree(this.checkoutAbs, {
+        ...this.treeOptions(),
+        previous: ws.lastSeen ?? from,
+      });
       ws.lastSeen = now;
       const hidden = new Set(this.hiddenFiles);
       const changed = compareGate(from, now, {
@@ -1478,7 +1565,18 @@ class Run {
   private async runGate(gate: Gate, config: GatesConfig, pass?: string): Promise<GateResult> {
     const result = await this.runGateOnce(gate, config, pass);
     const warnings: string[] = [];
-    if (result.tool?.baseline === "after_scripts") {
+    const ws = this.workspace !== null && "baseline" in this.workspace ? this.workspace : null;
+    const whole = ws?.unattributed ?? [];
+    if (result.tool?.baseline === "after_scripts" && whole.length > 0) {
+      // reading 253: a scripts pass run all at once allows no package to rebuild itself
+      warnings.push(
+        `WARNING: install gate(s) ${whole.join(", ")} ran their lifecycle scripts all at once (VTC knows no per-package form for that package manager, as for Bun), so no write could be told to come from the package that made it: no package was allowed to rebuild itself, and any change outside the package manager's state fails the gate (H-14, baseline after_scripts). An install VTC can run one package at a time (npm ci, pnpm install) removes this warning.`,
+      );
+    }
+    if (
+      result.tool?.baseline === "after_scripts" &&
+      (this.unverifiedInstalls.length > 0 || whole.length === 0)
+    ) {
       // reading 251: allowed, with a warning on the gate's own report
       warnings.push(
         `WARNING: this gate's checkout was hashed only after install gate(s) ${this.unverifiedInstalls.join(", ") || "with no scripts-free form"} ran their lifecycle scripts (VTC knows no scripts-free form for them), so what those scripts wrote is not told apart from tampering (H-14, baseline after_scripts). Changes after the hash are still compared, across the whole checkout. An install VTC can run scripts-free (npm ci, pnpm install, bun install, go mod download, cargo fetch) removes this warning.`,
