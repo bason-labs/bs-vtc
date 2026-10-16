@@ -88,13 +88,11 @@ export type AutoWorkItem =
       readonly kind: AutoKind;
       readonly fingerprint: AutoFingerprint;
       readonly minOccurrences: number;
-      /** Without occurrence counts: the module adds them from the ledger at send time. */
-      readonly facts: Omit<UpstreamFacts, "occurrences" | "firstSeen" | "lastSeen">;
       /**
-       * A D-cd improvement's subject as the fact named it; the issue renders it only through its
-       * kind's pattern (`projectSubject`, D-cs), never as given.
+       * Without occurrence counts: the module adds them from the ledger at send time. A D-cd
+       * improvement's subject is `facts.subject`, which leaves only as the report's typed subject.
        */
-      readonly subject?: string | undefined;
+      readonly facts: Omit<UpstreamFacts, "occurrences" | "firstSeen" | "lastSeen">;
       readonly at: string;
     }
   | {
@@ -238,8 +236,15 @@ export const evaluateTrigger = (
         kind: fact.kind,
         fingerprint,
         minOccurrences: 1,
-        facts: { ...base, kind: fact.kind, fingerprint, role: fact.role, metrics: fact.metrics },
-        subject: fact.subject,
+        // the subject reaches VTC's repo only as the report's typed subject (reading 247(8))
+        facts: {
+          ...base,
+          kind: fact.kind,
+          fingerprint,
+          role: fact.role,
+          subject: fact.subject,
+          metrics: fact.metrics,
+        },
         at: fact.at,
       };
     }

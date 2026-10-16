@@ -11,8 +11,10 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
   AUTO_LABELS,
+  DESIGN_FLOWS_PATH,
   LOOKBACK_REPO,
   ROUTING_FACT_METRICS,
+  ROUTING_REPLAY_VERDICT_CODES,
   TIER_ORDER,
   RoutingScorecardSchema,
   autoBranchName,
@@ -21,6 +23,7 @@ import {
   renderAutoMarker,
   redactSecrets,
   UPSTREAM_EVENT_PAYLOAD_SCHEMAS,
+  upstreamSubjectKey,
   type AssetBundle,
   type AutoFingerprint,
   type AutoKind,
@@ -63,6 +66,7 @@ import {
   planStalePrs,
   QUIET_CLOSE_MARKER,
 } from "./decisions.js";
+import { changedFlow } from "./evidence/flow.js";
 import { createFfmpegCommand, type FfmpegCommand } from "./evidence/gif.js";
 import type { EvidencePlanInput } from "./evidence/plan.js";
 import { prepareEvidence } from "./evidence/pipeline.js";
@@ -107,14 +111,18 @@ import {
   buildRoutingPr,
   routingMoveOfBody,
   routingMoveOfMetrics,
+  routingReplayOfBody,
+  routingReplayOfMetrics,
+  routingReplayBacksMove,
+  type RoutingReplaySource,
   type RoutingMove,
+  type RoutingReplay,
 } from "./routing-pr.js";
 import {
-  projectSubject,
+  assertProducerCell,
   ROUTING_TABLE_FILE,
-  routingSubject,
   routingSubjectOfBody,
-  type UpstreamSubject,
+  type RoutingSubject,
 } from "./subject.js";
 import {
   evaluateTrigger,
@@ -232,11 +240,20 @@ export type AutomationOutcome =
  * `pushedHead`, `base` is the default-branch commit the run's branch was cut from (the run's
  * recorded start commit); a UI PR's before/after renders it as the "before" (D-ct). Without it
  * the module does not guess (the default branch may have moved since the cut), so no before/after
- * is rendered and the evidence is partial (`capture_failed`).
+ * is rendered and the evidence is partial (`capture_failed`). `screens` are the `screens.yaml` ids
+ * the run's tasks touched, when the caller knows them: the before/after renders those screens, and
+ * a flow that passes one is scripted when no flow's globs match a changed path (reading 247(7)).
+ * The daemon's bridge (`daemon/upstream-bridge.ts`, engine-core) does not set `screens` yet, so
+ * until it does both the screen restriction and the screen fallback are inert in production and a
+ * flow is selected by changed paths alone.
  */
 export type PrSource =
   | { readonly changes: readonly PlumbingChange[]; readonly message: string }
-  | { readonly pushedHead: GitSha; readonly base?: GitSha | undefined };
+  | {
+      readonly pushedHead: GitSha;
+      readonly base?: GitSha | undefined;
+      readonly screens?: readonly string[] | undefined;
+    };
 
 export interface AutoPrInput {
   readonly target: "upstream" | "project";
@@ -434,6 +451,25 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return fetch !== undefined && message !== undefined ? { fetch, message } : undefined;
   };
 
+  /**
+   * D-ct (spine §5 reading 247(7)): the flow an automatic UI PR records, chosen from the head's
+   * `.vtc/design/flows.yaml` by the paths the head changes against the run's cut point; none
+   * without a git reader, a flows file or a match.
+   */
+  const flowOfChange = (
+    repoRoot: string,
+    change: { readonly base: GitSha; readonly head: GitSha; readonly screens?: readonly string[] },
+  ) => {
+    const reader = deps.gitOps?.(repoRoot);
+    if (reader === undefined) return Promise.resolve(undefined);
+    const plumbing = deps.automation.plumbing?.({ repoRoot });
+    return changedFlow({
+      readFlowsFile: () => reader.readFileAtCommit(change.head, DESIGN_FLOWS_PATH),
+      changedPaths: () => plumbing?.changedPaths?.(change.base, change.head) ?? Promise.resolve([]),
+      screens: change.screens,
+    });
+  };
+
   const issues = deps.automation.issues ?? gh.issues;
   const pullRequests = deps.automation.pullRequests ?? gh.pullRequests;
   const defaultBranch = deps.defaultBranch ?? gh.defaultBranch;
@@ -593,15 +629,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     const at = item.at;
     const occurrences = Math.max(1, record?.count ?? 1);
     if (item.target === "upstream") {
+      // D-cs, D-cn, reading 247(8): a tool, capability or config subject is projected into the
+      // report's typed subject through its kind's pattern only, and rendered from there
       const report = projectUpstreamReport({
         ...item.facts,
         occurrences,
         firstSeen: record?.firstSeen ?? at,
         lastSeen: record?.lastSeen ?? at,
       });
-      // D-cs, D-cn: a tool, capability or config subject, through its kind's pattern only
-      const subject = projectSubject(item.kind, item.subject);
-      const slots = upstreamIssueSlots(report, { regressionOf, subject });
+      // D-cu (reading 241): only a producer's cell is a routing-table change
+      if (report.subject?.kind === "routing") assertProducerCell(report.subject);
+      const slots = upstreamIssueSlots(report, { regressionOf });
       const title = slots.title ?? renderTitle(item.kind, item.kind);
       const body = renderBody(template, slots);
       assertUpstreamSafe(report, [title, body], privacyCheck(ctx));
@@ -876,23 +914,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     defer: (task: () => Promise<unknown>) => void,
   ): Promise<void> => {
     if (!fixableItem(item)) return;
-    // D-cn (reading 233): a routing-table change is the module's own PR, never a run
-    if (item.target === "upstream" && item.kind === "config") {
-      const subject = routingSubject(item.subject ?? "");
-      if (subject !== null) {
-        const move = routingMoveOfMetrics(item.facts.metrics);
-        const report = rendered.report;
-        // after the raise lets go of the repo lock, which opening the PR takes itself
-        if (move !== null && report !== undefined)
-          defer(() =>
-            answerRouting(
-              repo,
-              { subject, move, fingerprint: item.fingerprint, issue: number, report },
-              ctx,
-            ),
-          );
-        return;
-      }
+    // D-cn (reading 233): a routing-table change is the module's own PR, never a run; its cell
+    // is the report's typed subject (reading 247(8))
+    const report = rendered.report;
+    if (item.target === "upstream" && report?.subject?.kind === "routing") {
+      const move = routingMoveOfMetrics(report.metrics);
+      // after the raise lets go of the repo lock, which opening the PR takes itself
+      if (move !== null)
+        defer(() =>
+          answerRouting(repo, { move, fingerprint: item.fingerprint, issue: number, report }, ctx),
+        );
+      return;
     }
     if (!mayStartRun(item.target, ctx)) return;
     const spec =
@@ -933,11 +965,15 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
     return settings.upstream && deps.automation.upstream.share;
   };
 
-  /** The upstream report of a routing PR whose issue another installation opened (VTC-side only). */
+  /**
+   * The upstream report of a routing PR whose issue another installation opened (VTC-side only):
+   * the cell as its typed subject, the move, and the graded replay the issue cites, if any.
+   */
   const routingReport = (
     fingerprint: AutoFingerprint,
-    cell: Extract<UpstreamSubject, { kind: "routing" }>,
+    cell: RoutingSubject,
     move: RoutingMove,
+    replay: RoutingReplay | null,
   ): UpstreamReport => {
     const at = now().toISOString();
     return projectUpstreamReport({
@@ -945,10 +981,17 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       fingerprint,
       vtcVersion: deps.vtcVersion,
       role: cell.role,
+      subject: upstreamSubjectKey(cell),
       metrics: {
         [ROUTING_FACT_METRICS.fromTier]: TIER_ORDER.indexOf(move.from),
         [ROUTING_FACT_METRICS.toTier]: TIER_ORDER.indexOf(move.to),
         [ROUTING_FACT_METRICS.shared]: move.scope === "shared" ? 1 : 0,
+        ...(replay === null
+          ? {}
+          : {
+              [ROUTING_FACT_METRICS.replayVerdict]: ROUTING_REPLAY_VERDICT_CODES[replay.verdict],
+              [ROUTING_FACT_METRICS.replayTrials]: replay.trials,
+            }),
       },
       occurrences: 1,
       firstSeen: at,
@@ -983,11 +1026,16 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
    */
   const openRoutingPr = (
     input: {
-      readonly subject: Extract<UpstreamSubject, { kind: "routing" }>;
       readonly move: RoutingMove;
       readonly fingerprint: AutoFingerprint;
       readonly issue: number;
+      /** Its typed `subject` is the cell; the body is rendered from it alone (reading 247(8)). */
       readonly report: UpstreamReport;
+      /**
+       * Where the report's graded replay comes from (default `fact`): `issue` when it was read
+       * from another installation's routing issue as listed, which the PR only cites.
+       */
+      readonly replaySource?: RoutingReplaySource | undefined;
     },
     ctx: ProjectContext,
   ): Promise<AutomationOutcome> =>
@@ -995,6 +1043,23 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       { target: "upstream", kind: "config", fingerprint: input.fingerprint },
       ctx,
       async () => {
+        const subject = input.report.subject;
+        if (subject?.kind !== "routing")
+          throw new AutomationSkip("privacy", "a routing PR needs its report's routing cell");
+        // D-cu (reading 241): only a producer's cell moves on the routing table
+        assertProducerCell(subject);
+        const replay = routingReplayOfMetrics(input.report.metrics);
+        // reading 247(6): Lookback raises a routing fact only after a replay that backs the move,
+        // so an issue as listed that cites one which does not is not the module's to answer
+        if (
+          input.replaySource === "issue" &&
+          replay !== null &&
+          !routingReplayBacksMove(replay, input.move)
+        )
+          throw new AutomationSkip(
+            "out_of_scope",
+            "the routing issue cites a graded tier replay that does not back its move",
+          );
         gate("upstream", "prs", ctx);
         const checkout = deps.automation.upstream.checkout;
         const gitOps = deps.gitOps;
@@ -1018,11 +1083,14 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         const bytes = await gitOps(checkout).readFileAtCommit(baseSha, ROUTING_TABLE_FILE);
         if (bytes === undefined) throw new Error(`${ROUTING_TABLE_FILE} is missing on ${base}`);
         const parts = buildRoutingPr({
-          subject: input.subject,
+          subject,
           move: input.move,
           source: new TextDecoder().decode(bytes),
           vtcVersion: deps.vtcVersion,
           issue: input.issue,
+          // reading 247(6): the graded tier replay, when the fact (or the issue) carries one
+          replay,
+          replaySource: input.replaySource,
         });
         return openPullRequest(
           {
@@ -1083,15 +1151,15 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
         if (
           routingPrs &&
           move !== null &&
-          autoFingerprint({ kind: "config", subject: cell.key }) === marker.fp
+          autoFingerprint({ kind: "config", subject: upstreamSubjectKey(cell) }) === marker.fp
         )
           await openRoutingPr(
             {
-              subject: cell,
               move,
               fingerprint: marker.fp,
               issue: issue.number,
-              report: routingReport(marker.fp, cell, move),
+              report: routingReport(marker.fp, cell, move, routingReplayOfBody(issue.body)),
+              replaySource: "issue",
             },
             ctx,
           );
@@ -1304,17 +1372,24 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       // A project's `automation.evidence` settings apply to its own repo's PRs.
       const projectEvidence = upstream ? undefined : ctx.evidence;
       const listedIssues = await issues.listAutomatic(repo);
-      // D-cn: a routing-table change (its issue names a routing cell) charts the routing
-      // scorecard. The body is as listed, which anyone may edit, so its cell counts only when it
-      // is the very subject the PR's fingerprint was made from.
-      const bodyCell =
-        input.kind === "config" ? routingSubjectOfBody(ownIssue(listedIssues, input)?.body) : null;
-      const cell =
-        bodyCell !== null &&
-        autoFingerprint({ kind: "config", subject: bodyCell.key }) === input.fingerprint
-          ? bodyCell
+      // D-cn: a routing-table change charts the routing scorecard. Its cell is the report's typed
+      // subject (reading 247(8)), else the one its issue names; the body is as listed, which
+      // anyone may edit, so either counts only when it is the very subject the PR's fingerprint
+      // was made from.
+      const ownCell = (candidate: RoutingSubject | null): RoutingSubject | null =>
+        candidate !== null &&
+        autoFingerprint({ kind: "config", subject: upstreamSubjectKey(candidate) }) ===
+          input.fingerprint
+          ? candidate
           : null;
+      const cell =
+        input.kind !== "config"
+          ? null
+          : (ownCell(report?.subject?.kind === "routing" ? report.subject : null) ??
+            ownCell(routingSubjectOfBody(ownIssue(listedIssues, input)?.body)));
       const routing = cell !== null;
+      // D-cu (reading 241): only a producer's cell moves on the routing table
+      if (cell !== null) assertProducerCell(cell);
       // the caller's VTC-side card, else the run's own checkout's: only one that holds the cell
       // (a project's Lookback may have raised it, so bs-vtc's own card can lack it)
       const routingCard =
@@ -1444,12 +1519,25 @@ export const createUpstream = (deps: UpstreamDeps): Upstream => {
       // D-ct: an automatic run's UI PR (Final Review of an automatic run only) has the gate
       // runner render its base and its head. The base is the commit the run's branch was cut
       // from, as the caller recorded it; never the default branch's tip, which may have moved.
+      const pushed = "pushedHead" in input.source ? input.source : undefined;
+      const cut = pushed?.base ?? null;
       const beforeAfter =
-        "pushedHead" in input.source && plan.change === "ui" && !plan.upstreamSafe
+        pushed !== undefined && plan.change === "ui" && !plan.upstreamSafe
           ? {
               repoRoot,
-              base: input.source.base ?? null,
-              head: input.source.pushedHead,
+              base: cut,
+              head: pushed.pushedHead,
+              ...(pushed.screens === undefined ? {} : { screens: pushed.screens }),
+              // reading 247(7): the flow both sides script, from the head's flows file
+              ...(cut === null
+                ? {}
+                : {
+                    flow: await flowOfChange(repoRoot, {
+                      base: cut,
+                      head: pushed.pushedHead,
+                      ...(pushed.screens === undefined ? {} : { screens: pushed.screens }),
+                    }),
+                  }),
             }
           : undefined;
       const hosting = deps.automation.hosting;
