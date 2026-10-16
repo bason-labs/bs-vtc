@@ -3,7 +3,7 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
-## Unreleased
+## v0.2.1 (2026-10-17)
 
 - **Codex roles know what to return.** A role run by `codex exec` now gets its whole compiled
   instructions (its contract and how to return its result), not only its role text, and a
@@ -34,8 +34,8 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   many entries each list adds. `--verbose` on either prints every entry.
 - **`vtc status` with no budget yet.** Before a run has any feature budget (a quick fix's first
   steps) it shows "Spent: $2.59 (no cap)" instead of "Budget: $2.59 of $0.00".
-- **Plugin version.** The Claude Code and Codex plugins now carry the vtc version (0.2.0, not
-  0.1.0), and `vtc install codex` prints it.
+- **Plugin version.** The Claude Code and Codex plugins now carry the vtc version (they said
+  0.1.0 before), and `vtc install codex` prints it.
 - **Gitignored VTC settings are flagged.** `vtc doctor` and `vtc init` warn when `.gitignore`
   keeps `.vtc/project.yaml` or `.vtc/gates.yml` out of git (for example a `.vtc/` line), name
   the line, and say to ignore only `.vtc/state/` instead: a run starts only on the committed
