@@ -14,7 +14,7 @@
  */
 import { createInterface } from "node:readline";
 import { gates, git } from "@vtc/engine";
-import { gatesAllowUnsandboxed } from "@vtc/shared";
+import { gatesAllowToolsHashedAfterScripts, gatesAllowUnsandboxed } from "@vtc/shared";
 import { readUserConfig } from "../user-config.js";
 import type { CommandSpec } from "./types.js";
 
@@ -77,6 +77,8 @@ export const command: CommandSpec = {
           out: ctx.io.out,
           confirm: askTerminal,
           allowUnsandboxed: userConfig.ok && gatesAllowUnsandboxed(userConfig.config),
+          allowToolsHashedAfterScripts:
+            userConfig.ok && gatesAllowToolsHashedAfterScripts(userConfig.config),
         },
         { dryRun: args.includes("--dry-run") },
       );

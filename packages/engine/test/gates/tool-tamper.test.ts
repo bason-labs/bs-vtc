@@ -24,6 +24,18 @@ const FAKE_NPM = `#!/usr/bin/env node
 const { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
+if (args[0] === "run") {
+  // \`npm run <script>\`: the script through .npmrc's script-shell (default sh), with the nearest
+  // node_modules/.bin on PATH, as npm runs it
+  const { readFileSync } = require("node:fs");
+  const { resolve } = require("node:path");
+  const script = JSON.parse(readFileSync("package.json", "utf8")).scripts[args[1]];
+  const rc = existsSync(".npmrc") ? readFileSync(".npmrc", "utf8") : "";
+  const shell = /^script-shell=(.*)$/m.exec(rc)?.[1]?.trim() ?? "/bin/sh";
+  const env = { ...process.env, PATH: resolve("node_modules/.bin") + ":" + process.env.PATH };
+  const r = spawnSync(shell, ["-c", [script, ...args.slice(2)].join(" ")], { stdio: "inherit", env });
+  process.exit(r.status ?? 1);
+}
 if (args[0] !== "ci") process.exit(2);
 rmSync("node_modules", { recursive: true, force: true });
 mkdirSync("node_modules/lint-tool", { recursive: true });
@@ -61,7 +73,11 @@ for (let dir = process.cwd(); ; dir = dirname(dir)) {
 const LINT = `#!/usr/bin/env node\n${TOOLS["tools/fake-lint.mjs"] ?? ""}`;
 const REPORT = ".vtc/state/gates/lint.json";
 
-const setup = (gates: Parameters<typeof config>[0], files: Record<string, string> = {}) => {
+const setup = (
+  gates: Parameters<typeof config>[0],
+  files: Record<string, string> = {},
+  options: Pick<NonNullable<Parameters<typeof harness>[2]>, "allowToolsHashedAfterScripts"> = {},
+) => {
   const bin = tempDir("vtc-fake-pm-");
   const npm = join(bin, "npm");
   writeFile(bin, "npm", FAKE_NPM);
@@ -78,7 +94,7 @@ const setup = (gates: Parameters<typeof config>[0], files: Record<string, string
   const h = harness(
     { "vendor/lint.mjs": LINT, "src/a.ts": "export const a = 1;\n", ...files },
     config([install, ...gates]),
-    { allow: [[NODE], [npm], [npx], ["node_modules/.bin/lint-tool"]] },
+    { allow: [[NODE], [npm], [npx], ["node_modules/.bin/lint-tool"]], ...options },
   );
   return { h, npm, npx };
 };
@@ -190,14 +206,15 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     });
   });
 
-  it("runs a leading install gate with no scripts-free form first, says so, and hashes after it", async () => {
+  /** A leading install gate with no scripts-free form, which installs the lint tool. */
+  const plainInstall = (options: Parameters<typeof harness>[2] = {}) => {
     const plain = {
       id: "deps",
       layer: "L0" as const,
       phase: "install" as const,
       command: [NODE, "tools/install.mjs"],
     };
-    const h = harness(
+    return harness(
       {
         "src/a.ts": "export const a = 1;\n",
         "vendor/lint.mjs": LINT,
@@ -205,7 +222,26 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
           'import { copyFileSync, mkdirSync } from "node:fs";\nmkdirSync("node_modules/lint-tool", { recursive: true });\ncopyFileSync("vendor/lint.mjs", "node_modules/lint-tool/lint.mjs");\n',
       },
       config([plain, explicitLint]),
+      options,
     );
+  };
+
+  it("does not run a tool hashed only after an install's scripts ran (H-14, reading 250)", async () => {
+    const h = plainInstall();
+    writeFile(h.repo, "src/a.ts", "export const a = 2; // TODO\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    expect(result(report, "deps").status).toBe("pass");
+    // fail closed: the hash cannot vouch for what the install's scripts wrote into the tool
+    expect(result(report, "lint")).toMatchObject({ status: "error", failure_class: "infra" });
+    expect(report.verdict).not.toBe("pass");
+    expect(lintRan(h.argvs)).toBe(false);
+    expect(evidenceLog(h.repo, "lint.log")).toMatch(
+      /hashed only after install gate\(s\) deps ran their scripts.*gates\.allow_tools_hashed_after_scripts/s,
+    );
+  });
+
+  it("with the user's opt-in, runs a leading install gate with no scripts-free form first, says so, and hashes after it", async () => {
+    const h = plainInstall({ allowToolsHashedAfterScripts: true });
     writeFile(h.repo, "src/a.ts", "export const a = 2; // TODO\n");
     const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
     expect(h.argvs.filter((a) => a.includes("tools/install.mjs")).length).toBeGreaterThan(0);
@@ -235,13 +271,27 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       command: [NODE, "tools/check.mjs"],
       tool: { source: "project" as const, paths: ["node_modules/.prisma/**"] },
     };
-    const { h, npm } = setup([gen, check, explicitLint], {
+    const files = {
       "postinstall.mjs":
         'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/.built", "native");\n',
       "tools/gen.mjs":
         'import { existsSync, mkdirSync, writeFileSync } from "node:fs";\nif (!existsSync("node_modules/.built")) process.exit(3);\nmkdirSync("node_modules/.prisma", { recursive: true });\nwriteFileSync("node_modules/.prisma/client.js", "generated");\n',
       "tools/check.mjs":
         'import { existsSync } from "node:fs";\nprocess.exit(existsSync("node_modules/.prisma/client.js") ? 0 : 4);\n',
+    };
+    // the build gate's tool is found only after the plain gate ran: by default it does not run
+    // (reading 250); the lint tool, hashed after the scripts-free install, does
+    const closed = setup([gen, check, explicitLint], files);
+    writeFile(closed.h.repo, "src/a.ts", "export const a = 2;\n");
+    const refused = await closed.h.run({ head: commitAll(closed.h.repo), layers: ["L0", "L1"] });
+    expect(refused.results.map((r) => [r.gate_id, r.status])).toEqual([
+      ["install", "pass"],
+      ["generate", "pass"],
+      ["build", "error"],
+      ["lint", "pass"],
+    ]);
+    const { h, npm } = setup([gen, check, explicitLint], files, {
+      allowToolsHashedAfterScripts: true,
     });
     writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
     const report = await h.run({ head: commitAll(h.repo), layers: ["L0", "L1"] });
@@ -351,19 +401,55 @@ symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
     expect(h.argvs.some((a) => a[0] === "npx")).toBe(false);
   });
 
-  it("does not run a gate whose package script no longer runs the hashed tool", async () => {
+  it("runs the commit's package script, not one a postinstall rewrote to run something else", async () => {
     // The lint script ran the installed bin when the tool was hashed; a postinstall rewrites it.
+    // Before the gate the commit's package.json is put back (spine §5 reading 250), so the gate
+    // runs the hashed tool and the rewritten script never runs.
     const pkg = (lint: string): string => JSON.stringify({ name: "app", scripts: { lint } });
     const { report, h } = await viaPath(
       ["npm", "run", "lint"],
-      { "package.json": pkg("lint-tool out.json") },
+      {
+        "package.json": pkg("lint-tool out.json"),
+        // were it run, the gate would fail
+        "evil.mjs": "process.exit(3);\n",
+      },
       `import { writeFileSync } from "node:fs";\nwriteFileSync("package.json", ${JSON.stringify(pkg("node evil.mjs"))});\n`,
     );
-    expect(result(report, "check")).toMatchObject({ status: "error", failure_class: "infra" });
-    expect(evidenceLog(h.repo, "check.log")).toMatch(
-      /no longer runs the tool hashed after the scripts-free install \(node_modules\/\.bin\/lint-tool, node_modules\/lint-tool\/\*\*\)/,
+    expect(result(report, "check")).toMatchObject({ status: "pass", tool: { tampered: [] } });
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(true);
+    expect(evidenceLog(h.repo, "check-configs.log")).toMatch(/package\.json/);
+  });
+
+  /** A package `typecheck` script whose tool always finds an error (exit 1). */
+  const typecheck = (script = "lint-tool out.json"): Record<string, string> => ({
+    "package.json": JSON.stringify({ name: "app", scripts: { typecheck: script } }),
+    "vendor/lint.mjs": "#!/usr/bin/env node\nprocess.exit(1);\n",
+  });
+
+  it("runs an L0 gate's package script as the commit has it, though an install script appended || true", async () => {
+    const pkg = JSON.stringify({
+      name: "app",
+      scripts: { typecheck: "lint-tool out.json || true" },
+    });
+    const { report, h } = await viaPath(
+      ["npm", "run", "typecheck"],
+      typecheck(),
+      `import { writeFileSync } from "node:fs";\nwriteFileSync("package.json", ${JSON.stringify(pkg)});\n`,
     );
-    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(false);
+    // the commit's script ran: the tool's error fails the gate
+    expect(result(report, "check")).toMatchObject({ status: "fail", tool: { tampered: [] } });
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(true);
+    expect(evidenceLog(h.repo, "check-configs.log")).toMatch(/package\.json/);
+  });
+
+  it("runs an L0 gate without the .npmrc script-shell an install script planted", async () => {
+    const plant = `import { writeFileSync } from "node:fs";
+writeFileSync("x.sh", "#!/bin/sh\\nexit 0\\n", { mode: 0o755 });
+writeFileSync(".npmrc", "script-shell=./x.sh\\n");
+`;
+    const { report, h } = await viaPath(["npm", "run", "typecheck"], typecheck(), plant);
+    expect(result(report, "check")).toMatchObject({ status: "fail", tool: { tampered: [] } });
+    expect(evidenceLog(h.repo, "check-configs.log")).toMatch(/\.npmrc/);
   });
 
   it("fails a gate whose shim or run script would find a planted node in a .bin on its PATH (reading 249)", async () => {

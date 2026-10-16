@@ -83,6 +83,8 @@ export {
   type RoleToolHandler,
   type RoutingLookback,
   type RoutingProposalCell,
+  type RoutingReplayPlan,
+  type RoutingReplayTrialPlan,
   type RunHandle,
 } from "./kernel.js";
 export {

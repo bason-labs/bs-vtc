@@ -59,6 +59,7 @@ import {
   type AutomationFact,
   type LookbackReplay,
   type LookbackRetro,
+  type LookbackSkippedDraft,
   type PluginCatalog,
   type RoutingLookback,
   type RoutingProposalCell,
@@ -84,11 +85,11 @@ import {
   graderBundleSha,
   loadPromptVersion,
   lookbackAtRunEnd,
-  lookbackRoutingStep,
   lookbackRunEndFacts,
   newAgentReportFields,
   readProposalFiles,
   readTiebreakKeys,
+  routingReplayStep,
   type InstalledRole,
   type LockedShaFor,
   type NewAgentSignal,
@@ -102,7 +103,7 @@ import {
   readLookbackPrInput,
   type CreateUpstreamModule,
 } from "./upstream-bridge.js";
-import { createLookbackReplays, liveLookbackConfig } from "./replays.js";
+import { createLookbackReplays, liveLookbackConfig, tierReplayOf } from "./replays.js";
 import { createUpstream } from "../upstream/index.js";
 import {
   createFetchQuota,
@@ -282,24 +283,45 @@ export const routingTrialBudget = (
   );
 };
 
+/** What RETRO's replay planning hands core (`LookbackRetro.replays`). */
+type PlannedReplays = Awaited<ReturnType<NonNullable<LookbackRetro["replays"]>>>;
+
+/** The tier replays the routing step adds to a RETRO, and its `automation.skipped` drafts. */
+export interface RoutedReplays {
+  readonly replays: readonly LookbackReplay[];
+  readonly events: readonly LookbackSkippedDraft[];
+}
+
 /**
- * D-cn at RETRO: the routing step runs once the RETRO's prompt replays are planned, with what is
- * left of the trial cap (reading 247(6)); when planning them fails it still runs, with no trials
- * (`planned` is `null`), so the routing scorecard and proposals never depend on the replays.
+ * D-cn at RETRO (spine §5 readings 247(6) and 250): the routing step runs once the RETRO's prompt
+ * replays are planned, with what is left of the trial cap, and the tier replays it plans join the
+ * RETRO's replays (core launches them after the prompt replays, in order) with its
+ * `automation.skipped` drafts. When planning the prompt replays fails it still runs, with no
+ * trials (`planned` is `null`), so the routing scorecard and proposals never depend on the
+ * replays; the failure is then raised as before.
  */
 export const withRoutingAtRetro =
-  <S, P>(
-    plan: (state: S) => Promise<P>,
-    routing: (state: S, planned: P | null) => void,
-  ): ((state: S) => Promise<P>) =>
+  <S>(
+    plan: (state: S) => Promise<PlannedReplays>,
+    routing: (state: S, planned: PlannedReplays | null) => Promise<RoutedReplays | null>,
+  ): ((state: S) => Promise<PlannedReplays>) =>
   async (state) => {
-    let planned: P | null = null;
+    let planned: PlannedReplays | null = null;
+    let failure: { readonly error: unknown } | null = null;
     try {
       planned = await plan(state);
-      return planned;
-    } finally {
-      routing(state, planned);
+    } catch (error) {
+      failure = { error };
     }
+    const routed = await routing(state, planned);
+    if (failure !== null) throw failure.error;
+    if (planned === null || routed === null) return planned ?? { replays: [] };
+    const events = [...(planned.events ?? []), ...routed.events];
+    return {
+      ...planned,
+      replays: [...planned.replays, ...routed.replays],
+      ...(events.length === 0 ? {} : { events }),
+    };
   };
 
 /**
@@ -388,9 +410,10 @@ export const wireLookback = (
     readonly found: (run: string, signals: readonly NewAgentSignal[]) => void;
   },
   /**
-   * D-cn (spine §5 reading 219): Lookback's routing step, run at RETRO through the `LookbackRetro`
-   * seam once the run's plan is made, and where its proposals go as `config` facts (the
-   * automation's improvements). Absent: no routing scorecard and no routing proposal.
+   * D-cn (spine §5 readings 219 and 250): Lookback's routing step, run inside RETRO's replay
+   * planning (the `LookbackRetro` seam's `replays`) once the prompt replays are planned, whose
+   * tier replays RETRO launches, and where its proposals go as `config` facts (the automation's
+   * improvements). Absent: no routing scorecard, no tier replay and no routing proposal.
    */
   routing?: {
     readonly propose: RoutingLookback;
@@ -467,6 +490,8 @@ export const wireLookback = (
       now,
       ...(newAgents === undefined ? {} : { roles: newAgents.roles() }),
     });
+  const compiled = (role: string, mode: string | undefined, host: HostId) =>
+    plugins.promptParts?.(agentNameFor(role, mode), host)?.compiled;
   const lookbackConfig = liveLookbackConfig(deps.vtcHome, (message) => {
     process.stderr.write(`vtc engine: lookback: ${message}\n`);
   });
@@ -488,14 +513,34 @@ export const wireLookback = (
     // D-cq (reading 224): the user's replay pace, `~/.vtc/config.yaml` `lookback`
     lookback: lookbackConfig,
   });
-  // D-cn: the routing scorecard and proposals at RETRO, on the Lookback queue so RETRO never waits
-  // on them; a step that fails is told on stderr and the run goes on. It runs once the RETRO's
-  // prompt replays are planned, with what is left of the RETRO's trial cap for tier replays
-  // (reading 247(6))
-  const routingAtRetro = (run: string, trialBudget: number): void => {
-    if (routing === undefined) return;
-    enqueue(async () => {
-      const cells = await routing.propose({
+  // D-cn (readings 247(6) and 250): the tier replay trials' own events of every run, which the
+  // routing step grades a tier replay on (where each trial ran, what it cost)
+  const replayEvents = (): readonly VtcEvent[] =>
+    engine.states().flatMap((state) => {
+      const trials = new Set([
+        ...engine.replayTrialActions(state.id),
+        ...replayTrialActionIds(state.events),
+      ]);
+      return state.events.filter((e) => {
+        const action = (e.data as { action_id?: unknown } | undefined)?.action_id;
+        return typeof action === "string" && trials.has(action) && e.type.startsWith("role.");
+      });
+    });
+  // D-cn: the routing scorecard, proposals and tier replays at RETRO, inside the RETRO's replay
+  // planning (its tier replays are launched with the RETRO's), serialised with the Lookback queue
+  // so it never reads the attributions a run's end is writing. A step that fails is told on
+  // stderr and the run goes on with its prompt replays. It runs once the RETRO's prompt replays
+  // are planned, with what is left of the RETRO's trial cap (reading 247(6))
+  const routingAtRetro = async (
+    state: RunState,
+    trialBudget: number,
+  ): Promise<RoutedReplays | null> => {
+    if (routing === undefined) return null;
+    const run = state.id;
+    const out: { routed: RoutedReplays | null } = { routed: null };
+    const job = async (): Promise<void> => {
+      const pace = lookbackPaceFor({ lookback: lookbackConfig() }, weeklyRemaining(state));
+      const step = await routing.propose({
         projectRoot: deps.repoRoot,
         history: history(),
         graderBundleSha: bundleSha(),
@@ -503,27 +548,52 @@ export const wireLookback = (
         lockedShaFor,
         vtcHome: deps.vtcHome,
         trialBudget,
+        pace: { failureTasks: pace.failureTasks, regressionTasks: pace.regressionTasks },
+        replayEvents: replayEvents(),
       });
       const at = now().toISOString();
-      if (cells.length > 0)
+      if (step.cells.length > 0)
         routing.found(
           run,
-          cells.map((cell) => routingConfigFact(run, cell, at)),
+          step.cells.map((cell) => routingConfigFact(run, cell, at)),
         );
+      const launched: LookbackReplay[] = [];
+      for (const plan of step.replays) {
+        const replay = tierReplayOf(
+          { projectRoot: deps.repoRoot, vtcHome: deps.vtcHome, compiled, history },
+          plan,
+        );
+        if (typeof replay === "string")
+          process.stderr.write(
+            `vtc engine: lookback: the tier replay ${plan.proposal} is not launched: ${replay}\n`,
+          );
+        else launched.push(replay);
+      }
+      out.routed = { replays: launched, events: step.skipped };
+    };
+    await new Promise<void>((resolve) => {
+      enqueue(async () => {
+        try {
+          await job();
+        } finally {
+          resolve();
+        }
+      });
     });
+    return out.routed;
   };
   engine.setLookbackRetro({
     plan: (state) => retro().plan({ ...state, events: [...lookbackEvents(state)] }),
     check: (target, root, state) => retro().check(target, root, state),
     ...replays,
-    replays: withRoutingAtRetro(replays.replays, (state, planned) => {
+    replays: withRoutingAtRetro(replays.replays, (state, planned) =>
       routingAtRetro(
-        state.id,
+        state,
         planned === null
           ? 0
           : routingTrialBudget(lookbackConfig(), weeklyRemaining(state), planned),
-      );
-    }),
+      ),
+    ),
   });
   const runEnd = async (run: string): Promise<void> => {
     const state = engine.states().find((s) => s.id === run);
@@ -790,7 +860,7 @@ export const runDaemon: RunDaemon = async (deps: EngineDeps, options) => {
         },
         // D-cn (reading 219): RETRO writes the routing scorecard and raises its config facts
         {
-          propose: lookbackRoutingStep,
+          propose: routingReplayStep,
           found: (_run, facts) => {
             automation.improvements(facts);
           },

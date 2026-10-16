@@ -326,6 +326,25 @@ describe("calibrate", () => {
     expect(s.lines.join("\n")).toMatch(/WARNING: no OS sandbox for gates: .*unconfined/);
   });
 
+  it("warns which gates runs will not run: a tool hashed only after an install's scripts (reading 250)", async () => {
+    const build = {
+      id: "build",
+      layer: "L0" as const,
+      command: [NODE, "tools/build.mjs"],
+      tool: { source: "project" as const, paths: ["tools/build.mjs"] },
+    };
+    const s = setup([installGate, build]);
+    await calibrate(s.deps(() => true));
+    // calibration itself measures the base, so the gate ran and is kept
+    expect(s.lines.join("\n")).toMatch(/L0 build: pass\/pass/);
+    expect(s.lines.join("\n")).toMatch(
+      /WARNING: gate\(s\) build: .*hashed only after install gate\(s\) install ran their scripts.*gates\.allow_tools_hashed_after_scripts/,
+    );
+    const opted = setup([installGate, build]);
+    await calibrate({ ...opted.deps(() => true), allowToolsHashedAfterScripts: true });
+    expect(opted.lines.join("\n")).not.toMatch(/allow_tools_hashed_after_scripts/);
+  });
+
   it("asks before running anything, runs twice, records flaky tests and freezes the baseline", async () => {
     const s = setup();
     const outcome = await calibrate(s.deps(() => true));

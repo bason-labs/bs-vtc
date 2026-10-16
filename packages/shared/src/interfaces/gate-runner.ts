@@ -131,6 +131,13 @@ export interface GateRunnerDeps {
    * `sandbox: "none"` and engine core records an `unsandboxed_gate` incident.
    */
   readonly allowUnsandboxed?: boolean;
+  /**
+   * `~/.vtc/config.yaml` `gates.allow_tools_hashed_after_scripts` (`UserConfigSchema`, H-14,
+   * spine §5 reading 250), read by the cli; never from `project.yaml`. Default false: a verify
+   * gate whose `project` tool was hashed only after an install gate ran its lifecycle scripts
+   * does not run (`infra`). True: it runs, its `ToolIntegrity.baseline` `after_scripts`.
+   */
+  readonly allowToolsHashedAfterScripts?: boolean;
   readonly now?: () => Date;
 }
 

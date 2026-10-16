@@ -81,6 +81,7 @@ import {
   checkMergeLevel,
   checkEnvPassthrough,
   checkGateSandbox,
+  checkToolsHashedAfterScripts,
   checkSessionSandbox,
   detectGateSandbox,
   runDoctorChecks,
@@ -419,6 +420,8 @@ export const createDoctorCommand = (
       if (e.ytDlp !== undefined) checks.push(checkYtDlp(await e.ytDlp()));
       if (e.gateSandbox !== undefined)
         checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
+      const afterScripts = checkToolsHashedAfterScripts(userConfig);
+      if (afterScripts !== null) checks.push(afterScripts);
       const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
       if (session !== null) checks.push(checkSessionSandbox(session));
       const browser = e.browser === undefined ? null : await checkBrowser(e.browser);

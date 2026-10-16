@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import {
   agentNameFor,
   AttributionSchema,
@@ -27,6 +28,10 @@ import {
   promptShaFor,
   ReplayResultSchema,
   rolePromptAssetPath,
+  ROUTING_FACT_METRICS,
+  ROUTING_REPLAY_VERDICT_CODES,
+  routingReplayPath,
+  RoutingReplayResultSchema,
   ScorecardIndexSchema,
   sha256Hex,
   splitRolePrompt,
@@ -42,7 +47,9 @@ import {
 import {
   createPluginCatalog,
   pluginCatalogFrom,
+  taskPackJsonPath,
   toYaml,
+  type AutomationFact,
   type LookbackReplay,
   type LookbackRetro,
   type PluginCatalog,
@@ -61,10 +68,10 @@ import {
 import { liveLookbackConfig, sampleReplayTasks } from "../../src/daemon/replays.js";
 import {
   lookbackEvent,
-  lookbackRoutingStep,
   lookbackTargets,
   pinsPath,
   promptVersionRef,
+  routingReplayStep,
   storePromptVersion,
   traceRef,
   traceSplit,
@@ -617,6 +624,187 @@ describe("RETRO replays a recorded proposal end to end (AD-21 rule 6, readings 1
   }, 120_000);
 });
 
+describe("RETRO runs a routing change's tier replay end to end (D-cn, readings 247(6) and 250)", () => {
+  it("launches its trials on their arm's tier at one RETRO, grades them at the next and raises the routing fact with the replay's verdict", async () => {
+    const h = createHarness({
+      plugins: switched,
+      project: { merge_level: 1 },
+      armPlugins: {
+        compileArm: (request) =>
+          Promise.resolve({
+            dir: request.outDir,
+            version: "arm-000000000000",
+            promptSha256: effectivePromptSha(LOCKED, request.editable),
+          }),
+      },
+      headless: (request) => {
+        mkdirSync(join(request.cwd, "src/t-1"), { recursive: true });
+        writeFileSync(join(request.cwd, "src/t-1/impl.ts"), "export const x = 2;\n");
+        return {
+          kind: "done",
+          session_ref: null,
+          output: { role: request.role, summary: "done", exit: "built" },
+          model: "sonnet",
+          tokens: { in: 100, out: 50, cache_r: 0, cache_w: 0 },
+          cost_usd: 0.1,
+        };
+      },
+    });
+    // D-cq: one failure and one regression-set task per replay; every task passed, so the tier
+    // replay is one task, 6 trials (k = 3, two arms)
+    writeFileSync(
+      join(h.home, "config.yaml"),
+      "version: 1\nlookback:\n  replay_failure_tasks: 1\n  replay_regression_tasks: 1\n",
+    );
+    // An earlier, finished run in the repo's log: 10 M Engineer tasks started on Mid by the rule
+    // (each first dispatch held out) and 10 started on Low (`routing.start: role`), every one
+    // passing its first round, so the routing scorecard proposes the cheaper Mid -> Low start
+    const base = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: h.repo,
+      encoding: "utf8",
+    }).trim();
+    const prompt = { effective: effectivePromptSha(LOCKED, DEFAULT), editable: sha256Hex(DEFAULT) };
+    const past = new RunLog("r-past", "2026-10-12T09:00:00.000Z");
+    const held: string[] = [];
+    for (let i = 1; held.length < 10 && i < 10_000; i += 1) {
+      const trace = `a-past-${String(i)}`;
+      if (traceSplit({ run: "r-past", trace }) === "holdout") held.push(trace);
+    }
+    for (let i = 1; i <= 20; i += 1) {
+      const task = `T-${String(100 + i)}`;
+      past.taskCreated(task, "backend", [], { size: "M", risk: "low", riskTags: [] });
+      past.add({
+        type: "task.workspace_assigned",
+        task,
+        data: {
+          worktree: `.vtc/state/worktrees/${task}`,
+          branch: `vtc/${task}`,
+          baseline_revision: base,
+        },
+      });
+      past.dispatch("engineer", {
+        task,
+        prompt,
+        ...(i <= 10
+          ? { tier: "mid" as const, tierReason: "rule" as const, action: held[i - 1] ?? "" }
+          : { tier: "low" as const, tierReason: "role" as const }),
+      });
+      past.gate(task, true);
+    }
+    past.add({ type: "run.finished", data: { outcome: "done" } });
+    mkdirSync(join(h.repo, ".vtc/runs/r-past"), { recursive: true });
+    writeFileSync(
+      join(h.repo, ".vtc/runs/r-past/events.jsonl"),
+      past.events.map((e) => `${JSON.stringify(e)}\n`).join(""),
+    );
+    // the engine reads the earlier run from the log when it opens
+    Object.assign(h, { engine: h.reopen() });
+    h.engine.ingestUsage({
+      host: "claude-code",
+      source: "statusline",
+      windows: [
+        {
+          kind: "weekly",
+          label: "weekly",
+          window_minutes: 10080,
+          used_pct: 10,
+          resets_at: null,
+        },
+      ],
+      model_limits: [],
+      updated_at: "2026-10-13T09:00:00.000Z",
+    });
+    const found: AutomationFact[] = [];
+    const unwire = wireLookback(
+      h.engine,
+      { repoRoot: h.repo, vtcHome: h.home },
+      switched,
+      undefined,
+      undefined,
+      { propose: routingReplayStep, found: (_run, facts) => found.push(...facts) },
+    );
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    // the earlier run's packs: each held-out dispatch's recorded pack (this run's Engineer pack,
+    // named for that dispatch), which a tier replay trial runs again
+    const run = h.engine.status({}).run.id;
+    const engineerAction = String(
+      events(h).find((e) => e.type === "role.dispatched" && e.role === "engineer")?.data.action_id,
+    );
+    const pack = JSON.parse(
+      readFileSync(join(h.repo, taskPackJsonPath(engineerAction)), "utf8"),
+    ) as Record<string, unknown>;
+    for (const trace of held)
+      writeFileSync(
+        join(h.repo, taskPackJsonPath(trace)),
+        JSON.stringify({ ...pack, run: "r-past", action_id: trace }),
+      );
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle();
+    await passFinalReview(h);
+    await h.engine.settle();
+    for (let i = 0; i < 2 && h.engine.status({}).run.finished_at === undefined; i += 1) {
+      await h.engine.next({}, CLAUDE);
+      await h.engine.settle();
+    }
+    expect(h.engine.status({}).run.finished_at).toBeDefined();
+    const proposal = "routing-engineer-m-none-mid-low";
+    // RETRO launched the tier replay's 6 trials, each on its arm's tier with its grader bundle
+    const trials = events(h).filter(
+      (e) => e.type === "role.dispatched" && e.data.purpose === "lookback_replay",
+    );
+    expect(trials).toHaveLength(6);
+    for (const t of trials) {
+      const ref = t.data.replay as { proposal: string; arm: string; tier: string; task: string };
+      expect(ref).toMatchObject({
+        proposal,
+        task: "r-past:T-101",
+        tier: ref.arm === "a" ? "mid" : "low",
+        grader_bundle_sha: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+      });
+      expect(t.data).toMatchObject({ tier: ref.tier, tier_reason: "rule" });
+      expect(t.data.tier_clamped).not.toBe(true);
+    }
+    // each one graded into the ledger with its arm's tier
+    const ledger = readFileSync(join(h.home, LOOKBACK_HOME.replayTrialsFile), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { proposal: string; tier?: string; passed?: boolean });
+    expect(ledger).toHaveLength(6);
+    expect(ledger.every((r) => r.proposal === proposal && r.passed === true)).toBe(true);
+    expect(new Set(ledger.map((r) => r.tier))).toEqual(new Set(["mid", "low"]));
+    // the replay was running: no routing fact, and no result yet
+    expect(found.filter((f) => f.subject === "routing.engineer.M.none")).toEqual([]);
+    expect(existsSync(join(h.repo, routingReplayPath(proposal)))).toBe(false);
+    // the next run's RETRO grades it from the ledger and the trials' events (the same gates.yml,
+    // so the same grader bundle): both arms passed, so the cheaper start holds quality
+    // (no_change), which backs the change
+    await start(h);
+    const state = h.engine.states().find((r) => r.id !== run && r.id !== "r-past");
+    if (state === undefined) throw new Error("no second run");
+    const next = await h.engine.lookbackRetro()?.replays?.(state);
+    expect(next?.replays).toEqual([]);
+    await unwire();
+    const facts = found.filter((f) => f.subject === "routing.engineer.M.none");
+    expect(facts).toHaveLength(1);
+    expect(facts[0]?.metrics).toMatchObject({
+      [ROUTING_FACT_METRICS.replayVerdict]: ROUTING_REPLAY_VERDICT_CODES.no_change,
+      [ROUTING_FACT_METRICS.replayTrials]: 6,
+    });
+    expect(
+      RoutingReplayResultSchema.parse(
+        JSON.parse(readFileSync(join(h.repo, routingReplayPath(proposal)), "utf8")),
+      ),
+    ).toMatchObject({ verdict: "no_change" });
+    await h.release();
+  }, 240_000);
+});
+
 describe("the user's replay pace file (D-cq)", () => {
   it("reads only the lookback section, re-reads it when the file changes, and falls back to the defaults on a bad section", () => {
     const home = mkdtempSync(join(tmpdir(), "vtc-pace-"));
@@ -894,22 +1082,36 @@ describe("the routing step's trial budget (D-cn, reading 247(6))", () => {
     expect(routingTrialBudget(undefined, null, { replays: [], waitKind: "budget" })).toBe(0);
   });
 
-  it("runs the routing step after the replays are planned, and with no trials when planning fails", async () => {
-    const calls: { state: string; planned: string | null }[] = [];
-    const routing = (state: string, planned: string | null): void => {
+  it("runs the routing step after the replays are planned, adds its tier replays, and runs it with no trials when planning fails", async () => {
+    const calls: { state: string; planned: unknown }[] = [];
+    const tier = replay(2);
+    const skipped = {
+      type: "automation.skipped",
+      actor: "engine",
+      data: { reason: "trial_cap", kind: "lookback", detail: "wait" },
+    } as const;
+    const routing = (state: string, planned: unknown) => {
       calls.push({ state, planned });
+      return Promise.resolve({ replays: [tier], events: [skipped] });
     };
-    await expect(withRoutingAtRetro(() => Promise.resolve("planned"), routing)("r1")).resolves.toBe(
-      "planned",
-    );
-    const failing = withRoutingAtRetro((): Promise<string> => {
+    const prompt = replay(3);
+    await expect(
+      withRoutingAtRetro(() => Promise.resolve({ replays: [prompt] }), routing)("r1"),
+    ).resolves.toEqual({ replays: [prompt, tier], events: [skipped] });
+    const failing = withRoutingAtRetro(() => {
       throw new Error("replay planning failed");
     }, routing);
     await expect(failing("r2")).rejects.toThrow("replay planning failed");
     expect(calls).toEqual([
-      { state: "r1", planned: "planned" },
+      { state: "r1", planned: { replays: [prompt] } },
       { state: "r2", planned: null },
     ]);
+    // no routing step wired: the prompt replays as planned
+    const none = await withRoutingAtRetro(
+      () => Promise.resolve({ replays: [prompt], wait: "w" }),
+      () => Promise.resolve(null),
+    )("r3");
+    expect(none).toEqual({ replays: [prompt], wait: "w" });
   });
 });
 
@@ -922,6 +1124,8 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
       vtcHome: string;
       locked: unknown;
       trialBudget: number | undefined;
+      pace: unknown;
+      replayEvents: number;
     }[] = [];
     const propose: RoutingLookback = (input) => {
       asked.push({
@@ -931,16 +1135,22 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
         vtcHome: input.vtcHome,
         // the attribution reader's view of the prompt versions (reading 176)
         locked: input.lockedShaFor("spec_verifier", undefined, "claude-code"),
+        pace: input.pace,
+        replayEvents: input.replayEvents.length,
       });
-      return Promise.resolve([
-        {
-          role: "engineer",
-          size: "S",
-          risk: "none",
-          metrics: { "routing.tasks": 12, "routing.escalated_pct": 60 },
-          detail: "S engineer tasks started on Low escalate 60% of the time",
-        },
-      ]);
+      return Promise.resolve({
+        cells: [
+          {
+            role: "engineer",
+            size: "S",
+            risk: "none",
+            metrics: { "routing.tasks": 12, "routing.escalated_pct": 60 },
+            detail: "S engineer tasks started on Low escalate 60% of the time",
+          },
+        ],
+        replays: [],
+        skipped: [],
+      });
     };
     const found: { run: string; facts: readonly unknown[] }[] = [];
     const unwire = wireLookback(
@@ -969,6 +1179,12 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
     expect(asked[0]?.history).toBeGreaterThan(0);
     // once the RETRO's prompt replays are planned (none here), with the rest of its trial cap
     expect(asked[0]?.trialBudget).toBe(LOOKBACK_LIMITS.maxTrialsPerRetro);
+    // the user's pace (D-cq), and no tier replay trial has run yet
+    expect(asked[0]?.pace).toEqual({
+      failureTasks: LOOKBACK_LIMITS.replayFailureTasks,
+      regressionTasks: LOOKBACK_LIMITS.replayRegressionTasks,
+    });
+    expect(asked[0]?.replayEvents).toBe(0);
     // what Lookback's step needs to read the trusted attributions and the recorded AI tiebreaks
     expect(asked[0]?.vtcHome).toBe(h.home);
     expect(asked[0]?.locked).toEqual(expect.any(String));
@@ -1002,7 +1218,7 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
       switched,
       undefined,
       undefined,
-      { propose: lookbackRoutingStep, found: (_run, facts) => found.push(...facts) },
+      { propose: routingReplayStep, found: (_run, facts) => found.push(...facts) },
     );
     const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
     await authorTests(h, only(actions, "qa"));

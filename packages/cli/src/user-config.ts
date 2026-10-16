@@ -13,6 +13,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { core } from "@vtc/engine";
 import {
+  gatesAllowToolsHashedAfterScripts,
   gatesAllowUnsandboxed,
   parsePersisted,
   USER_CONFIG_FILE,
@@ -134,6 +135,13 @@ export const researchApiKeyOf = (
 /** `gates.allow_unsandboxed`: false when the file does not parse (the gate sandbox stays required). */
 export const allowUnsandboxedOf = (read: UserConfigRead): boolean =>
   read.ok && gatesAllowUnsandboxed(read.config);
+
+/**
+ * `gates.allow_tools_hashed_after_scripts` (H-14, spine §5 reading 250): false when the file does
+ * not parse (a tool hashed only after an install's scripts ran stays refused).
+ */
+export const allowToolsHashedAfterScriptsOf = (read: UserConfigRead): boolean =>
+  read.ok && gatesAllowToolsHashedAfterScripts(read.config);
 
 /**
  * `prices` (§11; H-12, spine §5 reading 236): the user's optional per-model override of the

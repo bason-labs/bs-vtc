@@ -30,21 +30,19 @@
  * fields ({@link improvementReportFields}) open the bs-vtc PR. {@link lookbackRunEndFacts} maps the
  * drift regressions (D-cr) to the automation facts the daemon hands the upstream module at
  * `run.finished` (`wireLookback`'s `drift` argument).
- * At RETRO (D-cn, spine §5 readings 219 and 247(6)) {@link lookbackRoutingStep} fits engine core's
- * `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells it
- * proposes to change for the producer roles (D-cu; {@link routingProposalCells}), which the daemon
- * raises as `config` facts (`wireLookback`'s `routing` argument); through that seam no tier replay
- * is launched, so a change whose tier replay the RETRO's trial budget has room for (or whose
- * replay started) is withheld and the others carry their scorecard evidence alone (reading 249,
- * until engine core drives {@link routingReplayStep}). {@link routingReplayStep} is the same step with tier
- * replays (for a caller that launches them and hands back their events): within the RETRO's
+ * At RETRO (D-cn, spine §5 readings 219, 247(6) and 250) {@link routingReplayStep} fits engine
+ * core's `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells
+ * it proposes to change for the producer roles (D-cu; {@link routingProposalCells}), which the
+ * daemon raises as `config` facts (`wireLookback`'s `routing` argument). Within the RETRO's
  * remaining trial budget it plans tier replays of those changes (the same prompt on both arms, arm
  * `a` on the current start tier and arm `b` on the proposed one; {@link planRoutingReplayTrials}),
- * returns the trials to launch and the `automation.skipped` drafts beside the cells, grades a
- * replay whose trials the ledger holds and whose events show each ran on its arm's tier
- * ({@link recordRoutingReplayTrial}, {@link routingReplayTrialTiers}, {@link assembleRoutingReplay})
- * into a `RoutingReplayResult`, and raises a change's fact only once its replay is graded and
- * backs it.
+ * returns the trials to launch (which the daemon runs as RETRO `lookback_replay` trials and records
+ * with {@link recordRoutingReplayTrial}) and the `automation.skipped` drafts beside the cells,
+ * grades a replay whose trials the ledger holds and whose events show each ran on its arm's tier
+ * ({@link routingReplayTrialTiers}, {@link assembleRoutingReplay}) into a `RoutingReplayResult`,
+ * and raises a change's fact only once its replay is graded and backs it.
+ * {@link lookbackRoutingStep} is the same step for a caller that launches nothing (no budget, no
+ * trial events).
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
  * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
  * Promotion (D-cb, spine §5 reading 196): for everyone, the human's merge of the bs-vtc PR an
