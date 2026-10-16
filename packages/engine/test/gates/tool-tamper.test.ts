@@ -11,9 +11,41 @@ import { join } from "node:path";
 import { TOOL_TAMPER_RULE_ID, type GateReport, type GateResult } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScannerUnavailableError } from "../../src/gates/index.js";
-import { SHARED_NAME_NOTE } from "../../src/gates/tool-integrity.js";
+import { COMMITTED_TREE_NOTE, SHARED_NAME_NOTE } from "../../src/gates/tool-integrity.js";
 import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
-import { commitAll, config, fakeScanners, harness, leaksGate, NODE, TOOLS } from "./fixture.js";
+import {
+  commitAll,
+  config,
+  fakeScanners,
+  harness as fixtureHarness,
+  leaksGate,
+  NODE,
+  TOOLS,
+} from "./fixture.js";
+
+/**
+ * The fixture harness with each `vendor/` file's `node_modules` and `pyvenv.cfg` segments
+ * committed with a trailing `_`, which the fake package managers lay out without it: a commit
+ * that tracks a dependency tree fails every run closed (spine §5 reading 256(1)).
+ */
+const harness = (
+  files: Record<string, string>,
+  ...rest: Parameters<typeof fixtureHarness> extends [unknown, ...infer R] ? R : never
+): ReturnType<typeof fixtureHarness> =>
+  fixtureHarness(
+    Object.fromEntries(
+      Object.entries(files).map(([path, text]) => [
+        path.startsWith("vendor/")
+          ? path
+              .split("/")
+              .map((part) => (part === "node_modules" || part === "pyvenv.cfg" ? `${part}_` : part))
+              .join("/")
+          : path,
+        text,
+      ]),
+    ),
+    ...rest,
+  );
 
 /** Repositories a test locked a directory in, made removable again first. */
 const unlock: string[] = [];
@@ -34,7 +66,23 @@ afterEach(() => {
  * script (`--ignore-scripts`: without its pre and post scripts).
  */
 const FAKE_NPM = `#!/usr/bin/env node
-const { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
+const { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
+// the fixtures commit no dependency tree (spine §5 reading 256(1)): \`node_modules_\` and
+// \`pyvenv.cfg_\` are laid out without the underscore
+const cpSync = (from, to) => {
+  const fs = require("node:fs");
+  const stat = fs.lstatSync(from);
+  if (stat.isDirectory()) {
+    fs.mkdirSync(to, { recursive: true });
+    for (const name of fs.readdirSync(from)) cpSync(from + "/" + name, to + "/" + (name === "node_modules_" || name === "pyvenv.cfg_" ? name.slice(0, -1) : name));
+  } else if (stat.isSymbolicLink()) {
+    fs.rmSync(to, { force: true });
+    fs.symlinkSync(fs.readlinkSync(from), to);
+  } else {
+    fs.copyFileSync(from, to);
+    fs.chmodSync(to, stat.mode);
+  }
+};
 const { dirname, resolve: resolvePath } = require("node:path");
 const { spawnSync } = require("node:child_process");
 let args = process.argv.slice(2);
@@ -101,13 +149,13 @@ chmodSync("node_modules/lint-tool/lint.mjs", 0o755);
 writeFileSync("node_modules/lint-tool/package.json", JSON.stringify({ name: "lint-tool", bin: { "lint-tool": "lint.mjs" } }));
 mkdirSync("node_modules/.bin", { recursive: true });
 symlinkSync("../lint-tool/lint.mjs", "node_modules/.bin/lint-tool");
-if (existsSync("vendor/deps")) cpSync("vendor/deps", "node_modules", { recursive: true });
+if (existsSync("vendor/deps")) cpSync("vendor/deps", "node_modules");
 // a workspace: \`vendor/tree\` copied over the checkout, then \`vendor/links.json\`'s [link, target] bins
-if (existsSync("vendor/tree")) cpSync("vendor/tree", ".", { recursive: true });
+if (existsSync("vendor/tree")) cpSync("vendor/tree", ".");
 // a package kept in a store under $HOME and linked in (pnpm's global virtual store)
 if (existsSync("vendor/home-store")) {
   const store = resolvePath(process.env.HOME, "store");
-  cpSync("vendor/home-store", store, { recursive: true });
+  cpSync("vendor/home-store", store);
   for (const name of require("node:fs").readdirSync("vendor/home-store")) {
     symlinkSync(resolvePath(store, name), "node_modules/" + name);
   }
@@ -136,7 +184,23 @@ if (!ignoring) for (const dir of installed()) lifecycle(dir);
  * of that version (by its package.json, as pnpm's selector matches it).
  */
 const FAKE_PNPM = `#!/usr/bin/env node
-const { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } = require("node:fs");
+const { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } = require("node:fs");
+// the fixtures commit no dependency tree (spine §5 reading 256(1)): \`node_modules_\` and
+// \`pyvenv.cfg_\` are laid out without the underscore
+const cpSync = (from, to) => {
+  const fs = require("node:fs");
+  const stat = fs.lstatSync(from);
+  if (stat.isDirectory()) {
+    fs.mkdirSync(to, { recursive: true });
+    for (const name of fs.readdirSync(from)) cpSync(from + "/" + name, to + "/" + (name === "node_modules_" || name === "pyvenv.cfg_" ? name.slice(0, -1) : name));
+  } else if (stat.isSymbolicLink()) {
+    fs.rmSync(to, { force: true });
+    fs.symlinkSync(fs.readlinkSync(from), to);
+  } else {
+    fs.copyFileSync(from, to);
+    fs.chmodSync(to, stat.mode);
+  }
+};
 const { dirname } = require("node:path");
 const { spawnSync } = require("node:child_process");
 const all = process.argv.slice(2);
@@ -176,7 +240,7 @@ if (args[0] !== "install") process.exit(2);
 rmSync("node_modules", { recursive: true, force: true });
 mkdirSync("node_modules", { recursive: true });
 for (const entry of existsSync("vendor/pnpm") ? readdirSync("vendor/pnpm") : []) {
-  cpSync("vendor/pnpm/" + entry, "node_modules/.pnpm/" + entry + "/node_modules", { recursive: true });
+  cpSync("vendor/pnpm/" + entry, "node_modules/.pnpm/" + entry + "/node_modules");
 }
 if (existsSync("vendor/links.json")) {
   for (const [link, target] of JSON.parse(readFileSync("vendor/links.json", "utf8"))) {
@@ -1629,7 +1693,9 @@ writeFileSync("dist/index.js", "built");
         "vendor/links.json": JSON.stringify([
           ["node_modules/esbuild", ".pnpm/esbuild@0.25.0/node_modules/esbuild"],
         ]),
-        "vendor/modules.yaml": "pendingBuilds:\n  - esbuild@0.21.5\n  - esbuild@0.25.0\n",
+        // pnpm's own: what it built, and the registry it installed from (reading 256(5))
+        "vendor/modules.yaml":
+          "pendingBuilds:\n  - esbuild@0.21.5\n  - esbuild@0.25.0\nregistries:\n  default: https://registry.npmjs.org/\n",
         "pnpm-lock.yaml": pnpmLock([
           ["esbuild@0.21.5", SHA("0.21.5")],
           ["esbuild@0.25.0", SHA("0.25.0")],
@@ -1757,6 +1823,184 @@ writeFileSync("lib/index.js", "built");
       });
       const tracked = await run([["npm", "ci"]], ["make", "test"], files(false));
       tamperedRun(tracked.report, tracked.h, ["lib/index.js"]);
+    });
+  });
+
+  describe("h14-open4 (spine §5 reading 256): the reproductions H, D and C", () => {
+    const REAL = "node_modules/.pnpm/dep@1.0.0/node_modules/dep";
+    const under = (prefix: string, files: Record<string, string>): Record<string, string> =>
+      Object.fromEntries(Object.entries(files).map(([k, v]) => [`${prefix}/${k}`, v]));
+    /** `dep` with a postinstall running `script`, which `install.mjs` (its own rebuild) is. */
+    const dep = (script: string, text: string): Record<string, string> => ({
+      "package.json": JSON.stringify({
+        name: "dep",
+        version: "1.0.0",
+        scripts: { postinstall: `node ${script}` },
+        bin: { dep: "bin/dep" },
+      }),
+      [script]: text,
+      "bin/dep": "#!/usr/bin/env node\n// js fallback\n",
+      "lib/index.js": "module.exports = 1;\n",
+    });
+    const OWN_REBUILD =
+      'import { writeFileSync } from "node:fs";\nwriteFileSync("bin/dep", "\\u007fELF native");\n';
+    /** A postinstall, six levels below the checkout, overwriting the root's real `bin/dep`. */
+    const EVIL = `import { writeFileSync } from "node:fs";\nwriteFileSync("../../../../../../${REAL}/bin/dep", "PWNED by dep@1.0.0\\n");\n`;
+    const lock = (hash: string): string =>
+      `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      dep:\n        specifier: 1.0.0\n        version: 1.0.0\n\npackages:\n\n  dep@1.0.0:\n    resolution: {integrity: ${hash}}\n\nsnapshots:\n\n  dep@1.0.0: {}\n`;
+    const modules = (registry: string): string =>
+      `pendingBuilds:\n  - dep@1.0.0\nregistries:\n  default: ${registry}\n`;
+    /** The root project: the real dep@1.0.0 from the registry, rebuilding its own binary. */
+    const ROOT = {
+      "package.json": pkg("root", { pnpm: { onlyBuiltDependencies: ["dep"] } }),
+      "pnpm-lock.yaml": lock(`sha512-${Buffer.from("dep-1.0.0").toString("base64")}`),
+      ...under("vendor/pnpm/dep@1.0.0/dep", dep("install.mjs", OWN_REBUILD)),
+      "vendor/links.json": JSON.stringify([
+        ["node_modules/dep", ".pnpm/dep@1.0.0/node_modules/dep"],
+      ]),
+      "vendor/modules.yaml": modules("https://registry.npmjs.org/"),
+    };
+
+    /**
+     * The base commit with `base`, then the task's commit adding `head`, run with `install` (each
+     * a command and the directory it runs in) and the verify gate `check`.
+     */
+    const runTask = async (
+      install: { argv: string[]; cwd?: string }[],
+      base: Record<string, string>,
+      head: Record<string, string>,
+    ): Promise<{
+      report: GateReport;
+      h: ReturnType<typeof harness>;
+      t: ReturnType<typeof tools>;
+    }> => {
+      const t = tools();
+      const h = harness(
+        { "vendor/lint.mjs": LINT, "src/a.ts": "export const a = 1;\n", ...base },
+        config([
+          ...install.map((gate, i) => ({
+            id: `install-${String(i + 1)}`,
+            layer: "L0" as const,
+            phase: "install" as const,
+            command: gate.argv.map((w) => (w in t ? t[w as keyof typeof t] : w)),
+            ...(gate.cwd === undefined ? {} : { cwd: gate.cwd }),
+          })),
+          { id: "check", layer: "L0", command: ["make", "test"] },
+        ]),
+        {
+          allow: [[NODE], ["make"], [t.pnpm]],
+          env: { ...process.env, PATH: `${t.bin}:${process.env.PATH ?? ""}` },
+        },
+      );
+      unlock.push(h.repo);
+      for (const [path, text] of Object.entries(head)) writeFile(h.repo, path, text);
+      writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+      return { report: await h.run({ head: commitAll(h.repo), layers: ["L0"] }), h, t };
+    };
+    const pnpmRan = (h: ReturnType<typeof harness>, t: ReturnType<typeof tools>): string[] =>
+      h.argvs.filter((a) => a[0] === t.pnpm).map((a) => a.slice(1).join(" "));
+
+    it("the real dep@1.0.0 alone rebuilds its own binary", async () => {
+      const { report } = await runTask([{ argv: ["pnpm", "install"] }], ROOT, {});
+      expect(result(report, "check")).toMatchObject({
+        status: "pass",
+        tool: { tampered: [], self_rebuilt: [{ package: REAL, files: [`${REAL}/bin/dep`] }] },
+      });
+    });
+
+    /** The finding's committed nested project: a fake dep@1.0.0 in tools/node_modules. */
+    const FAKE = "tools/node_modules/.pnpm/dep@1.0.0/node_modules/dep";
+    const COMMITTED = {
+      "tools/package.json": pkg("tools", { dependencies: { dep: "1.0.0" } }),
+      "tools/pnpm-lock.yaml": lock("sha512-AAAA"),
+      "tools/node_modules/.modules.yaml": modules("https://registry.npmjs.org/"),
+      "tools/node_modules/.pnpm/lock.yaml": lock("sha512-AAAA"),
+      ...under(FAKE, dep("evil.mjs", EVIL)),
+    };
+
+    it("(H) a committed tools/node_modules fake added by the task fails every gate as tampering, and no install runs", async () => {
+      const { report, h, t } = await runTask([{ argv: ["pnpm", "install"] }], ROOT, COMMITTED);
+      const paths = Object.keys(COMMITTED)
+        .filter((p) => p.includes("/node_modules/"))
+        .sort();
+      tamperedRun(report, h, paths);
+      expect(result(report, "install-1")).toMatchObject({
+        status: "fail",
+        failure_class: "product",
+        tool: { tampered: paths },
+      });
+      expect(pnpmRan(h, t)).toEqual([]);
+      const log = readFileSync(
+        join(h.repo, result(report, "check").evidence[0]?.ref ?? ""),
+        "utf8",
+      );
+      expect(log).toMatch(/reading 256\(1\)/);
+    });
+
+    it("(H) the same tree committed before the task is an infrastructure error, with the advice", async () => {
+      const { report, h, t } = await runTask(
+        [{ argv: ["pnpm", "install"] }],
+        { ...ROOT, ...COMMITTED },
+        {},
+      );
+      expect(result(report, "check")).toMatchObject({ status: "error", failure_class: "infra" });
+      expect(result(report, "install-1")).toMatchObject({
+        status: "error",
+        failure_class: "infra",
+      });
+      expect(pnpmRan(h, t)).toEqual([]);
+      expect(h.argvs.some((a) => a[0] === "make")).toBe(false);
+      expect(evidenceLog(h.repo, "check.log")).toContain(COMMITTED_TREE_NOTE);
+    });
+
+    it("(D) a second install gate's patchedDependencies copy of dep@1.0.0 patching the root's bin fails", async () => {
+      const PATCHED = "dep@1.0.0_patch_hash=2f3c4ab5d6e7f8091a2b3c4d5e6f7a8b";
+      const { report, h, t } = await runTask(
+        [{ argv: ["pnpm", "install"] }, { argv: ["pnpm", "install"], cwd: "tools" }],
+        ROOT,
+        {
+          "tools/package.json": pkg("tools", {
+            dependencies: { dep: "1.0.0" },
+            pnpm: { patchedDependencies: { "dep@1.0.0": "patches/dep@1.0.0.patch" } },
+          }),
+          "tools/patches/dep@1.0.0.patch": "--- a/package.json\n+++ b/package.json\n",
+          "tools/pnpm-lock.yaml": lock(`sha512-${Buffer.from("dep-1.0.0").toString("base64")}`),
+          ...under(`tools/vendor/pnpm/${PATCHED}/dep`, dep("evil.mjs", EVIL)),
+          "tools/vendor/links.json": JSON.stringify([
+            ["node_modules/dep", `.pnpm/${PATCHED}/node_modules/dep`],
+          ]),
+          "tools/vendor/modules.yaml": modules("https://registry.npmjs.org/"),
+        },
+      );
+      tamperedRun(report, h, [`${REAL}/bin/dep`]);
+      expect(result(report, "check").tool?.self_rebuilt).toBeUndefined();
+      expect(result(report, "check").findings[0]?.message).toMatch(`${SHARED_NAME_NOTE}: dep (`);
+      expect(pnpmRan(h, t)).toEqual([
+        "install --ignore-scripts",
+        "install --ignore-scripts",
+        "rebuild --recursive dep@1.0.0",
+        "rebuild --recursive dep@1.0.0",
+      ]);
+    });
+
+    it("(C) a copy of dep@1.0.0 from a second registry, installed by a second gate, patching the root's bin fails", async () => {
+      const { report, h } = await runTask(
+        [{ argv: ["pnpm", "install"] }, { argv: ["pnpm", "install"], cwd: "tools" }],
+        ROOT,
+        {
+          "tools/package.json": pkg("tools", { dependencies: { dep: "1.0.0" } }),
+          "tools/.npmrc": "registry=http://127.0.0.1:4873/\n",
+          "tools/pnpm-lock.yaml": lock("sha512-AAAA"),
+          ...under("tools/vendor/pnpm/dep@1.0.0/dep", dep("evil.mjs", EVIL)),
+          "tools/vendor/links.json": JSON.stringify([
+            ["node_modules/dep", ".pnpm/dep@1.0.0/node_modules/dep"],
+          ]),
+          "tools/vendor/modules.yaml": modules("http://127.0.0.1:4873/"),
+        },
+      );
+      tamperedRun(report, h, [`${REAL}/bin/dep`]);
+      expect(result(report, "check").tool?.self_rebuilt).toBeUndefined();
+      expect(result(report, "check").findings[0]?.message).toMatch(`${SHARED_NAME_NOTE}: dep (`);
     });
   });
 });

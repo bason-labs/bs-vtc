@@ -39,19 +39,29 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   dependency. Two installed versions of one package with an install script (esbuild 0.21 for
   Vite beside esbuild 0.25) are fine: npm rebuilds each installed directory on its own, and pnpm
   rebuilds each by name and version, so each may still rebuild only its own directory. With pnpm,
-  that holds only when every package of that name comes from the registry with an integrity hash
-  in `pnpm-lock.yaml`. If one of them comes from a `file:`, `link:`, git, tarball-URL or workspace
-  source, a package could pose as the other, so none of them may rebuild itself: every change to
-  any of them fails the gates, and `vtc calibrate` tells you to install it from the registry,
-  install one version, or keep its script from running. A dependency whose install script writes
-  anywhere else fails the gates. If that is a code generator (Prisma), `vtc calibrate` tells you to
-  run it as an install gate of its own after the install. Your own projects' install scripts may
-  add files only under their build-output directories (`dist`, `build`, `out`, `.next`, `target`,
-  and `lib` when `.gitignore` ignores it). Bun runs every package's scripts at once, so with Bun no
-  package may rebuild itself and the gates carry a warning. Adding a `pnpm-workspace.yaml` or
-  `pnpm` settings in a package.json during a run fails the gates too, and so does adding a Babel
-  or SWC config (`babel.config.*`, `.babelrc*`, `.swcrc`), `.pytest.ini`, `.cargo/config(.toml)`
-  or `go.work(.sum)`, which are now protected configs everywhere a diff's configs are checked.
+  a package may rebuild itself only when it is the one installed copy of its name and version in
+  the whole checkout, in the store of the install that rebuilt it, and every package of its name
+  comes from one registry with an integrity hash in the `pnpm-lock.yaml` of a store an install
+  populated in this run. If one of them comes from a `file:`, `link:`, git, tarball-URL or
+  workspace source, is patched (`patchedDependencies`), comes from a second registry, or the same
+  version is installed twice (as by a nested project's own install), a package could pose as the
+  other, so none of them may rebuild itself: every change to any of them fails the gates, and
+  `vtc calibrate` tells you to install it from the registry, install one version, share one store
+  with nested projects, or keep its script from running. A commit that tracks files in a dependency
+  tree (below a `node_modules` or `.yarn/unplugged`, or in a Python virtual environment) fails the
+  run before any install: as tampering when the task added them, otherwise as an infrastructure
+  error, and `vtc calibrate` stops and tells you to stop tracking them. A dependency whose install
+  script writes anywhere else fails the gates. If that is a code generator (Prisma),
+  `vtc calibrate` tells you to run it as an install gate of its own after the install. Your own
+  projects' install scripts may add files only under their build-output directories (`dist`,
+  `build`, `out`, `.next`, `target`, and `lib` when `.gitignore` ignores it). Bun runs every
+  package's scripts at once, so with Bun no package may rebuild itself and the gates carry a
+  warning. Adding a `pnpm-workspace.yaml`, an `.npmrc`, `.yarnrc.yml` or `.pnpmfile.cjs`, or `pnpm`
+  settings in a package.json during a run fails the gates too; a task that changes a package.json's
+  `pnpm` key (its `patchedDependencies`, `overrides` or `onlyBuiltDependencies`) needs a human,
+  like the other protected configs. Adding a Babel or SWC config (`babel.config.*`, `.babelrc*`,
+  `.swcrc`), `.pytest.ini`, `.cargo/config(.toml)` or `go.work(.sum)` fails the gates too; these
+  are now protected configs everywhere a diff's configs are checked.
   Before each check gate, anything changed since the install fails it too; build outputs, reports
   and the tools' caches are fine. Check gates also get a fresh empty home of their own, so an
   install script can no longer change them through `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml` or

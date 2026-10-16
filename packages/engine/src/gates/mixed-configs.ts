@@ -1,7 +1,7 @@
 /**
  * Files that hold both dependencies and lint/test configuration: `pyproject.toml` (`[tool.ruff]`,
  * `[tool.pytest.ini_options]`, `[tool.mypy]`, `[tool.coverage]`, …), `package.json` (`scripts`,
- * `jest`, `eslintConfig`, `mocha`, `packageManager`, …) and `pnpm-workspace.yaml` (its settings,
+ * `jest`, `eslintConfig`, `mocha`, `packageManager`, `pnpm`, …) and `pnpm-workspace.yaml` (its settings,
  * such as `scriptShell` and `nodeOptions`, next to `packages` and the catalogs). Protecting them
  * whole would flag every dependency change, so only their tool sections are guarded (§7.2 L1/L5,
  * §7.6 rule 5): L5 flags a diff that changes a tool section, and L1 runs with the head file whose
@@ -36,7 +36,9 @@ const PYPROJECT_GUARDED: readonly (readonly string[])[] = [
 /**
  * Top-level package.json keys that configure a gate. `scripts` is guarded whole: a gate command is
  * often `pnpm run test`, and a guarded script can call any other one. `packageManager` picks the
- * npm, pnpm or yarn build (or URL) that Corepack runs for such a command.
+ * npm, pnpm or yarn build (or URL) that Corepack runs for such a command. `pnpm` is guarded whole
+ * (spine §5 reading 256(4)): its `patchedDependencies`, `overrides` and `onlyBuiltDependencies`
+ * change what the install's scripts run.
  */
 const PACKAGE_JSON_KEYS = [
   "scripts",
@@ -47,6 +49,7 @@ const PACKAGE_JSON_KEYS = [
   "c8",
   "nyc",
   "packageManager",
+  "pnpm",
 ];
 
 /**
