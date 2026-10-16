@@ -63,8 +63,9 @@ describe("the test run's own temp root (D-cz)", () => {
     expect(Buffer.byteLength(deepestTestSocket(`/private${macos}`))).toBeGreaterThan(
       UNIX_SOCKET_MAX_BYTES,
     );
-    expect(testTmpBase(macos, "darwin")).toBe("/tmp");
-    expect(testTmpBase(macos, "linux")).toBe("/tmp");
+    // the resolved form, so the check does not depend on this path existing (it does not on Linux)
+    expect(testTmpBase(`/private${macos}`, "darwin")).toBe("/tmp");
+    expect(testTmpBase(`/private${macos}`, "linux")).toBe("/tmp");
     expect(testTmpBase("/tmp", "darwin")).toBe("/tmp");
     expect(testTmpBase("/scratch/t", "linux")).toBe("/scratch/t");
     expect(testTmpBase("C:\\Users\\me\\AppData\\Local\\Temp", "win32")).toBe(
