@@ -13,14 +13,18 @@ any release may change behaviour. Role prompt changes have their own log in `rol
 - **Usage limits on Codex resume on time.** When Codex stops a role at its usage limit, VTC now
   reads which window was hit and when it resets (from Codex's rate-limit data, or the "try again
   at 4:00 PM" time in your local zone) and schedules the resume for then, instead of retrying
-  every 15 minutes.
+  every 15 minutes. Only the limit that actually stopped the turn counts, so a stale window of
+  another limit never brings the resume forward.
 - **Lighter role runs.** Every role is told its context budget, that its pack lists every input
   there is, and to read code by line range, not whole files; a quick fix's specification is
   kept short. Packs of steps that change no code no longer list the gate commands.
 - **Screenshots in a request.** `start` and `change_request` take image attachments (file
-  paths). VTC copies them into the run and gives them to the roles that write the
-  specification. If your Lead's app does not give it the paths of pasted images, the Lead says
-  so and asks you to describe them or attach the files.
+  paths). VTC keeps private copies in its local state (`.vtc/state/attachments/`), never
+  committed, pushed or added to PR evidence, and gives them to the roles that write the
+  specification; a change request's screenshots also go to the role that owns what changes
+  (the Architect, the Designer, or the task whose interface contract changes). If your Lead's
+  app does not give it the paths of pasted images, the Lead says so and asks you to describe
+  them or attach the files.
 - **Your Claude Code statusline is yours (H-10).** `vtc install claude-code` no longer wraps
   your statusline in `vtc statusline-tee`. Only `vtc install claude-code --statusline` does,
   after asking you at the terminal, and never twice. `vtc install claude-code --no-statusline`

@@ -4688,7 +4688,8 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       neither: it matched only the wait form ("try again in 2 hours") and the camel-case
       `usageLimitExceeded`. Now (`limitReset`): (1) a `rate_limits` window at 100% gives the
       window kind and its reset (the latest, when two are full), wherever the stream carries
-      `rate_limits` (top level or a transcript's `event_msg` payload, the last one with windows);
+      `rate_limits` (top level or a transcript's `event_msg` payload, the last one with windows;
+      reading 266: only the windows of the limit id that ended the turn);
       (2) else the error's own `resets_at`, else the message's clock time read in the machine's
       local zone (Codex prints its local time; a bare time is the first such time at or after the
       run's end less a minute, the dated form "Oct 17th, 2026 4:00 PM" is taken as written), else
@@ -4725,11 +4726,12 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       (`ATTACHMENTS.extensions`) and an image signature (PNG, JPEG, GIF, WebP, HEIC, BMP, TIFF),
       else `invalid` and nothing starts; so a Lead steered by injected text cannot have a key,
       a token or a credential file copied. (2) It copies them to
-      `.vtc/runs/<run>/attachments/<n>-<name>` (`runAttachmentPath`; git-tracked with
-      `request.md`, the same human's data), records the paths on `run.started.attachments` or
-      `change_request.opened.attachments` (numbered after the run's earlier ones), and copies
-      them into a front-half role's worktree; DISCOVER and SPECIFY packs list them as
-      `attachments` inputs. (3) The Lead skill passes the paths when the host shows them; when
+      `.vtc/state/attachments/<run>/<n>-<name>` (`runAttachmentPath`; untracked local state,
+      never committed with the run, reading 266), records the paths on `run.started.attachments`
+      or `change_request.opened.attachments` (numbered after the run's earlier ones), and copies
+      the ones a pack lists into that role's worktree, untracked; DISCOVER and SPECIFY packs list
+      them all as `attachments` inputs, and a change request's also reach the role that owns the
+      changed artifact (reading 266). (3) The Lead skill passes the paths when the host shows them; when
       it does not, the Lead tells the human in one line that VTC did not receive the images and
       asks them to describe them or attach the files by path (§7 image paths row). Images are not
       redacted (AD-18): only the human's own files reach the run, by the human's choice.
@@ -4770,6 +4772,35 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       `git check-ignore -v` reports it (a tracked file or a `!` rule is fine) and the line to
       use instead: `.vtc/state/`, the only part of `.vtc/` that stays out of git (the engine
       commits the rest at its milestones). Neither edits the user's ignore files.
+266.  **Attachments are the owner's private screenshots; a change request's reach their role; the
+      Codex reset comes from the limit that ended the turn** (amends readings 262, 260 and D-cz,
+      readings 246 and 249). _Lead decision 2026-10-17, pending human review._ (1) _Storage_:
+      image attachments are the owner's private screenshots, so the engine keeps its copies
+      untracked under `.vtc/state/attachments/<run>/` (`runAttachmentPath`), never in
+      `.vtc/runs/<run>/`: never committed with the run, never sent upstream, never part of
+      automatic PR evidence (nothing under `.vtc/state/` is). Packs list them from there.
+      A role working in a worktree gets the copies its pack lists at the same path, beside a
+      `.gitignore` of `*`, so no worktree snapshot commits them whatever the repo's own ignores
+      say (`placeAttachments`). (2) _Change requests_: `change_request` took attachments, but
+      only DISCOVER and SPECIFY packs listed them, so a change past SPECIFY never showed its
+      images to anyone. Now the packs of the role that owns the changed artifact list them too
+      (`ownedAttachments`): the Architect's for `architecture`, the Designer's for `design`, the
+      BA's for `spec`, and every dispatch of the provider task for `interface_contract`; a change
+      request the human rejected gives none. (3) _Codex reset_: the session transcript reports
+      `rate_limits` per `limit_id` (`codex`, then `premium` with null windows on the owner's run);
+      reading 260 kept the last windows seen, so a full window of another limit, with an earlier
+      reset, decided the resume time. The reader now keeps each limit id's last windows and reads
+      only those of the limit that ended the turn (the last `rate_limits` before the failure);
+      the reset is the latest of the time the failure names (its `resets_at`, else the
+      message's clock time or wait) and every full window's `resets_at`, and the window is the
+      full one with that reset, else the one within 5 minutes of it. (4) _Test temp root_: with
+      macOS's default TMPDIR (`/var/folders/…/T/`, resolved under `/private`) the per-run test
+      temp root made the cli daemon tests' socket paths longer than `UNIX_SOCKET_MAX_BYTES`
+      (`SocketPathTooLongError`). The test global setup (`vitest.tmpdir.ts`, `testTmpBase`) now
+      puts the root under `/tmp` when the deepest test socket under the OS temp directory would
+      not fit; it stays per run and is removed at the end. Product socket paths are unchanged.
+      Tests: `events.test.ts` (Codex limit reset), `owner-run.test.ts` (attachments),
+      `contracts-5-12.test.ts`, `test-tmpdir.test.ts`.
 
 ## 6. Change process for this spine
 

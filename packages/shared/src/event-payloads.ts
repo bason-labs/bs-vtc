@@ -227,8 +227,9 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     automation: AutomationRunRefSchema.optional(),
     /**
      * The engine's copies of the images the human attached to the request
-     * (`StartInput.attachments`), `runAttachmentPath(run, 1…n, …)`, git-tracked with the run.
-     * SPECIFY and DISCOVER packs list them as `attachments` inputs. New in 5.12.0.
+     * (`StartInput.attachments`), `runAttachmentPath(run, 1…n, …)`, in gitignored local state
+     * (never committed with the run, reading 266). SPECIFY and DISCOVER packs list them as
+     * `attachments` inputs. New in 5.12.0.
      */
     attachments: z.array(RelPathSchema).max(ATTACHMENTS.max).optional(),
   }),
@@ -518,7 +519,8 @@ export const EVENT_PAYLOAD_SCHEMAS = {
       summary: z.string().min(1).max(300),
       /**
        * The engine's copies of the images the human attached (`ChangeRequestInput.attachments`),
-       * `runAttachmentPath`, numbered after the run's earlier ones. New in 5.12.0.
+       * `runAttachmentPath`, numbered after the run's earlier ones; listed in the packs of the role
+       * that owns the changed artifact (reading 266). New in 5.12.0.
        */
       attachments: z.array(RelPathSchema).max(ATTACHMENTS.max).optional(),
     })

@@ -4,7 +4,7 @@
  * up in the user's TMPDIR (tens of thousands of leftovers there made every mkdtemp slower, and
  * engine tests timed out under load).
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,12 @@ import { UNIX_SOCKET_MAX_BYTES } from "@vtc/shared";
 import { availableParallelism } from "node:os";
 import { sharedConfig, testWorkers } from "../../../vitest.shared.ts";
 import engineConfig from "../../../packages/engine/vitest.config.ts";
-import setupTestTmpdir, { TEST_TMP_PREFIX } from "../../../vitest.tmpdir.ts";
+import setupTestTmpdir, {
+  deepestTestSocket,
+  TEST_SOCKET_MAX_BYTES,
+  TEST_TMP_PREFIX,
+  testTmpBase,
+} from "../../../vitest.tmpdir.ts";
 
 describe("the test run's own temp root (D-cz)", () => {
   it("is every package's global setup", () => {
@@ -47,9 +52,46 @@ describe("the test run's own temp root (D-cz)", () => {
   });
 
   it("keeps a test's socket path under it within the Unix socket limit", () => {
-    // engine tests bind `<tmp>/vh-XXXXXX/run/<16 hex>.sock` (AD-12)
-    const socket = join(tmpdir(), "vh-XXXXXX", "run", `${"0".repeat(16)}.sock`);
+    // engine and cli tests bind `<tmp>/vh-XXXXXX/run/<16 hex>.sock` (AD-12), on the resolved path
+    const socket = join(realpathSync(tmpdir()), "vh-XXXXXX", "run", `${"0".repeat(16)}.sock`);
     expect(Buffer.byteLength(socket)).toBeLessThanOrEqual(UNIX_SOCKET_MAX_BYTES);
+    expect(TEST_SOCKET_MAX_BYTES).toBe(UNIX_SOCKET_MAX_BYTES);
+  });
+
+  it("goes under /tmp when the OS temp directory is too long for a socket (macOS's default, reading 266)", () => {
+    const macos = "/var/folders/kt/dz52y9w50rddwtjqj04r501r0000gn/T/";
+    expect(Buffer.byteLength(deepestTestSocket(`/private${macos}`))).toBeGreaterThan(
+      UNIX_SOCKET_MAX_BYTES,
+    );
+    expect(testTmpBase(macos, "darwin")).toBe("/tmp");
+    expect(testTmpBase(macos, "linux")).toBe("/tmp");
+    expect(testTmpBase("/tmp", "darwin")).toBe("/tmp");
+    expect(testTmpBase("/scratch/t", "linux")).toBe("/scratch/t");
+    expect(testTmpBase("C:\\Users\\me\\AppData\\Local\\Temp", "win32")).toBe(
+      "C:\\Users\\me\\AppData\\Local\\Temp",
+    );
+    expect(Buffer.byteLength(deepestTestSocket(realpathSync("/tmp")))).toBeLessThanOrEqual(
+      UNIX_SOCKET_MAX_BYTES,
+    );
+  });
+
+  it("still makes a fresh root of its own under /tmp, and removes it", () => {
+    const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+    try {
+      process.env.TMPDIR = `/tmp/${"x".repeat(80)}`;
+      const teardown = setupTestTmpdir();
+      const root = tmpdir();
+      expect(root.startsWith(`/tmp/${TEST_TMP_PREFIX}`)).toBe(true);
+      expect(existsSync(root)).toBe(true);
+      teardown();
+      expect(existsSync(root)).toBe(false);
+      expect(process.env.TMPDIR).toBe(`/tmp/${"x".repeat(80)}`);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+      }
+    }
   });
 });
 

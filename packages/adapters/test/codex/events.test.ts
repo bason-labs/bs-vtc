@@ -217,12 +217,97 @@ describe("Codex limit reset (the owner's first run, codex-cli 0.163.0, spine §5
   });
 
   it("prefers a used-up window of the structured rate limits, and names it", () => {
-    const lines = fixtureLines("codex/session-usage-limit.synthetic.jsonl");
-    // the last `rate_limits` without windows (another limit id) does not erase the earlier one
+    // without the later `premium` token_count the `codex` limit ended the turn: its full window
+    // resets at 12:30:02, after the message's rounded 7:30 PM, so the window's reset wins
+    const lines = fixtureLines("codex/session-usage-limit.synthetic.jsonl").filter(
+      (line) => !line.includes('"limit_id":"premium"'),
+    );
     expect(valid(codexOutcomeAfterExit(lines, exit(1)))).toMatchObject({
       kind: "limit",
       resets_at: "2026-10-13T12:30:02.000Z",
       window: "five_hour",
+    });
+  });
+
+  it("reads only the windows of the limit that ended the turn (reading 266)", () => {
+    // the last `rate_limits` is another limit id (`premium`, no windows): the `codex` window,
+    // full as it is, did not end this turn, so the message's time decides
+    const lines = fixtureLines("codex/session-usage-limit.synthetic.jsonl");
+    expect(valid(codexOutcomeAfterExit(lines, exit(1)))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T12:30:00.000Z",
+      window: null,
+    });
+  });
+
+  it("a stale full window with an earlier reset never wins over the later time the failure names", () => {
+    const tokenCount = (limits: Record<string, unknown>): string =>
+      JSON.stringify({ type: "event_msg", payload: { type: "token_count", rate_limits: limits } });
+    const lines = [
+      // `codex` used up, resetting at 17:00 local (10:00Z)
+      tokenCount({
+        limit_id: "codex",
+        primary: { used_percent: 100.0, window_minutes: 300, resets_at: 1791885600 },
+        secondary: { used_percent: 40.0, window_minutes: 10080, resets_at: 1792400400 },
+      }),
+      tokenCount({ limit_id: "premium", primary: null, secondary: null }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          error: {
+            message:
+              "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 9:15 PM.",
+            codex_error_info: "usage_limit_exceeded",
+          },
+        },
+      }),
+    ];
+    // ended 15:00 local (+07): 9:15 PM is 21:15 local, 14:15Z
+    expect(valid(codexOutcomeAfterExit(lines, exit(1)))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T14:15:00.000Z",
+      window: null,
+    });
+    // and the failure's own `resets_at` likewise beats the stale window
+    const structured = [
+      ...lines.slice(0, 2),
+      JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message: "stopped",
+          codex_error_info: "usage_limit_exceeded",
+          resets_at: 1791900900,
+        },
+      }),
+    ];
+    expect(codexOutcomeAfterExit(structured, exit(1))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T14:15:00.000Z",
+    });
+  });
+
+  it("takes the latest of the named time and a full window of the same limit", () => {
+    const lines = [
+      JSON.stringify({
+        type: "token_count",
+        rate_limits: {
+          limit_id: "codex",
+          primary: { used_percent: 100.0, window_minutes: 300, resets_at: 1791885600 },
+        },
+      }),
+      JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message: "usage limit reached, try again at 9:15 PM.",
+          codex_error_info: "usage_limit_exceeded",
+        },
+      }),
+    ];
+    expect(codexOutcomeAfterExit(lines, exit(1))).toMatchObject({
+      kind: "limit",
+      resets_at: "2026-10-13T14:15:00.000Z",
+      window: null,
     });
   });
 

@@ -202,22 +202,22 @@ describe("contracts 5.12.0", () => {
       expect(PACK_INPUT_TYPES.attachments).toBe("attachments");
     });
 
-    it("copies each into the run under a numbered, safe name, recorded on the events", () => {
+    it("copies each into gitignored local state under a numbered, safe name, recorded on the events (reading 266)", () => {
       const run = "r20261016-052258";
       expect(
         runAttachmentPath(run, 1, "/Users/me/Desktop/Screenshot 2026-10-16 at 12.20.01.png"),
-      ).toBe(`.vtc/runs/${run}/attachments/1-Screenshot-2026-10-16-at-12.20.01.png`);
+      ).toBe(`.vtc/state/attachments/${run}/1-Screenshot-2026-10-16-at-12.20.01.png`);
       expect(runAttachmentPath(run, 2, "C:\\Users\\me\\..hidden.PNG")).toBe(
-        `.vtc/runs/${run}/attachments/2-hidden.PNG`,
+        `.vtc/state/attachments/${run}/2-hidden.PNG`,
       );
-      expect(runAttachmentPath(run, 3, "/tmp/")).toBe(`.vtc/runs/${run}/attachments/3-attachment`);
+      expect(runAttachmentPath(run, 3, "/tmp/")).toBe(`.vtc/state/attachments/${run}/3-attachment`);
       expect(() => runAttachmentPath(run, 0, "/tmp/a.png")).toThrow(RangeError);
       const started = EVENT_PAYLOAD_SCHEMAS["run.started"];
       const data = {
         ...start,
         merge_level: 2,
         pipeline_config_hash: "a".repeat(64),
-        attachments: [`.vtc/runs/${run}/attachments/1-a.png`],
+        attachments: [`.vtc/state/attachments/${run}/1-a.png`],
       };
       expect(started.safeParse(data).success).toBe(true);
       expect(started.safeParse({ ...data, attachments: ["/abs.png"] }).success).toBe(false);

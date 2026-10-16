@@ -22,8 +22,18 @@ import {
 import { resultFields } from "../../src/core/dispatch.js";
 import { createPluginCatalog, type CallContext, type PluginCatalog } from "../../src/core/index.js";
 import { USAGE_IDLE_LOG_MS } from "../../src/core/engine.js";
-import { cleanupDirs, tempDir, writeFile } from "../helpers/repo.js";
-import { CLAUDE, createHarness, only, type Harness } from "../helpers/engine-harness.js";
+import { cleanupDirs, git, tempDir, writeFile } from "../helpers/repo.js";
+import {
+  CLAUDE,
+  createHarness,
+  draft,
+  only,
+  SPEC_ONE,
+  submitResult,
+  toPlanner,
+  workdir,
+  type Harness,
+} from "../helpers/engine-harness.js";
 
 afterEach(cleanupDirs);
 
@@ -198,23 +208,79 @@ describe("what a BA reads (reading 261)", { timeout: 30_000 }, () => {
 });
 
 describe("image attachments (reading 262)", { timeout: 30_000 }, () => {
-  it("copies the images into the run and lists them in the BA's pack", async () => {
+  it("keeps the images in local state, lists them in the BA's pack, and never commits them (reading 266)", async () => {
     const dir = tempDir("vtc-attach-");
     const shot = join(dir, "Screenshot 2026-10-16 at 12.20.01.png");
     writeFileSync(shot, PNG);
     const h = createHarness();
     await quickFix(h, CLAUDE, [shot]);
     const run = h.engine.status({}).run.id;
-    const copy = `.vtc/runs/${run}/attachments/1-Screenshot-2026-10-16-at-12.20.01.png`;
+    const copy = `.vtc/state/attachments/${run}/1-Screenshot-2026-10-16-at-12.20.01.png`;
     expect(ofType(h, "run.started")[0]?.data.attachments).toEqual([copy]);
     expect(readFileSync(join(h.repo, copy))).toEqual(PNG);
+    expect(existsSync(join(h.repo, `.vtc/runs/${run}/attachments`))).toBe(false);
     const spawn = only(await next(h, CLAUDE), "ba");
     const pack = readFileSync(join(h.repo, spawn.pack), "utf8");
     expect(pack).toContain(`- attachments: ${copy}`);
-    // the BA's own worktree has the copy too
-    const cwd = /Work in: (.+)/.exec(spawn.prompt)?.[1] ?? "";
-    expect(cwd).not.toBe("");
-    expect(existsSync(join(cwd, copy))).toBe(true);
+    // the BA's own worktree has the copy too, untracked there
+    const cwd = workdir(spawn);
+    expect(readFileSync(join(cwd, copy))).toEqual(PNG);
+    expect(git(cwd, "status", "--porcelain", "--untracked-files=all")).not.toContain("attachments");
+    // and no commit on any branch, the role's own included, carries it
+    writeFile(cwd, ".vtc/spec/spec.md", "# Spec\n\n## REQ-1 Order total\n\n- REQ-1.AC-1: x\n");
+    const out = await submitResult(h, spawn, {
+      exit: "done",
+      artifacts: [{ type: "spec", path: ".vtc/spec/spec.md" }],
+    });
+    expect(out.accepted).toBe(true);
+    await h.engine.settle();
+    expect(git(h.repo, "log", "--all", "--name-only", "--format=")).not.toContain("attachments");
+    await h.release();
+  });
+
+  it("lists a change request's images in the pack of the role that owns the artifact, past SPECIFY", async () => {
+    const dir = tempDir("vtc-attach-");
+    const shot = join(dir, "queue.png");
+    writeFileSync(shot, PNG);
+    const h = createHarness();
+    const planner = await toPlanner(h, SPEC_ONE);
+    const cr = await h.engine.changeRequest(
+      {
+        artifact: "architecture",
+        summary: "Use the queue in the screenshot",
+        detail: "See the attached diagram",
+        attachments: [shot],
+      },
+      CLAUDE,
+    );
+    const run = h.engine.status({}).run.id;
+    const copy = `.vtc/state/attachments/${run}/1-queue.png`;
+    expect(ofType(h, "change_request.opened")[0]?.data.attachments).toEqual([copy]);
+    await h.engine.answer(
+      { escalation: cr.escalation, answer: { option: "approve", who_should_have_caught: "none" } },
+      CLAUDE,
+    );
+    const planned = await submitResult(h, planner, {
+      exit: "done",
+      tasks: [draft("T-1", { arch_triage: "extends" })] as never,
+    });
+    expect(planned.accepted).toBe(true);
+    await h.engine.settle();
+    const architect = only((await h.engine.next({}, CLAUDE)).actions, "architect");
+    expect(readFileSync(join(h.repo, architect.pack), "utf8")).toContain(`- attachments: ${copy}`);
+    expect(readFileSync(join(workdir(architect), copy))).toEqual(PNG);
+    // the planner, which owns no architecture, never had it
+    expect(readFileSync(join(h.repo, planner.pack), "utf8")).not.toContain("attachments");
+    writeFile(workdir(architect), ".vtc/architecture/notes/T-1.md", "# T-1 design note\n");
+    const out = await submitResult(h, architect, {
+      exit: "done",
+      artifacts: [{ type: "design_note", path: ".vtc/architecture/notes/T-1.md" }],
+    });
+    expect(out.accepted).toBe(true);
+    // QA on T-1 does not own the architecture
+    expect(readFileSync(join(h.repo, only(out.actions, "qa").pack), "utf8")).not.toContain(
+      "- attachments:",
+    );
     await h.release();
   });
 

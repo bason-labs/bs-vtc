@@ -76,8 +76,10 @@ interface RateWindow {
 interface CodexScan {
   readonly threadId: string | null;
   /**
-   * The last `rate_limits` the run reported with at least one window (a `token_count` event:
-   * `{primary, secondary}`, each `{used_percent, window_minutes, resets_at}`), or null.
+   * The windows of the limit that ended the turn: the `limit_id` of the last `rate_limits` the
+   * run reported (a `token_count` event: `{limit_id, primary, secondary}`, each `{used_percent,
+   * window_minutes, resets_at}`), with the last windows that limit id reported; null when it
+   * reported none. Another limit id's windows are dropped (spine §5 reading 266).
    */
   readonly rateLimits: readonly RateWindow[] | null;
   readonly lastMessage: string | null;
@@ -132,12 +134,16 @@ const rateLimitsOf = (value: unknown): readonly RateWindow[] | null => {
 /** Times within this of each other name the same reset (the host rounds the one it prints). */
 const SAME_RESET_MS = 5 * 60_000;
 
+const isFull = (w: RateWindow): boolean =>
+  w.usedPercent !== null && w.usedPercent >= 100 && w.resetsAt !== null;
+
 /**
- * Which window a limit hit and when it resets (spine §5 reading 260): the structured
- * `rate_limits` first, when a window is used up (the latest reset among full ones); else the
- * failure's own `resets_at`, else the time the message names (a clock time in the machine's local
- * zone, else a wait), each with the window whose reset it matches. Unknown stays `null` (the
- * engine backs off and re-reads usage).
+ * Which window a limit hit and when it resets (spine §5 readings 260, 266): only the windows of
+ * the limit that ended the turn count (`CodexScan.rateLimits`; another limit id's windows, even a
+ * full one, are stale for this turn). The reset is the latest of the time the failure names (its
+ * own `resets_at`, else the message's clock time in the machine's local zone, else a wait) and
+ * every used-up window's `resets_at`; the window is the used-up one with that reset, else the one
+ * whose reset the time matches. Unknown stays `null` (the engine backs off and re-reads usage).
  */
 const limitReset = (
   s: CodexScan,
@@ -146,20 +152,24 @@ const limitReset = (
 ): { readonly window: UsageWindowKind | null; readonly resets_at: string | null } => {
   const windows = s.rateLimits ?? [];
   const full = windows
-    .filter((w) => w.usedPercent !== null && w.usedPercent >= 100 && w.resetsAt !== null)
-    .sort((a, b) => Date.parse(b.resetsAt ?? "") - Date.parse(a.resetsAt ?? ""))[0];
-  if (full !== undefined) return { window: full.kind, resets_at: full.resetsAt };
+    .filter(isFull)
+    .sort((a, b) => Date.parse(b.resetsAt ?? "") - Date.parse(a.resetsAt ?? ""));
   const named =
     endedAt === null
       ? null
       : (resetFromClockText(failure.message, endedAt) ??
         resetFromWaitText(failure.message, endedAt));
-  const at = failure.resetsAt ?? named;
-  if (at === null) return { window: null, resets_at: null };
-  const match = windows.find(
-    (w) =>
-      w.resetsAt !== null && Math.abs(Date.parse(w.resetsAt) - Date.parse(at)) <= SAME_RESET_MS,
+  const candidates = [failure.resetsAt ?? named, ...full.map((w) => w.resetsAt)].filter(
+    (t): t is string => t !== null,
   );
+  const at = candidates.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  if (at === undefined) return { window: null, resets_at: null };
+  const match =
+    full.find((w) => w.resetsAt === at) ??
+    windows.find(
+      (w) =>
+        w.resetsAt !== null && Math.abs(Date.parse(w.resetsAt) - Date.parse(at)) <= SAME_RESET_MS,
+    );
   return { window: match?.kind ?? null, resets_at: at };
 };
 
@@ -223,7 +233,9 @@ const scan = (lines: readonly string[]): CodexScan => {
   const { events, unrecognized: unparsed } = parseJsonLines(lines);
   let unrecognized = unparsed;
   let threadId: string | null = null;
-  let rateLimits: readonly RateWindow[] | null = null;
+  // the last windows each limit id reported, and the limit id the run reported last
+  const windowsByLimit = new Map<string | null, readonly RateWindow[]>();
+  let lastLimit: string | null = null;
   let lastMessage: string | null = null;
   let tokens: TokenUsage | null = null;
   let terminal: CodexScan["terminal"] = null;
@@ -234,7 +246,11 @@ const scan = (lines: readonly string[]): CodexScan => {
   for (const line of events) {
     // a session transcript wraps Codex's own events (`{type: "event_msg", payload: {...}}`)
     const event = line.type === "event_msg" && isRecord(line.payload) ? line.payload : line;
-    rateLimits = rateLimitsOf(event.rate_limits) ?? rateLimits;
+    if (isRecord(event.rate_limits)) {
+      lastLimit = text(event.rate_limits.limit_id);
+      const windows = rateLimitsOf(event.rate_limits);
+      if (windows !== null) windowsByLimit.set(lastLimit, windows);
+    }
     const item = isRecord(event.item) ? event.item : {};
     if (typeof event.type === "string" && ITEM_EVENTS.has(event.type)) {
       // Codex reports its own warnings as `error` items (the recorded refusal starts with one)
@@ -274,7 +290,7 @@ const scan = (lines: readonly string[]): CodexScan => {
     worked = true;
   return {
     threadId,
-    rateLimits,
+    rateLimits: windowsByLimit.get(lastLimit) ?? null,
     lastMessage,
     tokens,
     terminal,

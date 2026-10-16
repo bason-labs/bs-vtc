@@ -36,7 +36,7 @@ import {
   type EffectiveRoleContract,
 } from "@vtc/shared";
 import { restoreHostConfig } from "../git/index.js";
-import { runAttachments } from "./attachments.js";
+import { ownedAttachments, placeAttachments, runAttachments } from "./attachments.js";
 import { budgetState, sharesExceeded } from "./budget.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import {
@@ -965,11 +965,9 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
           ]
         : (contract?.tools.write_paths ?? []);
   const inputs: TaskPackInput["inputs"] = [...(step.inputs ?? [])];
-  if (task === undefined && ["discover", "specify"].includes(state.run.phase)) {
+  const frontHalf = task === undefined && ["discover", "specify"].includes(state.run.phase);
+  if (frontHalf) {
     inputs.push({ type: "request", path: `.vtc/runs/${state.id}/request.md` });
-    // reading 262: the images the human attached to the request or a change request
-    for (const path of runAttachments(state))
-      inputs.push({ type: PACK_INPUT_TYPES.attachments, path });
   } else if (state.automation !== null && step.role === "spec_verifier") {
     // an automatic run's issue is its spec: the Spec Verifier checks the work against it too
     // (AD-27 rule 2, D-cd), and only this input type tells it the run is automatic (reading
@@ -979,6 +977,13 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
       path: `.vtc/runs/${state.id}/request.md`,
     });
   }
+  // reading 262: the images the human attached to the request or a change request; reading 266:
+  // past SPECIFY, a change request's images reach the role that owns the changed artifact
+  for (const path of new Set([
+    ...(frontHalf ? runAttachments(state) : []),
+    ...ownedAttachments(state, step.role, step.task),
+  ]))
+    inputs.push({ type: PACK_INPUT_TYPES.attachments, path });
   if (task !== undefined && step.role === "engineer") {
     const qa = lastQaAuthor(state, task.id);
     for (const a of (
@@ -1397,12 +1402,14 @@ export const dispatchStep = (
   const pinned = selection.pinned ?? compiledDefaultPrompt(k, target) ?? core?.pinned ?? null;
   // AD-21 rule 2, reading 117: the pinned section is the pack's opening `Role heuristics` block;
   // a replay trial reads the recorded pack, run as a task-less role (reading 176)
+  const packInput =
+    step.replay === undefined ? packFor(k, h, step, actionId) : trialPack(h, step.replay, actionId);
   const pack = writeTaskPack(k.deps.repoRoot, {
-    ...(step.replay === undefined
-      ? packFor(k, h, step, actionId)
-      : trialPack(h, step.replay, actionId)),
+    ...packInput,
     ...(pinned === null ? {} : { role_heuristics: pinned.text }),
   });
+  // reading 266: the attachments the pack lists, in the role's worktree too, untracked
+  placeAttachments(k.deps.repoRoot, cwd, packInput.inputs ?? []);
   const resume = step.resume !== undefined && step.resume.host === host ? step.resume : undefined;
   step.onDispatch?.();
   // a canary covers task dispatches only (its arm is sticky per task)
