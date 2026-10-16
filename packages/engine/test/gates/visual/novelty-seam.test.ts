@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { deflateSync } from "node:zlib";
+import { constants, deflateRawSync, inflateSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { DESIGN_LIBRARY_DIR, NoveltyReportSchema, type DesignLibraryEntry } from "@vtc/shared";
 import { createGitOps } from "../../../src/git/index.js";
@@ -18,6 +18,25 @@ import { parseDesignTokens } from "../../../src/gates/visual/tokens.js";
 import { cleanupDirs, tempDir, writeFile } from "../../helpers/repo.js";
 
 afterEach(cleanupDirs);
+
+/**
+ * A zlib stream of `size` zero bytes (a multiple of 1 MiB), built without deflating them (D-cz:
+ * deflating 256 MiB took seconds of one core and 256 MiB of memory on every run): one MiB of
+ * zeros deflated to a byte-aligned, non-final block run, repeated (its back-references only reach
+ * zeros, so each copy inflates alike), then an empty final block and the Adler-32 of the zeros.
+ */
+const zeroStream = (size: number): Buffer => {
+  const mib = 1024 * 1024;
+  const block = deflateRawSync(Buffer.alloc(mib), { finishFlush: constants.Z_SYNC_FLUSH });
+  const adler = Buffer.alloc(4);
+  adler.writeUInt32BE((((size % 65521) << 16) | 1) >>> 0);
+  return Buffer.concat([
+    Buffer.from([0x78, 0x9c]),
+    ...Array.from({ length: size / mib }, () => block),
+    Buffer.from([0x03, 0x00]),
+    adler,
+  ]);
+};
 
 const gradient = (flip: boolean): RgbaImage => {
   const width = 90;
@@ -124,12 +143,18 @@ describe("GateRunner.checkNovelty / recordDesignChoice", () => {
     }
   });
 
+  it("builds the bomb's zlib stream cheaply, and it inflates to every byte it claims", () => {
+    expect(inflateSync(zeroStream(3 * 1024 * 1024)).equals(Buffer.alloc(3 * 1024 * 1024))).toBe(
+      true,
+    );
+  });
+
   it("is unchecked, without inflating it, when the first viewport is a decompression bomb", async () => {
     const { runner, repo } = setup();
     // A valid 1x1 RGBA PNG header whose IDAT inflates to 256 MiB: a few hundred KiB on disk.
     const header = encodePng({ width: 1, height: 1, data: new Uint8Array(4) });
     const ihdrEnd = 8 + 12 + 13;
-    const idat = deflateSync(Buffer.alloc(256 * 1024 * 1024));
+    const idat = zeroStream(256 * 1024 * 1024);
     const chunk = new Uint8Array(12 + idat.length);
     new DataView(chunk.buffer).setUint32(0, idat.length);
     chunk.set([73, 68, 65, 84], 4);
@@ -144,8 +169,7 @@ describe("GateRunner.checkNovelty / recordDesignChoice", () => {
     });
     expect(report.verdict).toBe("unchecked");
     expect(process.memoryUsage().arrayBuffers - before).toBeLessThan(64 * 1024 * 1024);
-    // Building the fixture deflates 256 MiB: slow on a busy host.
-  }, 30_000);
+  });
 
   it("is unchecked, without blocking, when the first viewport is a FIFO", async () => {
     const { runner, repo } = setup();

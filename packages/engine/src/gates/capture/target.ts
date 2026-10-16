@@ -4,6 +4,7 @@
  */
 import type { EvidenceCaptureResult } from "@vtc/shared";
 import type { GateCommandJail } from "../sandbox.js";
+import type { EvidenceRunnerShot } from "./protocol.js";
 
 /**
  * What one capture runs against, besides its request (the before/after capture runs one per
@@ -34,9 +35,13 @@ export interface CaptureTarget {
   readonly budgetBytes?: number;
   /** A screen's theme by shot name: the page's `prefers-color-scheme`. */
   readonly colorSchemes?: ReadonlyMap<string, "light" | "dark">;
+  /** The steps a recording scripts, by shot name (a before/after side's flow, D-ct). */
+  readonly flows?: ReadonlyMap<string, NonNullable<EvidenceRunnerShot["flow"]>>;
 }
 
-/** A capture's result, and with an app whether it served. */
+/** A capture's result, with an app whether it served, and how each scripted flow went. */
 export type TargetCaptureResult = EvidenceCaptureResult & {
   readonly app?: "served" | "failed";
+  /** By shot name, for each shot with a flow the runner reported on. */
+  readonly flows?: ReadonlyMap<string, "scripted" | "failed">;
 };

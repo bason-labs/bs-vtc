@@ -180,6 +180,97 @@ calibrate`, while on Linux it gets a private loopback. Unix sockets inside the
   test runs it. The reaper confirms before its `kill`, so a gate that kills it in the microseconds between the
   two is not detected. Under `gates.allow_unsandboxed` nothing of this applies.
 
+## Check tools install scripts cannot replace (H-14, spine §5 reading 238)
+
+Install-phase code the role controls (a dependency's or a workspace package's lifecycle script)
+could replace the lint tool, or any other check tool, under `node_modules` before L1 runs
+(reading 80(c)). Each verify-phase gate's tool (`GateSchema.tool`, `runner.ts`,
+`tool-integrity.ts`) is therefore one of:
+
+- `pinned` `{pin}`: a `gates/scanners.json` pin, run from VTC's store and re-verified against its
+  `binary_sha256` before each use. `command[0]` names the tool (a gate whose command starts with
+  anything else does not run); the store's path replaces it, and such a gate never runs a
+  user-installed copy (the Checkov fallback of D-u is for gates without `tool`). Every pinned
+  scanner is one, with or without `tool`. `GateResult.tool.sha256` is the pin's `binary_sha256`
+  the store just verified the binary against.
+- `project` `{paths}` (checkout-relative globs, e.g. `node_modules/.bin/eslint` and
+  `node_modules/eslint/**`): the files are hashed after the scripts-free install (below), before
+  any install-phase script runs, and again just before the gate: any file changed, added or
+  removed fails the gate without running it, `status: fail`, failure class `product`, one finding
+  `vtc/tool-tampered` in category `security`, and `GateResult.tool.tampered` lists the files (the
+  evidence log lists them all). An earlier verify gate (an L0 build) that touches the tool is
+  caught the same way, and so is a tool that grew past the hash limits (50,000 files, 1 GiB)
+  since it was hashed. A gate whose `paths` do not cover what its command runs now (stale after
+  a dependency change), or match no file at all, does not run (`error`, `infra`: re-run
+  `vtc calibrate`).
+- absent: the runner derives a `project` tool from the command: the executable it resolves to
+  inside the checkout (unwrapping `pnpm exec`, `npx`, `npm exec`, `yarn`, `bunx`, `uv run`,
+  `poetry run`, skipping flag values and following `-C`/`--dir`/`--cwd`) and the package it
+  belongs to (a pnpm shell shim is followed to its package). A package script (`pnpm typecheck`,
+  `npm run lint`) is resolved through its body: each of its commands (`tsc --noEmit`,
+  `eslint . && tsc`) adds its tool. A command whose executable is outside the checkout (`node`
+  on `PATH`, `go vet`) has none: install-phase code cannot write there. A command that picks
+  other packages to run in (`pnpm --filter`, `npm --workspace`) has none either.
+
+What is hashed (`hashTool`): one line per file, its checkout-relative path and the SHA-256 of its
+bytes, or `link:<target>` for a link, which is never followed; only a glob's own base is followed
+when it is a link (pnpm's `node_modules/<name>`). Nothing outside the checkout is ever read: a
+path that leads out is the line `outside-checkout` (so re-pointing a tool at a home directory is
+tampering, and nothing there is listed). With a Node package the hash includes its dependency
+closure (`dependencies`, `optionalDependencies` and `peerDependencies`, resolved the way Node
+does, in pnpm through the virtual store); with a virtual environment's script, the distribution
+whose console script it is, every distribution it requires (extras left out), and the
+site-packages startup files (`*.pth`, `sitecustomize.py`, `usercustomize.py`). For pytest, every
+installed distribution that declares a `pytest11` entry point (`pytest-cov`, `pytest-xdist`, one an
+install script planted) and what it requires are part of the tool too: pytest loads them all at
+start-up whether or not anything requires them, so an install script that edits, adds or turns on
+a plugin fails the gate as tampering.
+
+The install phase keeps the configured order and runs in two passes (`scriptsFreeInstall`, each
+form checked against the real package manager by `tool-tamper.live.test.ts`, opt-in with
+`VTC_LIVE_PM=1`): `npm ci --ignore-scripts` then `npm ci` again; `pnpm install --ignore-scripts`
+then `pnpm rebuild --recursive --pending`, keeping the install's `-C`/`--dir` (a second
+`pnpm install` leaves the skipped builds unbuilt, and a non-recursive rebuild at a workspace root
+builds the root project only; a `pnpm install --filter` has no two passes);
+`bun install --ignore-scripts` then `bun install --force` (a second plain `bun install` of a
+workspace skips its packages' dependency scripts); `go mod download` and `cargo fetch` as they
+are. The live test covers a single project and a workspace for each. The leading install gates with no such form run as configured first; then the gates
+after them that have one, up to the next that has none, run their first pass; then the tools are
+hashed; then those gates' second passes run, in order; then the remaining install gates run as
+configured. `vtc calibrate` asks the human to confirm each second pass (`pnpm rebuild --recursive --pending`)
+with the install it belongs to. A first pass's logs are `<id>.scripts-free.*`.
+
+`vtc calibrate` writes the `project` tool of each check gate whose executable is installed in the
+working tree (`withCheckTools`), package scripts included; pinned scanners need none. A Node lint
+gate's tool also lists the installed ESLint plugins, shareable configs and parsers its
+package.json names (`eslint-plugin-*`, `@scope/eslint-plugin*`, `eslint-config-*`,
+`typescript-eslint`, `@typescript-eslint/*`), since ESLint loads them through its config.
+
+Just before each gate runs, the runner derives its tool from its command again: an executable it
+now resolves to outside the hashed paths (an install script that planted a
+`node_modules/.bin/<name>` nearer the gate's cwd) fails the gate as tampering at that executable,
+and a command that no longer runs the hashed tool (a rewritten package script) does not run.
+
+Known limits (the first two are said per run in `_tool-integrity.log`, a name no gate's log can
+have):
+
+- An install gate with no scripts-free form VTC knows (`npm install`, any Yarn install, `uv sync`,
+  `poetry install`, a custom script) runs its scripts outside the two passes: what they write into
+  a tool before the tool is hashed is not detected. A tool first found after such a gate ran is
+  hashed then, and the log names it.
+- A verify gate with no project tool (its executable is outside the checkout, its package script
+  names nothing installed, or it picks other packages to run in) is listed as not verified.
+- What a tool loads by configuration rather than by dependency (an ESLint plugin the
+  package.json does not name, a pytest plugin named by `-p` or `pytest_plugins` that declares no
+  `pytest11` entry point, a test runner's setup files) is not part of the tool unless `gates.yml`
+  lists it in `paths` (its dependency closure is then hashed too).
+- A command that runs a module through the interpreter (`python -m pytest`) resolves to the
+  interpreter, which belongs to no distribution: only the interpreter's script is hashed. The
+  commands `vtc calibrate` writes run the tool's own script (`uv run pytest`).
+- The base checkout, which computes the baseline facts (which violations are pre-existing),
+  runs its install gates as configured and its tools unverified. Its install scripts are code
+  already merged, but a base tool they changed could make the baseline facts wrong.
+
 ## L6 compiled from the Architect's AD Checks (§8.5)
 
 Besides the calibrated L6 gates (an external fitness tool in `gates.yml`), every run that includes
@@ -337,14 +428,29 @@ symlinked or escaping path gives `unchecked`), the token vector from `.vtc/desig
 `client-<slug>`; a malformed scope, direction or entry rejects). Engine core writes the report
 to `noveltyReportPath` and calls `recordDesignChoice` when the human picks at G2.
 
+## UI before/after and the scripted flow (D-ct, spine §5 readings 223 and 247(7))
+
+`EvidenceRecorder.captureBeforeAfter` (`capture/before-after.ts`) builds and serves the base and
+the head in clean gate checkouts and renders the Visual QA screens of each. With `flowSeconds` it
+also records a `flow_video` of each side. With `flow` (a flow id the upstream module chose with
+`selectDesignFlow`), each side reads that flow from its own commit's `.vtc/design/flows.yaml`
+and its recording starts at the flow's `start` route and runs its steps (goto, click, fill with
+the file's named fixture, press, wait for, wait up to `FLOW_LIMITS.maxWaitMs`), all within
+`flowSeconds`, then holds the last frame for up to a second. The page is checked and scanned
+(paint in force, `SECRET_PATTERNS`, `denyText`) before every step and at the end, besides the
+recording's live scan, so a page a step reached that shows a denied value discards the video.
+`BeforeAfterResult.flow` says per side what the video shows: `scripted`, `idle` (no such flow, or
+no readable flows file, at that commit: the first screen is recorded as without a flow) or
+`failed` (a step failed or ran out of time; the recording up to it is kept). No step's error text
+is reported, since a selector is project text.
+
 ## Not built yet (tracked follow-up increments)
 
-- **Before/after flow video.** `BeforeAfterRequest` has no flow steps, so the `flow_video` of
-  each side (`capture/before-after.ts`) records the first rendered screen loading and then idle
-  for `flowSeconds`, with no interaction; a real changed-flow recording needs flow steps in the
-  contract. On macOS the app's port is checked free before the app starts, but nothing ties the
-  listening socket to the app (the host loopback is shared), so a server bound to that port in
-  between, beside an app that falls back to another port, would be captured instead.
+- **Before/after on macOS.** The app's port is checked free before the app starts, but nothing
+  ties the listening socket to the app (the host loopback is shared), so a server bound to that
+  port in between, beside an app that falls back to another port, would be captured instead.
+  The scripted flow (`BeforeAfterRequest.flow`) has run only against the fake Playwright of the
+  tests; the opt-in live test records the first screen, not a scripted flow.
 - **Registry-only install network and sandbox denials.** The install phase gets the full
   network (no host-level registry filter exists in `sandbox-exec` or `bwrap`), and a gate that
   fails because the sandbox refused something (`EPERM`, "Operation not permitted") is classified

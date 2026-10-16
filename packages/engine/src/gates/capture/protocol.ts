@@ -35,6 +35,22 @@ export const DENY_SUBSTRING_MIN = 4;
 /** The viewport height of a Visual QA screen (the visual step renders at this height too). */
 export const UI_VIEWPORT_HEIGHT = 900;
 
+/**
+ * One step of a scripted flow as the runner gets it (D-ct; `FlowStep` of `.vtc/design/flows.yaml`):
+ * a `goto` path already under the app URL's own path, a `fill` value already taken from the flows
+ * file's named fixture.
+ */
+export type EvidenceRunnerFlowStep =
+  | { readonly action: "goto"; readonly path: string }
+  | { readonly action: "click"; readonly selector: string }
+  | { readonly action: "fill"; readonly selector: string; readonly value: string }
+  | { readonly action: "press"; readonly key: string }
+  | { readonly action: "wait_for"; readonly selector: string }
+  | { readonly action: "wait"; readonly ms: number };
+
+/** How long a scripted recording stays on its last frame after its last step (within its time). */
+export const FLOW_HOLD_MS = 1000;
+
 export interface EvidenceRunnerShot {
   readonly name: string;
   /** Path and query on `origin`, starting with one `/`. */
@@ -46,6 +62,12 @@ export interface EvidenceRunnerShot {
   readonly wait_for?: string;
   /** The page's `prefers-color-scheme` (a Visual QA screen's theme); absent: the browser's. */
   readonly color_scheme?: "light" | "dark";
+  /**
+   * A recording only: run these steps while it records, after `path` loaded, all within
+   * `video_seconds` (D-ct, `BeforeAfterRequest.flow`). The page is scanned before every step and
+   * at the end, as every recording is. Absent: the page is left idle for `video_seconds`.
+   */
+  readonly flow?: { readonly steps: readonly EvidenceRunnerFlowStep[] };
 }
 
 /**
@@ -120,6 +142,11 @@ export const EvidenceRunnerShotResultSchema = z.strictObject({
     .max(40)
     .default([]),
   file: FileNameSchema.optional(),
+  /**
+   * A shot with a `flow`: `scripted` when every step ran within its time, `failed` when one did
+   * not (the recording up to it is kept, scanned like any other).
+   */
+  flow: z.enum(["scripted", "failed"]).optional(),
 });
 export type EvidenceRunnerShotResult = z.infer<typeof EvidenceRunnerShotResultSchema>;
 

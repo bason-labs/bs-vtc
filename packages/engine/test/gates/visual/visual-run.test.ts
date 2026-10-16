@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   BROWSER_PIN_FILE,
   DESIGN_SCREENS_PATH,
@@ -30,7 +30,9 @@ import {
 } from "../../../src/gates/visual/index.js";
 import { encodePng } from "../../../src/gates/visual/png.js";
 import { commitAll, config, harness, NODE, testsGate, cases } from "../fixture.js";
-import { tempDir, writeFile } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir, writeFile } from "../../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 const SCREENS = `version: 1
 screens:
