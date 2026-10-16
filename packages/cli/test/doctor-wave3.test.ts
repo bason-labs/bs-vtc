@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -148,6 +149,27 @@ describe("vtc doctor --install-browser (AD-24, D-ay)", () => {
     expect(matchesIntegrity(bytes, integrityOf(bytes))).toBe(true);
     expect(matchesIntegrity(bytes, integrityOf(new TextEncoder().encode("y")))).toBe(false);
     expect(matchesIntegrity(bytes, "sha1-abc")).toBe(false);
+  });
+
+  it("installs a package whose tarball has a directory without its execute bit (pngjs 7.0.0)", async () => {
+    // pngjs 7.0.0's tarball has `lib/` as 0644; npm normalizes modes on unpack, and so must VTC,
+    // or nothing under that directory can be read or removed. tar keeps the archive's mode, so
+    // the extract here does what tar does with such an archive.
+    const { bodies, packages } = fakeRegistry();
+    const home = tempHome();
+    const deps = fakeDeps(bodies, {
+      extract: async (tarball, dir) => {
+        await tarExtract(tarball, dir);
+        mkdirSync(join(dir, "lib"));
+        writeFileSync(join(dir, "lib/index.js"), "module.exports = 1;\n");
+        chmodSync(join(dir, "lib"), 0o644);
+      },
+    });
+    await installBrowser(home, deps, packages);
+    const lib = join(home, "browsers/node_modules/axe-core/lib");
+    expect(statSync(lib).mode & 0o777).toBe(0o755);
+    expect(readFileSync(join(lib, "index.js"), "utf8")).toBe("module.exports = 1;\n");
+    expect(readdirSync(join(home, "browsers")).filter((e) => e.startsWith(".staging"))).toEqual([]);
   });
 
   it("verifies each package, runs playwright-core's installer into the store and writes the pin", async () => {

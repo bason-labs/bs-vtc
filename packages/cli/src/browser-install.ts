@@ -20,6 +20,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   createReadStream,
   existsSync,
@@ -126,6 +127,21 @@ export const httpsDownload = async (url: string, maxBytes: number): Promise<Uint
     maxBytes,
     () => new Error(`${url} is larger than ${String(maxBytes)} bytes`),
   );
+};
+
+/**
+ * Gives every directory under `dir` mode 0755 and every file 0644, or 0755 when any execute bit
+ * was set, as npm does when it unpacks a package: some published tarballs carry a directory
+ * without its execute bit (pngjs 7.0.0's `lib/` is 0644), and tar keeps it, so nothing under it
+ * could be read or removed. Links are left as they are and never followed.
+ */
+export const normalizeModes = (dir: string): void => {
+  chmodSync(dir, 0o755);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) normalizeModes(path);
+    else if (entry.isFile()) chmodSync(path, (lstatSync(path).mode & 0o111) === 0 ? 0o644 : 0o755);
+  }
 };
 
 /** The system `tar` (macOS, Linux and Windows 10+ ship one). */
@@ -281,6 +297,7 @@ const installPackage = async (
   try {
     writeFileSync(tarball, bytes, { mode: 0o600 });
     await deps.extract(tarball, staging);
+    normalizeModes(staging);
     const manifest = JSON.parse(readFileSync(join(staging, "package.json"), "utf8")) as {
       name?: unknown;
       version?: unknown;
