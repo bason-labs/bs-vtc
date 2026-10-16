@@ -21,12 +21,11 @@ the Direction contract, the craft floor and the font blocklist.
 
 ## Procedure
 
-1. For each key screen, choose its mode (Persuade, Operate, Read or Experience, from what the
-   screen is for, not the product) and write its design contract to
-   `{{design_contracts_dir}}/<screen id>.md`, returned as a `screens` artifact: the mode, then
-   the product lens: user and job, the object the eye must find first, the primary action,
-   density, hierarchy, interaction model, responsive priority, and the generic defaults this
-   product must not use.
+1. For each key screen, write its design contract to `{{design_contracts_dir}}/<screen id>.md` (as
+   a `screens` artifact): its mode (Persuade, Operate, Read or Experience, from what the screen is
+   for, not the product), then the product lens: user and job, the object the eye must find first,
+   the primary action, density, hierarchy, interaction model, responsive priority, and the generic
+   defaults this product must avoid.
 2. Map the flows in Mermaid: every path through the user-facing requirements, including failure
    and permission branches. Write one flow per key user journey to `{{design_flows_path}}`: `id`,
    `start` (its first route), `screens` it passes, `paths` (globs of the source it exercises), 1 to
@@ -72,17 +71,18 @@ the Direction contract, the craft floor and the font blocklist.
    yourself. The human chooses at G2, where the engine also offers a re-roll and the category
    standard. With fewer than {{directions_min}} distinct directions the engine re-dispatches you
    once, and then G2 shows a blocking notice.
-10. Check every screen against the craft floor in one batched pass, fix what it shows, and
-    return.
+10. Check every screen against the craft floor in one batched pass, fix what it shows, return.
 
-On a coverage-loop call (a `{{coverage_round_line}}: <n> of {{coverage_max_rounds}}` Dispatch
-line), the check before G2 found gaps, one Dispatch line per kind. Keep the design and its
-directions and close only those gaps; requirement texts are in the pack's Requirements section.
-`{{coverage_ui_reqs_line}}`: put each listed requirement in the `reqs` of the screen that shows
-it, adding a screen only when none does. `{{coverage_screens_line}}`: give each listed screen the
+On a coverage-loop call (a `{{coverage_round_line}}: <n> of {{coverage_max_rounds}}` Dispatch line),
+close only the gaps the check before G2 found (texts: the pack's Requirements section).
+`{{coverage_ui_reqs_line}}`: put each listed requirement in the `reqs` of the screen that shows it,
+adding a screen only when none does. `{{coverage_screens_line}}`: give each listed screen the
 requirements it covers. `{{coverage_components_line}}`: write a component spec for each listed
 component. `{{coverage_screens_problem_line}}`: fix `{{design_screens_path}}` as the line says.
-Never drop a requirement or edit the specification; `{{coverage_reqs_line}}` is not yours.
+Never drop a requirement or edit the specification; `{{coverage_reqs_line}}` is not yours. Keep the
+design, and return every artifact of your previous result again, with the same types and paths, not
+only the files you changed (the engine checks your latest result only), every `design_direction` and
+`prototype` artifact.
 
 ## Rules
 

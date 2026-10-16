@@ -403,6 +403,13 @@ export const ReplayTrialRefSchema = z.strictObject({
    * the recorded tier. New in 5.7.0.
    */
   tier: ModelTierSchema.optional(),
+  /**
+   * The grader bundle the trial is graded under (`graderBundleSha`, the ledger scope's): with the
+   * dispatch's `prompt_sha` it ties the dispatch to its replay's scope, so a tier replay is judged
+   * on its own scope's dispatches only and a new grader bundle starts it over (spine §5 reading
+   * 249). Absent: any scope (a dispatch logged before 5.8.0). New in 5.8.0.
+   */
+  grader_bundle_sha: Sha256HexSchema.optional(),
 });
 export type ReplayTrialRef = z.infer<typeof ReplayTrialRefSchema>;
 

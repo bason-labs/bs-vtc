@@ -40,7 +40,7 @@ import {
   type VtcEvent,
 } from "@vtc/shared";
 import { join } from "node:path";
-import { appendJsonLines, readJsonLines } from "./files.js";
+import { appendRepoJsonLines, readRoleWrittenText } from "./files.js";
 import { buildTraces, traceRef, traceSplit, type LockedShaFor, type Trace } from "./traces.js";
 
 /** Rules from the most upstream (BA) to the most downstream (Engineer). */
@@ -499,20 +499,43 @@ export const readAttributions = async (
   against: AttributionHistory,
 ): Promise<Attribution[]> => {
   const rows: Attribution[] = [];
-  for (const value of await readJsonLines(attributionsPath(projectRoot))) {
+  // a repo-tracked file: never read through a link the repo commits there (reading 249)
+  const read = await readRoleWrittenText(attributionsPath(projectRoot), ATTRIBUTIONS_MAX_BYTES);
+  const values: unknown[] = [];
+  if (read.kind === "text") {
+    for (const line of read.text.split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        values.push(JSON.parse(line) as unknown);
+      } catch {
+        // a torn or hand-edited line: skipped, the rest still counts
+      }
+    }
+  }
+  for (const value of values) {
     const parsed = parsePersisted(AttributionSchema, value);
     if (parsed.success) rows.push(parsed.data);
   }
   return trustedAttributions(rows, against);
 };
 
-/** Appends attributions (validated). */
+/**
+ * The most of `attributions.jsonl` Lookback reads (a row is well under 2 KiB): a bigger file is
+ * refused whole rather than read in part.
+ */
+const ATTRIBUTIONS_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Appends attributions (validated) to the repo's `attributions.jsonl`, never through a link the
+ * repo commits at the file or a directory on the way (`appendRepoJsonLines`, reading 249).
+ */
 export const appendAttributions = async (
   projectRoot: string,
   rows: readonly Attribution[],
 ): Promise<void> => {
-  await appendJsonLines(
-    attributionsPath(projectRoot),
+  await appendRepoJsonLines(
+    projectRoot,
+    LOOKBACK_REPO.attributions,
     rows.map((row) => AttributionSchema.parse(row)),
   );
 };

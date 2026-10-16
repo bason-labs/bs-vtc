@@ -268,6 +268,16 @@ const pricedSubmit = (
   };
 };
 
+/**
+ * `budget_usd` for an event that closes a run (H-12, contracts 5.8.0; spine §5 reading 249): what
+ * the run counts toward the budgets, when it differs from the `cost_usd` the event carries.
+ */
+const closingBudget = (
+  cost: number | null,
+  budgetUsd: number | null,
+): { readonly budget_usd?: number } =>
+  budgetUsd === null || budgetUsd === cost ? {} : { budget_usd: budgetUsd };
+
 /** At 100% of its budget a task finishes the current turn, then parks (§11, §7.6 rule 13). */
 const checkBudget = (k: Kernel, h: RunHandle, taskId: string | undefined): void => {
   const task = taskId === undefined ? undefined : h.state.tasks.get(taskId);
@@ -394,6 +404,8 @@ const logRejection = (
       issues: value.issues,
       // D-cs (reading 247(9)): a rejected run's shell calls count toward the tool signal too
       ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+      // H-12 (reading 249): an unknown cost counted at the host's price ceiling, on the event
+      ...closingBudget(usage?.cost_usd ?? null, budgetUsd),
     },
   });
   recordSpend(k, h, run, budgetUsd);
@@ -1498,7 +1510,7 @@ const handleFailure = (
   commandShapes: readonly CommandShape[],
 ): void => {
   if (outcome.kind === "limit") {
-    recordLimit(k, h, run, outcome);
+    recordLimit(k, h, run, outcome, budgetUsd);
     recordSpend(k, h, run, budgetUsd);
     return;
   }
@@ -1523,6 +1535,7 @@ const handleFailure = (
       retryable: outcome.kind === "error" ? outcome.retryable : false,
       // D-cs (reading 247(9)): a failed run's shell calls count toward the tool signal too
       ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+      ...closingBudget(cost, budgetUsd),
     },
   });
   recordSpend(k, h, run, budgetUsd);

@@ -447,6 +447,19 @@ export const hashTool = (
     const venv = dirname(bin);
     if (!["bin", "Scripts"].includes(basename(bin))) return;
     if (lstatOrNull(join(venv, "pyvenv.cfg"))?.isFile() !== true) return;
+    // The interpreter the script's shebang runs and the settings it reads (reading 249): each
+    // `python*` entry of the script's directory (links as lines, never followed) and pyvenv.cfg.
+    const venvRel = insideRoot(root, venv);
+    const binRel = insideRoot(root, bin);
+    if (venvRel !== null && binRel !== null) {
+      entry(`${venvRel}/pyvenv.cfg`, join(venv, "pyvenv.cfg"), all);
+      const binDir = whereIs(root, bin);
+      if (typeof binDir === "object" && lstatOrNull(binDir.real)?.isDirectory() === true) {
+        for (const name of readdirSync(binDir.real).sort()) {
+          if (/^python/i.test(name)) entry(`${binRel}/${name}`, join(binDir.real, name), all);
+        }
+      }
+    }
     const sites: string[] = [join(venv, "Lib", "site-packages")];
     const lib = whereIs(root, join(venv, "lib"));
     if (typeof lib === "object" && lstatOrNull(lib.real)?.isDirectory() === true) {
@@ -569,6 +582,13 @@ export const toolPathsCover = (paths: readonly string[], derived: string): boole
   const probe = derived.endsWith("/**") ? `${derived.slice(0, -3)}/package.json` : derived;
   return paths.some((glob) => glob === derived || globMatch(glob, probe));
 };
+
+/**
+ * Whether any of a tool's `paths` names something in the checkout (its literal base exists, not
+ * followed when it is a link): a recorded tool none of whose paths does is stale (reading 249).
+ */
+export const toolPathsExist = (rootIn: string, paths: readonly string[]): boolean =>
+  paths.some((glob) => lstatOrNull(join(rootIn, literalBase(glob).base)) !== null);
 
 // ------------------------------------------------------------------ derivation
 
@@ -752,6 +772,9 @@ const isFile = (abs: string): boolean => {
   return stat !== null && (stat.isFile() || stat.isSymbolicLink());
 };
 
+/** Interpreters a pnpm or cmd-shim shell shim runs from its own directory when present. */
+const SHIM_INTERPRETERS = new Set(["node", "node.exe", "bun", "bun.exe"]);
+
 /** The file a pnpm or cmd-shim shell script starts (`"$basedir/../pkg/bin.js"`), if any. */
 const shimTarget = (bin: string): string | null => {
   let text: string;
@@ -763,6 +786,9 @@ const shimTarget = (bin: string): string | null => {
     return null;
   }
   for (const match of text.matchAll(/"\$basedir\/([^"$]+)"/g)) {
+    // `"$basedir/node"` is the interpreter the shim prefers when one sits beside it, never the
+    // tool: a planted one would otherwise shrink the tool to the shim (reading 249)
+    if (SHIM_INTERPRETERS.has(basename(match[1] ?? "").toLowerCase())) continue;
     const target = join(dirname(bin), match[1] ?? "");
     try {
       if (lstatSync(realpathSync(target)).isFile()) return target;
@@ -962,4 +988,108 @@ export const deriveProjectTool = (
   const found = derivePaths(root, join(root, cwd), argv, 0) ?? [];
   const paths = [...new Set(found)].filter((p) => p !== "").slice(0, 50);
   return paths.length === 0 ? null : { source: "project", paths };
+};
+
+/**
+ * The `node_modules/.bin` directories a Node tool runs with (reading 249), as globs, from the
+ * gate's `cwd` up to the checkout root, nearest first: a run script puts each on `PATH` before
+ * the system's, and a pnpm or cmd-shim shim runs `$basedir/node` when one is there, so an
+ * interpreter or shell utility planted in any of them would replace what the tool runs. The Gate
+ * Runner hashes them with every Node `project` tool.
+ */
+export const nodeBinChain = (root: string, cwd: string): string[] =>
+  upFrom(root, join(root, cwd)).map((dir) => {
+    const rel = dir === root ? "" : (insideRoot(root, dir) ?? "");
+    return rel === "" ? "node_modules/.bin/**" : `${rel}/node_modules/.bin/**`;
+  });
+
+/** ESLint plugins, shareable configs, parsers and resolvers, and ESLint's own config packages. */
+const ESLINT_EXTENSION =
+  /^(eslint-(plugin|config|import-resolver)-[\w.-]+|@[\w.-]+\/eslint-(plugin|config)(-[\w.-]+)?|typescript-eslint|@typescript-eslint\/[\w.-]+|@eslint\/[\w.-]+)$/;
+
+/** The lint configuration files whose imports ESLint loads. */
+const LINT_CONFIGS = [
+  "eslint.config.js",
+  "eslint.config.mjs",
+  "eslint.config.cjs",
+  "eslint.config.ts",
+  "eslint.config.mts",
+  "eslint.config.cts",
+  ".eslintrc.js",
+  ".eslintrc.cjs",
+];
+
+/** The package a bare import specifier names (`@scope/name/sub` is `@scope/name`), or `null`. */
+const importedPackage = (specifier: string): string | null => {
+  if (specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("node:"))
+    return null;
+  const parts = specifier.split("/");
+  const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : (parts[0] ?? "");
+  return NODE_NAME.test(name) ? name : null;
+};
+
+/** The packages a lint config imports or requires by a literal bare specifier. */
+const configImports = (text: string): string[] => {
+  const names = new Set<string>();
+  const patterns = [
+    /\bimport\s+(?:[^'"]*?\s+from\s+)?["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\bexport\s+[^'"]*?\s+from\s+["']([^"']+)["']/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const name = importedPackage(match[1] ?? "");
+      if (name !== null) names.add(name);
+    }
+  }
+  return [...names];
+};
+
+/**
+ * The `node_modules/<name>/**` path of each package a lint gate's ESLint loads through its config
+ * rather than as its dependencies (H-14; reading 249): the plugins, shareable configs, parsers and
+ * resolvers that the package.json in `cwd` (and the checkout root's) lists in `dependencies` or
+ * `devDependencies`, and every package the lint config in those directories imports or requires
+ * (`@eslint/js`, `globals`, a prettier plugin), each when installed beside that package.json.
+ * `hashTool` hashes each with its dependency closure. `vtc calibrate` records them in a lint
+ * gate's tool, and the Gate Runner hashes them with any L1 Node gate's tool.
+ */
+export const lintPluginPaths = (repoRootIn: string, cwd: string): string[] => {
+  let repoRoot: string;
+  try {
+    repoRoot = realpathSync(repoRootIn);
+  } catch {
+    return [];
+  }
+  const paths = new Set<string>();
+  for (const dir of [...new Set([cwd, ""])]) {
+    const names = new Set<string>();
+    const manifest = readSmall(repoRoot, join(repoRoot, dir, "package.json"));
+    if (manifest !== null) {
+      let json: unknown = null;
+      try {
+        json = JSON.parse(manifest);
+      } catch {
+        // not a manifest: nothing listed
+      }
+      for (const field of ["dependencies", "devDependencies"]) {
+        const deps =
+          json !== null && typeof json === "object"
+            ? (json as Record<string, unknown>)[field]
+            : null;
+        if (deps === null || typeof deps !== "object") continue;
+        for (const name of Object.keys(deps)) if (ESLINT_EXTENSION.test(name)) names.add(name);
+      }
+    }
+    for (const file of LINT_CONFIGS) {
+      const text = readSmall(repoRoot, join(repoRoot, dir, file));
+      if (text !== null) for (const name of configImports(text)) names.add(name);
+    }
+    for (const name of [...names].sort()) {
+      const rel = [dir, "node_modules", name].filter((p) => p !== "").join("/");
+      if (lstatOrNull(join(repoRoot, rel)) !== null) paths.add(`${rel}/**`);
+    }
+  }
+  return [...paths];
 };

@@ -4,12 +4,13 @@
  *   (`wireLookback(..., { propose, found })`): the daemon calls it at RETRO and turns each cell it
  *   returns into a `config` improvement fact (`routingConfigFact`) for the upstream module (the
  *   AD-27 issue -> PR path; the PR changes only the values of `DEFAULT_ROUTING_TABLE`). The seam
- *   carries neither the tier replays to launch nor the replay trials' events, so through it every
- *   change carries the scorecard alone (`routing.replay_planned` 0): no tier replay is launched
- *   or graded. That does not meet reading 247(6) when the RETRO's trial budget has room for a
- *   replay; such a change's detail says it was not replayed (`RoutingEvidence.replayDue`). Meeting
- *   it needs engine core to call {@link routingReplayStep} at RETRO (a contract proposal of the
- *   lookback-research team, round 6).
+ *   carries neither the tier replays to launch nor the replay trials' events, so through it no tier
+ *   replay is launched or graded: a change whose tier replay the RETRO's trial budget has room for,
+ *   or whose replay started, is withheld (reading 247(6): its fact waits for a graded replay that
+ *   backs it; the Lead's reading 249), and the others carry the scorecard alone
+ *   (`routing.replay_planned` 0). Launching them needs engine core to call
+ *   {@link routingReplayStep} at RETRO (a contract proposal of the lookback-research team, round
+ *   6, open after the round-6 merge).
  * - {@link routingReplayStep} is the same step with tier replays, for a caller that launches the
  *   trials it returns and hands back their events: it returns the cells, the trials to launch and
  *   the `automation.skipped` drafts as one {@link RoutingStepResult}.
@@ -40,14 +41,19 @@
  *   later one (its fact withheld again and the new task's trials launched) and is graded anew once
  *   they are; the result already written stays until then;
  * - _scorecard alone_ (`routing.replay_planned` 0, as before 5.7.0): no budget for a new replay, no
- *   held-out task to replay, no prompt version known for the role, no replay id for the role
- *   (`routingReplayId`'s length bound), a trial that measured nothing `REPLAY_MAX_INFRA_ATTEMPTS`
- *   times (`automation.skipped` `plugin_locked` when a plugin lock was the cause), or a trial not
- *   known to have run on its arm's tier: a dispatch of it off that tier in `replayEvents`
- *   (`routingReplayTrialTiers`: another tier or none, clamped by the project's bounds, moved by a
- *   model fallback), a ledger row of another tier, or a graded trial with no on-tier dispatch in
- *   `replayEvents`. Such a replay is not graded and not launched again (fail closed: its trials
- *   could measure the same model on both arms and pass for a replay that backs the change).
+ *   held-out task to replay, no prompt version known for the role, or no replay id for the role
+ *   (`routingReplayId`'s length bound);
+ * - _withheld, stopped_ (reading 249): a started replay that cannot be graded: a trial that
+ *   measured nothing `REPLAY_MAX_INFRA_ATTEMPTS` times (`automation.skipped` `plugin_locked` when
+ *   a plugin lock was the cause), or a trial not known to have run on its arm's tier: a dispatch of
+ *   it off that tier in `replayEvents` (`routingReplayTrialTiers`: another tier or none, clamped by
+ *   the project's bounds, moved by a model fallback), a ledger row of another tier, or a graded
+ *   trial with no on-tier dispatch in `replayEvents`. Such a replay is not graded and not launched
+ *   again (fail closed: its trials could measure the same model on both arms and pass for a replay
+ *   that backs the change), and its change raises no fact on the scorecard alone either, until a
+ *   new prompt version or grader bundle starts the replay over. Only the dispatches of the
+ *   replay's own scope count: its prompt version (`prompt_sha`) and grader bundle
+ *   (`ReplayTrialRef.grader_bundle_sha`; a dispatch without one counts for every bundle).
  * Without the VTC home or the locked sections every change carries the scorecard alone.
  *
  * **Shared changes.** The roles of one shared change move together: when any of them is withheld
@@ -165,7 +171,7 @@ const currentPrompt = (
 /**
  * How the step treats tier replays: `launch` true, the caller launches what it returns and hands
  * back the trials' `events`; false (engine core's seam today), nothing can be launched or graded,
- * so a change whose replay the budget would launch carries the scorecard with `replayDue`.
+ * so a change whose replay the budget would launch is withheld (reading 249).
  */
 interface Tiered {
   readonly trialBudget: number;
@@ -243,8 +249,13 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
     const rows = ledger.trials(scope);
     // a trial not known to have run on its arm's tier measures nothing this replay compares (both
     // arms could have run one model); the ledger keeps a trial's first row, and its row carries
-    // the arm's tier the caller named, so the trials' own dispatches decide: the replay stops
-    const ran = routingReplayTrialTiers(tiered.events, id);
+    // the arm's tier the caller named, so the trials' own dispatches of this scope (its prompt
+    // version and grader bundle, reading 249) decide: the replay stops. A replay that stops after
+    // it started never lets the scorecard alone raise its change (reading 247(6): the fact waits
+    // for a graded replay that backs it): the change is withheld until a new prompt version or
+    // grader bundle starts the replay over
+    const eventScope = { prompt: prompt.effective_sha256, graderBundleSha: input.graderBundleSha };
+    const ran = routingReplayTrialTiers(tiered.events, id, eventScope);
     if (
       planned.some((t) => {
         const key = replayTrialKey(t);
@@ -255,7 +266,7 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
         );
       })
     )
-      return scorecard;
+      return null;
     const aaFlipRate = await cachedAaFlipRate({
       vtcHome,
       repoKey,
@@ -273,7 +284,7 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
       planned,
       rows,
       ...(aaFlipRate === undefined ? {} : { aaFlipRate }),
-      costs: routingReplayCosts(tiered.events, id),
+      costs: routingReplayCosts(tiered.events, id, eventScope),
       now: input.now,
     });
     if (assembled.complete) {
@@ -294,10 +305,11 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
         skipped.push(
           replaySkippedEvent(
             "plugin_locked",
-            `the tier replay of ${id} stops: a managed-settings lock kept the installed vtc plugin on ${String(REPLAY_MAX_INFRA_ATTEMPTS)} attempts of one trial; its change carries the scorecard alone`,
+            `the tier replay of ${id} stops: a managed-settings lock kept the installed vtc plugin on ${String(REPLAY_MAX_INFRA_ATTEMPTS)} attempts of one trial; its change is withheld until a new prompt version or grader bundle starts the replay over`,
           ),
         );
-      return scorecard;
+      // a started replay (its trials have attempts) that cannot finish withholds its change
+      return null;
     }
     const started = graded.size > 0 || planned.some((t) => infra.has(replayTrialKey(t)));
     const launch: RoutingReplayTrial[] = [];
@@ -320,6 +332,7 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
         ...target,
         prompt,
         grader,
+        graderBundleSha: input.graderBundleSha,
         trials: launch,
         remaining,
       });
@@ -328,13 +341,12 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
 
   const evidence = new Map<RoutingChange, RoutingEvidence | null>();
   for (const change of proposals.changes) evidence.set(change, await tierReplay(change));
-  // no launch and no trial events: a replay the budget would launch (none can have started or be
-  // graded without them) is recorded as due on a fact that carries the scorecard alone
+  // no launch and no trial events (engine core's seam): a change whose replay the budget would
+  // launch, or whose replay started, is withheld (reading 247(6), as the Lead decided it in
+  // reading 249): its fact waits for a graded replay that backs it
   if (!tiered.launch)
     return done(
-      routingProposalCells(proposals, (c) =>
-        evidence.get(c) === null ? { kind: "scorecard", replayDue: true } : scorecard,
-      ),
+      routingProposalCells(proposals, (c) => (evidence.get(c) === null ? null : scorecard)),
     );
   if (waiting > 0)
     skipped.push(
@@ -362,14 +374,14 @@ const routingStep = async (input: RoutingStepInput, tiered: Tiered): Promise<Rou
 };
 
 /**
- * The routing step through engine core's `RoutingLookback` seam: the scorecard and the cells, every
- * change on its scorecard evidence alone. The seam can neither launch tier replays nor hand back
- * their events, so none is launched or graded, which falls short of reading 247(6) (the routing
- * fact after the graded replay whenever the budget allows one). Until engine core drives
- * {@link routingReplayStep} instead, the shortfall is made visible: a change whose tier replay the
- * passed `trialBudget` has room for (whole pairs, in the proposals' order, as
- * {@link routingReplayStep} would launch them) says in its detail that it was not replayed
- * (`RoutingEvidence.replayDue`); nothing is written to the ledger and no replay result is written.
+ * The routing step through engine core's `RoutingLookback` seam: the scorecard and the cells. The
+ * seam can neither launch tier replays nor hand back their events, so none is launched or graded.
+ * Reading 247(6) raises a routing fact only after a graded replay backs it whenever the budget
+ * allows one, so until engine core drives {@link routingReplayStep} instead, a change whose tier
+ * replay the passed `trialBudget` has room for (whole pairs, in the proposals' order, as
+ * {@link routingReplayStep} would launch them), or whose replay started, is withheld (Lead
+ * decision, reading 249); the others carry their scorecard evidence alone. Nothing is written to
+ * the ledger and no replay result is written.
  */
 export const lookbackRoutingStep = async (
   input: RoutingStepInput & {

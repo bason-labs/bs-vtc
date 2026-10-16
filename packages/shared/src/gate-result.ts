@@ -137,6 +137,14 @@ export const ToolIntegritySchema = z.strictObject({
   source: z.enum(["pinned", "project"]),
   sha256: Sha256HexSchema,
   tampered: z.array(RelPathSchema).max(50).default([]),
+  /**
+   * When a `project` tool's hash was taken (spine §5 reading 249): `after_scripts` when an install
+   * gate with no scripts-free form ran its scripts before the hash (or the tool was first found
+   * after one did), so what those scripts wrote into the tool is not detected and `sha256` does
+   * not vouch for it. Absent: before any install-phase script ran, as reading 238 requires. New
+   * in 5.8.0.
+   */
+  baseline: z.enum(["before_scripts", "after_scripts"]).optional(),
 });
 export type ToolIntegrity = z.infer<typeof ToolIntegritySchema>;
 

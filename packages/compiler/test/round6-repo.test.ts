@@ -130,6 +130,19 @@ describe("the Architect's coverage fix (H-13, reading 237)", () => {
     expect(body).toContain(code(`${PROTOCOL_VARS.instruct_architect_option ?? ""}: <text>`));
   });
 
+  it.each(HOSTS)(
+    "has the %s agent return its whole result again on a coverage round (reading 249)",
+    (host) => {
+      const body = oneLine(agentBody(host, "vtc-architect"));
+      // the engine's DESIGN check and G2 read the latest result only
+      expect(body).toMatch(
+        /return every artifact of your previous result again, with the same types and paths, not only the files you changed/,
+      );
+      expect(body).toMatch(/the engine checks your latest result only/);
+      expect(body).toMatch(/the architecture document with its requirement-to-component map/);
+    },
+  );
+
   it.each(HOSTS)("has the %s agent state the requirements each AD covers", (host) => {
     const body = oneLine(agentBody(host, "vtc-architect"));
     expect(body).toMatch(/\*\*Covers\*\* \(the REQ-n and SEC-n ids it serves/);
@@ -170,6 +183,18 @@ describe("the Designer's coverage fix (H-13, reading 237)", () => {
     expect(body).toMatch(/Never drop a requirement or edit the specification/);
     expect(body).toContain(`${code(COVERAGE_DISPATCH_LINES.reqs_without_component)} is not yours`);
   });
+
+  it.each(HOSTS)(
+    "has the %s agent return its whole result again on a coverage round (reading 249)",
+    (host) => {
+      const body = oneLine(agentBody(host, "vtc-designer"));
+      expect(body).toMatch(
+        /return every artifact of your previous result again, with the same types and paths, not only the files you changed/,
+      );
+      expect(body).toMatch(/the engine checks your latest result only/);
+      expect(body).toMatch(/every `design_direction` and `prototype` artifact/);
+    },
+  );
 });
 
 describe("the Designer's flows file (D-ct, D-ce, reading 247(7))", () => {

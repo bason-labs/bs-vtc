@@ -206,6 +206,21 @@ describe("worktree commands are pinned to the repo (agents own the worktree's .g
     await ws.ensureTaskWorktree("T-2", "vtc/T-2", base);
     expect(existsSync(marker)).toBe(false);
   });
+  it("re-pins HEAD when the worktree's admin HEAD is a symlink (git reads the link target)", async () => {
+    const { repo, ws, base, worktree } = await setup();
+    const admin = join(repo, ".git/worktrees", worktree.split("/").pop() ?? "");
+    // git treats a HEAD symlink to refs/... as a symbolic ref to main; reading the file through
+    // the link would instead find a forged `ref: refs/heads/vtc/T-1` beside it
+    rmSync(join(admin, "HEAD"));
+    symlinkSync("refs/heads/main", join(admin, "HEAD"));
+    mkdirSync(join(admin, "refs/heads"), { recursive: true });
+    writeFileSync(join(admin, "refs/heads/main"), "ref: refs/heads/vtc/T-1\n");
+    expect(git(join(repo, worktree), "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/main");
+    const head = await ws.snapshot(worktree, "vtc: T-1 round 1");
+    expect(git(repo, "rev-parse", "main")).toBe(base);
+    expect(git(repo, "rev-parse", "vtc/T-1")).toBe(head);
+    expect(git(join(repo, worktree), "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/vtc/T-1");
+  });
   it("replaces a leftover directory that is no registered worktree; refuses a symlinked one", async () => {
     const repo = initRepo({ "a.txt": "1\n" });
     const ws = createWorkspace(repo);

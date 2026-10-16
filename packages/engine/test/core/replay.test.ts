@@ -282,6 +282,8 @@ interface FakeOptions {
   readonly tier?: LookbackReplayTrial["tier"];
   /** A tier replay (D-cn): each arm's tier (`LookbackReplayTrial.armTier`). */
   readonly armTiers?: Readonly<Record<"a" | "b", NonNullable<LookbackReplayTrial["armTier"]>>>;
+  /** A tier replay's grader bundle (`LookbackReplayTrial.graderBundleSha`, reading 249). */
+  readonly graderBundleSha?: string;
   /**
    * `automation.skipped` drafts Lookback's plan returns (its limits, `planRetroReplays`); any
    * other type is a planted one core must drop.
@@ -331,6 +333,9 @@ const fakeReplays = (
         ...(options.protectedPaths === undefined ? {} : { protectedPaths: options.protectedPaths }),
         ...(options.tier === undefined ? {} : { tier: options.tier }),
         ...(options.armTiers === undefined ? {} : { armTier: options.armTiers[arm] }),
+        ...(options.graderBundleSha === undefined
+          ? {}
+          : { graderBundleSha: options.graderBundleSha }),
       });
       const per = options.perArm ?? 1;
       return Promise.resolve({
@@ -625,6 +630,23 @@ describe("RETRO runs Lookback replays as headless runs (AD-21 rule 6, readings 1
       { model: "haiku", tier: "low", reason: "rule", clamped: false, arm: "low" },
       { model: "opus", tier: "top", reason: "rule", clamped: false, arm: "top" },
     ]);
+    await h.release();
+  });
+
+  it("names a tier replay trial's grader bundle on its dispatch, so Lookback judges it in its scope (reading 249)", async () => {
+    const { h, trials, reach } = atRetro(["a", "b"], {
+      tier: { tier: "mid", reason: "rule", clamped: false },
+      armTiers: { a: "low", b: "top" },
+      graderBundleSha: "9".repeat(64),
+    });
+    await reach();
+    expect(
+      trials.runs.map(
+        (t) =>
+          (t.dispatched?.data.replay as { grader_bundle_sha?: string } | undefined)
+            ?.grader_bundle_sha,
+      ),
+    ).toEqual(["9".repeat(64), "9".repeat(64)]);
     await h.release();
   });
 

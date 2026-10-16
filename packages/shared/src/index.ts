@@ -320,5 +320,14 @@ export * from "./json-schema.js";
  * `BeforeAfterResult.flow`); a typed `UpstreamReport.subject` (`UpstreamSubject`,
  * `UPSTREAM_CONFIG_KEYS`, `upstreamSubjectKey`); `command_shapes` on `role.failed` and
  * `role.rejected`; `CommandShapeSpoolRow.action`. All additive.
+ *
+ * 5.8.0 (MINOR): the round-6 integration fixes (spine §5 reading 249). `budget_usd` on
+ * `role.rejected`, `role.failed` and `limit.hit`, as on `role.submitted` (H-12): what a run with no
+ * known price counts toward the budgets, on its own closing event, so a run with no task (an
+ * advisor, the front half) is never counted at $0. `ToolIntegrity.baseline` (H-14):
+ * `after_scripts` marks a project tool hashed only after an install's scripts ran, which its
+ * `sha256` cannot vouch for. `ReplayTrialRef.grader_bundle_sha`: the scope a tier replay trial's
+ * dispatch belongs to, so Lookback judges a tier replay on its own scope's dispatches only. All
+ * additive.
  */
-export const CONTRACTS_VERSION = "5.7.0";
+export const CONTRACTS_VERSION = "5.8.0";

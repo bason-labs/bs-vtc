@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { headlessRuns } from "@/lib/headless";
+import { runNotices } from "@/lib/notices";
 import { modelFallbackText, roleCostText, roleRunNotes } from "@/lib/role-run-notes";
-import { sampleEvent } from "../golden-samples";
+import { sampleEvent, samplesOfType } from "../golden-samples";
 
 /**
  * What a role run cost and which model it ran on: a run whose model has no known price keeps
@@ -100,5 +102,100 @@ describe("roleRunNotes (role.dispatched / role.submitted by action id)", () => {
     });
     // In flight: nothing to say yet.
     expect(notes.get("a-22")).toEqual({ cost: null, fallback: null, fallbackDetail: null });
+  });
+});
+
+/** A headless start and end of `action` (`cause` on the end), from the golden samples' shapes. */
+const headless = (seq: number, action: string, cause: string | null) => {
+  const [started] = samplesOfType("headless.started");
+  const [ended] = samplesOfType("headless.ended");
+  if (started === undefined || ended === undefined) throw new Error("no headless samples");
+  const start = sampleEvent(
+    seq,
+    "headless.started",
+    { ...started.data, action_id: action },
+    {
+      role: "engineer",
+      host: "codex",
+    },
+  );
+  const end = sampleEvent(
+    seq + 1,
+    "headless.ended",
+    {
+      ...ended.data,
+      action_id: action,
+      ...(cause === null ? {} : { outcome: "error", cause, exit_code: 1, duration_ms: 2_000 }),
+    },
+    { role: "engineer", host: "codex" },
+  );
+  return [start, end];
+};
+
+const FALLBACK = {
+  model_fallback: {
+    requested: "gpt-6-astra",
+    reason: "model_refused",
+    detail: "model is not available on your plan",
+  },
+};
+
+describe("a second refusal (D-cx, reading 244: the default refused too is an ordinary error)", () => {
+  const events = [
+    dispatched(50, "a-30"),
+    ...headless(51, "a-30", "model_refused"),
+    dispatched(53, "a-31", FALLBACK),
+    ...headless(54, "a-31", "model_refused"),
+  ];
+  it("shows the fallback dispatch's refusal as an error, not as a dispatch again", () => {
+    const runs = new Map(headlessRuns(events).map((r) => [r.actionId, r]));
+    expect(runs.get("a-30")?.status).toEqual({
+      label: "Model refused: dispatched again on the host default",
+      tone: "warn",
+    });
+    expect(runs.get("a-31")?.status).toEqual({
+      label: "Error: the host refused its default model too",
+      tone: "danger",
+    });
+  });
+  it("raises the second refusal as an error notice, the first as a warning", () => {
+    const notices = runNotices(events);
+    const of = (action: string) => notices.find((n) => n.title.includes(` ${action} ended`));
+    expect(of("a-30")).toMatchObject({
+      tone: "warn",
+      title: expect.stringContaining("Model refused: dispatched again") as unknown,
+    });
+    expect(of("a-31")).toMatchObject({
+      tone: "danger",
+      title: expect.stringContaining("Error: the host refused its default model too") as unknown,
+    });
+  });
+  it("never says the fallback ran on the host default when the default was refused", () => {
+    expect(roleRunNotes(events).get("a-31")?.fallback).toBe(
+      "The host refused gpt-6-astra; the host default was refused too",
+    );
+  });
+});
+
+describe("the cost of a failed or rejected run (H-12, contracts 5.8.0 reading 249)", () => {
+  it("shows a closing event's cost and what it counts toward the budget", () => {
+    const notes = roleRunNotes([
+      dispatched(60, "a-40"),
+      sampleEvent(
+        61,
+        "role.failed",
+        { action_id: "a-40", kind: "error", message: "x", retryable: false, budget_usd: 0.31 },
+        { ...ROLE, actor: "engine" },
+      ),
+      dispatched(62, "a-41"),
+      sampleEvent(
+        63,
+        "role.rejected",
+        { action_id: "a-41", reason: "write_scope", issues: [] },
+        { ...ROLE, actor: "engine", tokens: null, cost_usd: 0.5 },
+      ),
+    ]);
+    expect(notes.get("a-40")?.cost).toBe("Cost unknown · counted as $0.31 toward the budget");
+    expect(notes.get("a-41")?.cost).toBe("$0.50");
   });
 });

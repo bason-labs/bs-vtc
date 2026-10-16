@@ -232,10 +232,14 @@ export const createWorkspace = (repoRoot: string): Workspace => {
     const args = [`--git-dir=${admin}`, `--work-tree=${cwd}`];
     const branch = `refs/heads/vtc/${id}`;
     // the worktree's HEAD file names its branch: read it, and ask git only when it does not say
-    // `ref: <branch>` (D-cz: one process less per worktree operation)
+    // `ref: <branch>` (D-cz: one process less per worktree operation). Only a plain file: git
+    // reads a symlinked HEAD as a symbolic ref to its target, while reading the file would follow
+    // the link to whatever a role wrote there, so a link always goes to git.
     const onBranch = ((): boolean => {
       try {
-        return readFileSync(join(admin, "HEAD"), "utf8").trim() === `ref: ${branch}`;
+        const headFile = join(admin, "HEAD");
+        if (!lstatSync(headFile).isFile()) return false;
+        return readFileSync(headFile, "utf8").trim() === `ref: ${branch}`;
       } catch {
         return false;
       }

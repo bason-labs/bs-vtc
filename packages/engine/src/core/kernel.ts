@@ -239,6 +239,12 @@ export interface LookbackReplayTrial {
    * `role.dispatched.replay` and its ledger rows carry it. Absent: a prompt replay.
    */
   readonly armTier?: ModelTier;
+  /**
+   * The grader bundle a tier replay's trial is graded under (`RoutingReplayLaunch.graderBundleSha`):
+   * its `role.dispatched.replay.grader_bundle_sha`, so Lookback judges the trial in its own scope
+   * (spine §5 reading 249). Absent: none named.
+   */
+  readonly graderBundleSha?: string;
 }
 
 /** The replay of one proposal: its trials, run one at a time in order. */
