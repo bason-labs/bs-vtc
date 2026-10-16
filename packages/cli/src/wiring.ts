@@ -56,6 +56,7 @@ import { bunResolver, createHttpClient, nodeResolver, type Resolve } from "./htt
 import { guardHumanOnly } from "./human-channel.js";
 import { readInstallToken } from "./token.js";
 import { requireRepoRoot, requireVtcProject } from "./repo.js";
+import { enginePricesOf, priceTablesOf } from "./prices.js";
 import { exec as runExec, type Exec } from "./process.js";
 import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
@@ -98,7 +99,10 @@ export interface EngineParts {
    * 156); absent by default, when research search runs on the host's own web search.
    */
   readonly researchSearchProvider?: SearchProvider;
-  /** The price table (`~/.vtc/config.yaml` `prices`, §11, reading 152). */
+  /**
+   * The engine's prices (§11; H-12, reading 236): each adapter's shipped default table with the
+   * user's `~/.vtc/config.yaml` `prices` over it model by model (`prices.ts`).
+   */
   readonly prices?: Readonly<Record<string, ModelPrice>>;
   /** Automatic issues and PRs (AD-27 rule 7); absent: automation is off with a visible note. */
   readonly automation?: AutomationDeps;
@@ -291,12 +295,19 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const http = options.http === null ? undefined : (options.http ?? defaultHttpClient());
   const researchApiKey = researchApiKeyOf(userConfig);
   const researchSearchProvider = researchSearchProviderOf(userConfig);
-  const prices = pricesOf(userConfig);
   const pluginDir = options.pluginDir ?? ((host, home) => runtime().pluginDir(host, home));
   const automation =
     options.automation === null
       ? undefined
       : (options.automation ?? (await defaultAutomation(options, allowUnsandboxed)));
+  const adapters = createAdapters(options.adapterFactories ?? ADAPTER_FACTORIES, {
+    vtcHome,
+    pluginDir,
+    envPassthrough: passthroughOf(userConfig),
+    codexHome: hostConfigDirsOf(process.env, homedir()).codex,
+  });
+  // H-12: the shipped tables, the user's prices over them (never required)
+  const prices = enginePricesOf(priceTablesOf(adapters), pricesOf(userConfig));
   const createArm =
     options.createArmPluginCompiler === null
       ? undefined
@@ -316,12 +327,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
         allowUnsandboxed,
       }),
     ),
-    adapters: createAdapters(options.adapterFactories ?? ADAPTER_FACTORIES, {
-      vtcHome,
-      pluginDir,
-      envPassthrough: passthroughOf(userConfig),
-      codexHome: hostConfigDirsOf(process.env, homedir()).codex,
-    }),
+    adapters,
     assets: options.assets,
     scheduler: options.scheduler ?? createWakeScheduler(vtcHome),
     pullRequests: options.pullRequests ?? git.createGhPullRequests(repoRoot, options.ghCommand),

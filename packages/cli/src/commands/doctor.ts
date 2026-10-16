@@ -25,6 +25,10 @@
  * table and the project's `routing` range (a `min_tier` above `max_tier` fails), each host's tier
  * → model map (effort only where a tier has no model id), and the user's Lookback replay pace
  * (an invalid `~/.vtc/config.yaml` `lookback` fails).
+ * Since round 6: each shipped price table's models, source and date, and the user's `prices`
+ * overrides, warning only when a host that reports no cost has no known price at all (H-12,
+ * `prices.ts`); the model ids a host refused, with the last time and detail (D-cx,
+ * `model-refusals.ts`).
  * `info` lines report and never fail.
  * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
  * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
@@ -76,7 +80,6 @@ import {
   checkHostBilling,
   checkMergeLevel,
   checkEnvPassthrough,
-  checkPrices,
   checkGateSandbox,
   checkSessionSandbox,
   detectGateSandbox,
@@ -87,6 +90,12 @@ import {
   type MergeLevelEnv,
 } from "../doctor-checks.js";
 import { createGhRemoteMerge } from "../gh-remote-merge.js";
+import {
+  checkModelRefusals,
+  readModelRefusals,
+  type ModelRefusalsRead,
+} from "../model-refusals.js";
+import { checkPrices, priceTablesOf, type HostPriceTable } from "../prices.js";
 import { exec } from "../process.js";
 import { printable } from "../human-gesture.js";
 import { findRepoRoot, isVtcProject } from "../repo.js";
@@ -178,6 +187,13 @@ export interface DoctorCommandEnv extends DoctorEnv {
     /** What is at `upstream.checkout` (D-by); absent: not checked. */
     readonly checkout?: (path: string) => Promise<CheckoutFacts>;
   };
+  /**
+   * The shipped default price tables of the adapters that ship one (H-12,
+   * `HostAdapter.defaultPrices`); absent: none are shown.
+   */
+  readonly priceTables?: () => Promise<readonly HostPriceTable[]>;
+  /** The model ids a host refused (D-cx, `<vtcHome>/engines/model-refusals.jsonl`). */
+  readonly modelRefusals?: () => ModelRefusalsRead;
   /** Each adapter's `capabilities.safeHostWeb` (D-cf). */
   readonly hostWeb?: () => Promise<Readonly<Partial<Record<HostId, boolean>>>>;
   /**
@@ -283,6 +299,8 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
     browser: { vtcHome: ctx.vtcHome, sha256: sha256OfFile },
     installBrowser: (log) => installBrowser(ctx.vtcHome, defaultBrowserInstallDeps(log)),
     hostAuth: () => withAdapters(ctx.vtcHome, (a) => gatherHostAuth(a, () => new Date())),
+    priceTables: () => withAdapters(ctx.vtcHome, (a) => Promise.resolve(priceTablesOf(a))),
+    modelRefusals: () => readModelRefusals(ctx.vtcHome),
     hostWeb: () =>
       withAdapters(ctx.vtcHome, (adapters) =>
         Promise.resolve(
@@ -356,7 +374,7 @@ export const createDoctorCommand = (
 ): CommandSpec => ({
   name: "doctor",
   summary:
-    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, routing (tier table, project range, models per tier, Lookback pace), auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
+    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, routing (tier table, project range, models per tier, Lookback pace), price tables and overrides, refused model ids, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser",
   run: (args, ctx) =>
     guarded("doctor", ctx, async () => {
       const { values } = parseFlags(args, {
@@ -391,8 +409,10 @@ export const createDoctorCommand = (
         checks.push(...checkClaudeUserSettings(e.claudeUserSettings()));
       const userConfig = e.userConfig?.() ?? null;
       if (userConfig !== null) checks.push(checkEnvPassthrough(userConfig));
-      const prices = userConfig === null ? null : checkPrices(userConfig);
-      if (prices !== null) checks.push(prices);
+      checks.push(
+        ...checkPrices(userConfig, e.priceTables === undefined ? [] : await e.priceTables()),
+      );
+      if (e.modelRefusals !== undefined) checks.push(...checkModelRefusals(e.modelRefusals()));
       const search =
         userConfig === null ? null : checkResearchSearch(userConfig, e.researchEnv ?? {});
       if (search !== null) checks.push(search);

@@ -45,13 +45,11 @@ import {
   CLAUDE_MIN_VERSION,
   checkHostAuth,
   checkMergeLevel,
-  checkPrices,
   parseVersion,
   withClaudeMinimum,
   type MergeLevelEnv,
 } from "../src/doctor-checks.js";
 import { readCappedBody } from "../src/http-client.js";
-import { readUserConfig } from "../src/user-config.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import { capture, cleanupDirs, initRepo, initVtcRepo, tempDir, tempHome } from "./helpers.js";
 
@@ -597,26 +595,5 @@ describe("vtc doctor: the merge level and the Level-3 preflight (AD-23 rule 1)",
     });
     expect(await defaultDoctorEnv(capture(initRepo(), tempHome()).ctx).mergeLevel?.()).toBeNull();
     expect(await defaultDoctorEnv(capture(tempDir(), tempHome()).ctx).mergeLevel?.()).toBeNull();
-  });
-});
-
-describe("vtc doctor: the price table (§11, H-1; reading 152)", () => {
-  it("warns while no model is priced, since Codex runs are then not started", () => {
-    const home = tempHome();
-    expect(checkPrices(readUserConfig(home))).toMatchObject({
-      name: "prices",
-      status: "warn",
-      detail: expect.stringContaining("hosts.models.codex") as unknown,
-    });
-    writeFileSync(
-      join(home, "config.yaml"),
-      "version: 1\nprices:\n  gpt-b:\n    input_per_mtok: 1\n    cached_input_per_mtok: 0.1\n    output_per_mtok: 8\n  gpt-a:\n    input_per_mtok: 2\n    cached_input_per_mtok: 0.2\n    output_per_mtok: 16\n",
-    );
-    expect(checkPrices(readUserConfig(home))).toMatchObject({
-      status: "ok",
-      detail: expect.stringContaining("prices gpt-a, gpt-b") as unknown,
-    });
-    writeFileSync(join(home, "config.yaml"), "version: [\n");
-    expect(checkPrices(readUserConfig(home))).toBeNull();
   });
 });

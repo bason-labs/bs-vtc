@@ -19,8 +19,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { core } from "@vtc/engine";
 import { writeChecksums } from "../scripts/release-checksums.js";
+import { CHANGELOG, writeReleaseNotes } from "../scripts/release-notes.js";
 import {
   binaryName,
+  changelogSection,
   checksumDirectory,
   formatSha256Sums,
   INSTALLER_PLACEHOLDERS,
@@ -30,8 +32,10 @@ import {
   releaseVersion,
   renderFormula,
   renderInstaller,
+  renderReleaseNotes,
   sha256File,
 } from "../scripts/release-lib.js";
+import { VERSION as CLI_VERSION } from "../src/version.js";
 import { FORMULA_TEMPLATE, INSTALLER, renderReleaseFiles } from "../scripts/release-render.js";
 import { cleanupDirs, PRODUCT_ROOT, tempDir } from "./helpers.js";
 
@@ -167,6 +171,52 @@ describe("the release workflow (AD-26 rules 1-3)", () => {
     }
   });
 
+  it("checks CHANGELOG.md has the release's section before building (H-16)", () => {
+    const runs =
+      workflow()
+        .jobs.verify?.steps.map((s) => s.run ?? "")
+        .join("\n") ?? "";
+    expect(runs).toMatch(/bun packages\/cli\/scripts\/release-notes\.ts --version "\$version"/);
+    expect(runs.indexOf("release-notes.ts")).toBeLessThan(runs.indexOf("pnpm install"));
+  });
+
+  it("renders the release notes from CHANGELOG.md beside the assets, not among them (H-16)", () => {
+    const wf = workflow();
+    const pkg = wf.jobs.package?.steps.map((s) => s.run ?? "").join("\n") ?? "";
+    expect(pkg).toMatch(
+      /release-notes\.ts --version "\$VERSION" --repo "\$REPO" .*--out notes\/release-notes\.md/,
+    );
+    // written after the checksums, outside release/, so SHA256SUMS lists only what is downloaded
+    expect(pkg.indexOf("release-notes.ts")).toBeGreaterThan(
+      pkg.lastIndexOf("release-checksums.ts"),
+    );
+    const uploads = (wf.jobs.package?.steps ?? []).filter(
+      (s) => s.uses?.startsWith("actions/upload-artifact@") === true,
+    );
+    expect(uploads.map((s) => [s.with?.name, s.with?.path])).toEqual([
+      ["release", "release/"],
+      ["release-notes", "notes/"],
+    ]);
+    const publish = wf.jobs.publish as Job;
+    const run = publish.steps.map((s) => s.run ?? "").join("\n");
+    expect(run).toContain("--notes-file notes/release-notes.md");
+    expect(run).not.toMatch(/^\s*echo /m);
+    const downloads = publish.steps
+      .filter((s) => s.uses?.startsWith("actions/download-artifact@") === true)
+      .map((s) => s.with?.name);
+    expect(downloads).toEqual(["release", "release-notes"]);
+  });
+
+  it("publishes nothing beyond the GitHub Release: no push, no tap, no marketplace (H-16)", () => {
+    const text = readFileSync(WORKFLOW, "utf8");
+    const runs = Object.values(workflow().jobs)
+      .flatMap((job) => job.steps.map((s) => s.run ?? ""))
+      .join("\n");
+    expect(runs).not.toMatch(/git push|npm publish|pnpm publish|brew |marketplace/);
+    expect(runs.match(/gh release \w+/g)).toEqual(["gh release create", "gh release edit"]);
+    expect(text).not.toMatch(/homebrew-|tap-repo/);
+  });
+
   it("publishes on tags only: attests every asset, drafts, then publishes", () => {
     const publish = workflow().jobs.publish as Job;
     expect(publish.if).toBe(
@@ -182,11 +232,10 @@ describe("the release workflow (AD-26 rules 1-3)", () => {
   });
 
   it("tells existing users to re-run vtc install --host claude-code (D-bo, reading 169)", () => {
-    const publish = workflow().jobs.publish as Job;
-    const run = publish.steps.map((s) => s.run ?? "").join("\n");
-    // single-quoted, so the backticks are text and not a command substitution
-    expect(run).toMatch(
-      /echo 'Upgrading from an earlier vtc: in each repo where you use VTC with Claude Code, re-run `vtc install --host claude-code`, so its settings carry the session sandbox rules of this release\.'/,
+    expect(
+      renderReleaseNotes({ changelog: "## v1.0.0\n\nThings.\n", version: "1.0.0", repo: "o/r" }),
+    ).toContain(
+      "Upgrading from an earlier vtc: in each repo where you use VTC with Claude Code, re-run `vtc install --host claude-code`, so its settings carry the session sandbox rules of this release.",
     );
     expect(readFileSync(join(PRODUCT_ROOT, "packaging/README.md"), "utf8")).toMatch(
       /re-run `vtc install --host claude-code`/,
@@ -195,6 +244,96 @@ describe("the release workflow (AD-26 rules 1-3)", () => {
 
   it("carries the H-2 todo in the release docs", () => {
     expect(readFileSync(join(PRODUCT_ROOT, "packaging/README.md"), "utf8")).toContain(H2_TODO);
+  });
+
+  it("keeps signing as 'later, if needed' in the release docs (H-11, reading 235)", () => {
+    const readme = readFileSync(join(PRODUCT_ROOT, "packaging/README.md"), "utf8");
+    expect(readme).toMatch(/## Later, if needed: signing and notarization/);
+    expect(readme).toMatch(/only once\s+other\s+people\s+download\s+VTC/);
+    expect(readme).toMatch(/unsigned,\s+with\s+SHA-256\s+checksums\s+\(H-2\)/);
+    expect(readFileSync(WORKFLOW, "utf8")).toMatch(/later, if needed\s+(#\s+)?\(H-11\)/);
+  });
+});
+
+const CHANGES = [
+  "# Changelog",
+  "",
+  "Intro text.",
+  "",
+  "## Unreleased",
+  "",
+  "- Not out yet.",
+  "",
+  "## v1.2.0 (2026-11-01)",
+  "",
+  "### Added",
+  "",
+  "- A feature.",
+  "",
+  "```md",
+  "## v1.1.0 inside a fence is not a heading",
+  "```",
+  "",
+  "## v1.1.0",
+  "",
+  "- Older.",
+  "",
+].join("\n");
+
+describe("release notes from CHANGELOG.md (H-16)", () => {
+  it("takes the version's section, up to the next release heading, outside code fences", () => {
+    expect(changelogSection(CHANGES, "v1.2.0")).toBe(
+      "### Added\n\n- A feature.\n\n```md\n## v1.1.0 inside a fence is not a heading\n```",
+    );
+    expect(changelogSection(CHANGES, "1.1.0")).toBe("- Older.");
+  });
+
+  it("refuses a version with no section, or an empty one", () => {
+    expect(() => changelogSection(CHANGES, "1.3.0")).toThrow(
+      /CHANGELOG\.md has no "## v1\.3\.0" section/,
+    );
+    expect(() => changelogSection(CHANGES, "1.2")).toThrow(/not a release version/);
+    expect(() => changelogSection("## v2.0.0\n\n## v1.0.0\n- x\n", "2.0.0")).toThrow(/is empty/);
+    // a longer version is a different release
+    expect(() => changelogSection("## v1.2.00\n- x\n", "1.2.0")).toThrow(/no "## v1\.2\.0"/);
+  });
+
+  it("adds how to verify a download and that the binaries are unsigned until later, if needed", () => {
+    const notes = renderReleaseNotes({ changelog: CHANGES, version: "1.2.0", repo: "o/r" });
+    expect(notes.startsWith("### Added\n")).toBe(true);
+    expect(notes).toContain("sha256sum -c SHA256SUMS --ignore-missing");
+    expect(notes).toContain(
+      "The binaries are not signed or notarized. Signing them with an Apple Developer ID comes later, if needed: only once other people download VTC (H-11).",
+    );
+    expect(notes).not.toContain("gh attestation verify");
+    expect(notes.endsWith("\n")).toBe(true);
+    const attested = renderReleaseNotes({
+      changelog: CHANGES,
+      version: "1.2.0",
+      repo: "o/r",
+      attested: true,
+      signed: true,
+    });
+    expect(attested).toContain("gh attestation verify <file> -R o/r");
+    expect(attested).not.toContain("not signed");
+    expect(() =>
+      renderReleaseNotes({ changelog: CHANGES, version: "1.2.0", repo: "o/r; rm -rf /" }),
+    ).toThrow(/not an <owner>\/<repo>/);
+  });
+
+  it("renders this vtc's own release from the real CHANGELOG.md", () => {
+    const out = join(tempDir("vtc-notes-"), "notes", "release-notes.md");
+    writeReleaseNotes({ version: CLI_VERSION, repo: "bason-labs/bs-vtc", out });
+    const notes = readFileSync(out, "utf8");
+    expect(notes).toBe(
+      renderReleaseNotes({
+        changelog: readFileSync(CHANGELOG, "utf8"),
+        version: CLI_VERSION,
+        repo: "bason-labs/bs-vtc",
+      }),
+    );
+    expect(notes).toContain("SHA256SUMS");
+    expect(notes).not.toMatch(/^## v/m);
   });
 });
 

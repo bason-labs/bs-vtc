@@ -1,8 +1,8 @@
 /**
  * Release helpers (spine AD-26; owner: cli+binary team). Pure functions the release workflow's
- * scripts (`release-checksums.ts`, `release-render.ts`) and their tests share: the targets, the
- * asset names, the `SHA256SUMS` format and the rendering of the Homebrew formula and the
- * installer. They cross no package boundary, so they live here and not in `@vtc/shared`
+ * scripts (`release-checksums.ts`, `release-render.ts`, `release-notes.ts`) and their tests
+ * share: the targets, the asset names, the `SHA256SUMS` format, the rendering of the Homebrew
+ * formula and the installer, and the release notes from `CHANGELOG.md` (H-16). They cross no package boundary, so they live here and not in `@vtc/shared`
  * (research 2026-10-14 §6.3).
  */
 import { createHash } from "node:crypto";
@@ -155,4 +155,72 @@ export const renderInstaller = (
   return script
     .replaceAll(INSTALLER_PLACEHOLDERS.repo, checkRepo(input.repo))
     .replaceAll(INSTALLER_PLACEHOLDERS.version, releaseVersion(input.version));
+};
+
+const FENCE = /^\s*(```|~~~)/;
+const RELEASE_HEADING = /^## v(\S+)/;
+
+/**
+ * The body of `## v<version>` in a CHANGELOG (H-16): every line up to the next `## ` heading,
+ * headings inside code fences not counted, without the heading itself and trimmed of blank lines
+ * at either end. Throws when the CHANGELOG has no such section or it is empty, so a release
+ * never ships without notes.
+ */
+export const changelogSection = (changelog: string, version: string): string => {
+  const wanted = releaseVersion(version);
+  const body: string[] = [];
+  let inFence = false;
+  let inSection = false;
+  let found = false;
+  for (const line of changelog.split(/\r?\n/)) {
+    if (FENCE.test(line)) inFence = !inFence;
+    else if (!inFence && line.startsWith("## ")) {
+      if (inSection) break;
+      if (RELEASE_HEADING.exec(line)?.[1] === wanted) {
+        inSection = true;
+        found = true;
+        continue;
+      }
+    }
+    if (inSection) body.push(line);
+  }
+  if (!found) throw new Error(`CHANGELOG.md has no "## v${wanted}" section`);
+  const text = body.join("\n").trim();
+  if (text === "") throw new Error(`CHANGELOG.md's "## v${wanted}" section is empty`);
+  return text;
+};
+
+/** The line every release's notes carry for an existing user (D-bo, spine §5 reading 169). */
+export const UPGRADE_NOTE =
+  "Upgrading from an earlier vtc: in each repo where you use VTC with Claude Code, re-run `vtc install --host claude-code`, so its settings carry the session sandbox rules of this release.";
+
+/**
+ * A GitHub Release's notes (H-16; spine §5 reading 240): the version's CHANGELOG section, then how
+ * to verify a download (`SHA256SUMS`, H-2; the attestation only when the release is attested),
+ * that the binaries are unsigned while they are (H-11, reading 235), and the upgrade note.
+ */
+export const renderReleaseNotes = (input: {
+  readonly changelog: string;
+  readonly version: string;
+  readonly repo: string;
+  readonly attested?: boolean;
+  readonly signed?: boolean;
+}): string => {
+  const repo = checkRepo(input.repo);
+  const lines = [
+    changelogSection(input.changelog, input.version),
+    "",
+    "---",
+    "",
+    "Verify a download: `sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c SHA256SUMS --ignore-missing`).",
+  ];
+  if (input.attested === true)
+    lines.push("", `Verify its provenance: \`gh attestation verify <file> -R ${repo}\``);
+  if (input.signed !== true)
+    lines.push(
+      "",
+      "The binaries are not signed or notarized. Signing them with an Apple Developer ID comes later, if needed: only once other people download VTC (H-11). Until then, check every download against `SHA256SUMS` (H-2).",
+    );
+  lines.push("", UPGRADE_NOTE, "");
+  return lines.join("\n");
 };
