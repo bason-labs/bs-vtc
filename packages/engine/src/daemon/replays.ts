@@ -61,6 +61,7 @@ import {
   type LookbackReplay,
   type LookbackReplayTrial,
   type LookbackRetro,
+  type RoutingReplayPlan,
   type RunState,
   type TierRoute,
 } from "../core/index.js";
@@ -78,6 +79,7 @@ import {
   recordAaFlipRate,
   recordReplayInfra,
   recordReplayTrial,
+  recordRoutingReplayTrial,
   replayTaskKey,
   replayTasks,
   writeReplayResult,
@@ -434,6 +436,92 @@ const scopeOf = (
   graderBundleSha: deps.graderBundleSha(),
 });
 
+/** A tier replay (D-cn, reading 247(6)): every trial runs on its arm's tier. */
+export const isTierReplay = (replay: Pick<LookbackReplay, "trials">): boolean =>
+  replay.trials.length > 0 && replay.trials.every((t) => t.armTier !== undefined);
+
+/**
+ * The editable section of the prompt version a tier replay's arms both run (`plan.prompt`): the
+ * compiled default's, or a stored version's checked against the compiled locked core; a reason
+ * when neither is it.
+ */
+const tierReplayPrompt = (
+  deps: Pick<ReplayWiringDeps, "vtcHome" | "compiled">,
+  plan: Pick<RoutingReplayPlan, "role" | "mode" | "host" | "prompt">,
+): Arm | string => {
+  const compiled = deps.compiled(plan.role, plan.mode, plan.host);
+  if (compiled === undefined)
+    return `the compiled prompt of ${plan.role} on ${plan.host} is not in this vtc's plugin`;
+  const sha = plan.prompt.effective_sha256;
+  const defaultRef = promptVersionRef({
+    role: plan.role,
+    mode: plan.mode,
+    host: plan.host,
+    locked: compiled.locked,
+    editable: compiled.editable,
+  });
+  if (sha === defaultRef.effective_sha256)
+    return { version: defaultRef, text: compiled.editable.trim() };
+  const stored = loadPromptVersionSync(deps.vtcHome, plan.prompt, sha, compiled.locked);
+  if (stored === undefined)
+    return `its prompt version ${sha.slice(0, 8)} is neither the compiled default nor a stored version`;
+  return { version: stored.frontmatter.version, text: stored.editable.trim() };
+};
+
+/**
+ * A tier replay the routing step planned (D-cn; spine §5 readings 247(6) and 250) as the replay
+ * RETRO launches: each trial is its recorded dispatch run again (its pack, its starting commit and
+ * protected tests, as a prompt trial's) with the one prompt version both arms run, on its arm's
+ * tier (`armTier`), carrying the grader bundle its replay is graded under. A reason when a
+ * trial's recorded dispatch or the prompt version cannot be found: the replay is not launched
+ * (its trials are whole pairs, so a part of it measures nothing).
+ */
+export const tierReplayOf = (
+  deps: Pick<ReplayWiringDeps, "projectRoot" | "vtcHome" | "compiled" | "history">,
+  plan: RoutingReplayPlan,
+): LookbackReplay | string => {
+  const arm = tierReplayPrompt(deps, plan);
+  if (typeof arm === "string") return arm;
+  const history = deps.history();
+  const trials: LookbackReplayTrial[] = [];
+  for (const t of plan.trials) {
+    const prefix = `${t.run}:`;
+    if (!t.task.startsWith(prefix)) return `trial ${t.task} names another run than ${t.run}`;
+    const task = { run: t.run, trace: t.trace, task: t.task.slice(prefix.length) };
+    const recorded = recordedDispatch(
+      history,
+      deps.projectRoot,
+      { ...task, regressionSet: t.regressionSet },
+      plan.role,
+    );
+    if (recorded === undefined)
+      return `the recorded dispatch ${t.trace} of ${t.task} cannot be run again (its pack or starting commit is gone)`;
+    trials.push({
+      arm: t.arm,
+      trial: t.trial,
+      task: t.task,
+      regressionSet: t.regressionSet,
+      role: plan.role,
+      ...(plan.mode === undefined ? {} : { mode: plan.mode }),
+      host: plan.host,
+      prompt: { version: arm.version, text: arm.text },
+      pack: recorded.pack,
+      base: recorded.base,
+      ...(recorded.protectedPaths.length === 0 ? {} : { protectedPaths: recorded.protectedPaths }),
+      ...(recorded.tier === undefined ? {} : { tier: recorded.tier }),
+      armTier: t.tier,
+      graderBundleSha: plan.graderBundleSha,
+    });
+  }
+  return {
+    proposal: plan.proposal,
+    role: plan.role,
+    ...(plan.mode === undefined ? {} : { mode: plan.mode }),
+    host: plan.host,
+    trials,
+  };
+};
+
 /**
  * The `replays`, `replayWait`, `recordTrial`, `gradeTrial`, `gradeVerdict` and `finishReplay`
  * parts of core's `LookbackRetro`.
@@ -619,6 +707,22 @@ export const createLookbackReplays = (
     replayWait: (state) => replayWaitReason(deps, state),
     // D-cg (reading 201): every grade and every infrastructure attempt, as core learns it
     recordTrial: async (replay, trial, record) => {
+      // D-cn (reading 250): a tier replay trial's row carries its arm's tier, under the prompt
+      // version and grader bundle it ran with
+      if (trial.armTier !== undefined) {
+        if (trial.arm === "aa")
+          throw new Error(`a tier replay has no A/A arm (${replay.proposal})`);
+        await recordRoutingReplayTrial(deps.vtcHome, {
+          repoKey: deps.repoKey,
+          proposal: replay.proposal,
+          prompt: trial.prompt.version.effective_sha256,
+          graderBundleSha: trial.graderBundleSha ?? deps.graderBundleSha(),
+          trial: { task: trial.task, arm: trial.arm, trial: trial.trial, tier: trial.armTier },
+          record,
+          at: deps.now(),
+        });
+        return;
+      }
       const arms = armsOf(deps, replay.proposal, replay.role);
       if (typeof arms === "string") throw new Error(arms);
       const identity = {
@@ -658,6 +762,9 @@ export const createLookbackReplays = (
       ),
     // the result once the ledger holds every trial of the plan; nothing while some are missing
     finishReplay: async (replay) => {
+      // a tier replay is graded by the routing step at a later RETRO, from the ledger and the
+      // trials' events (reading 250): nothing to write here
+      if (isTierReplay(replay)) return [];
       const history = deps.history();
       const planned = await fullPlan(history, replay.proposal, replay.role, await context(history));
       if (typeof planned === "string")

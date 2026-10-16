@@ -62,6 +62,7 @@ import { runtime } from "./runtime.js";
 import { createWakeScheduler } from "./scheduler.js";
 import { loadStorage } from "./storage.js";
 import {
+  allowToolsHashedAfterScriptsOf,
   allowUnsandboxedOf,
   liveUserConfig,
   passthroughOf,
@@ -230,6 +231,12 @@ export interface BuildEnginePartsOptions {
    */
   readonly allowUnsandboxed?: boolean;
   /**
+   * A verify gate whose tool was hashed only after an install's scripts ran runs anyway (H-14,
+   * spine §5 reading 250). Default: the user-level `gates.allow_tools_hashed_after_scripts` of
+   * `~/.vtc/config.yaml`; never from `project.yaml`, and false when the file does not parse.
+   */
+  readonly allowToolsHashedAfterScripts?: boolean;
+  /**
    * `EngineDeps.automation` (AD-27 rule 7). Default: {@link buildAutomationDeps} over the user
    * config, read live (`liveUserConfig`: an opt-out flipped while the daemon runs is seen), and a
    * probe of this machine when the daemon starts (`gh --version`, `ffmpeg -version`, the origin
@@ -292,6 +299,8 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
   const createGateRunner = options.createGateRunner ?? gates.createGateRunner;
   const userConfig = readUserConfig(vtcHome);
   const allowUnsandboxed = options.allowUnsandboxed ?? allowUnsandboxedOf(userConfig);
+  const allowToolsHashedAfterScripts =
+    options.allowToolsHashedAfterScripts ?? allowToolsHashedAfterScriptsOf(userConfig);
   const http = options.http === null ? undefined : (options.http ?? defaultHttpClient());
   const researchApiKey = researchApiKeyOf(userConfig);
   const researchSearchProvider = researchSearchProviderOf(userConfig);
@@ -325,6 +334,7 @@ export const buildEngineParts = async (options: BuildEnginePartsOptions): Promis
         vtcHome,
         git: git.createGitOps({ repoRoot }),
         allowUnsandboxed,
+        allowToolsHashedAfterScripts,
       }),
     ),
     adapters,

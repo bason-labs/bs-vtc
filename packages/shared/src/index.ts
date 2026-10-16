@@ -329,5 +329,11 @@ export * from "./json-schema.js";
  * `sha256` cannot vouch for. `ReplayTrialRef.grader_bundle_sha`: the scope a tier replay trial's
  * dispatch belongs to, so Lookback judges a tier replay on its own scope's dispatches only. All
  * additive.
+ *
+ * 5.9.0 (MINOR): the round-6 review fixes (spine §5 reading 250). `UserConfig.gates
+ * .allow_tools_hashed_after_scripts` (`gatesAllowToolsHashedAfterScripts`) and
+ * `GateRunnerDeps.allowToolsHashedAfterScripts` (H-14): a verify gate whose `project` tool was
+ * hashed only after an install's scripts ran no longer runs unless the user opts in here. All
+ * additive.
  */
-export const CONTRACTS_VERSION = "5.8.0";
+export const CONTRACTS_VERSION = "5.9.0";

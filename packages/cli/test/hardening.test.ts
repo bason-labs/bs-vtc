@@ -37,7 +37,11 @@ import {
   defaultInstallDeps,
   type InstallDeps,
 } from "../src/commands/install.js";
-import { checkGateSandbox, detectGateSandbox } from "../src/doctor-checks.js";
+import {
+  checkGateSandbox,
+  checkToolsHashedAfterScripts,
+  detectGateSandbox,
+} from "../src/doctor-checks.js";
 import { guardHumanOnly, humanCliHello } from "../src/human-channel.js";
 import type { Exec, ExecResult } from "../src/process.js";
 import {
@@ -547,6 +551,33 @@ describe("the gate sandbox (D-al, reading 69)", () => {
     expect(
       detectGateSandbox({ platform: "win32", exists: () => true, probe: () => true }).kind,
     ).toBe(null);
+  });
+
+  it("vtc doctor warns while tools hashed only after an install's scripts may run (H-14, reading 250)", () => {
+    const config = (allow: boolean | undefined): UserConfigRead => ({
+      ok: true,
+      path: "/h/config.yaml",
+      config: {
+        version: 1,
+        env_passthrough: [],
+        ...(allow === undefined
+          ? {}
+          : { gates: { allow_unsandboxed: false, allow_tools_hashed_after_scripts: allow } }),
+      },
+    });
+    expect(checkToolsHashedAfterScripts(null)).toBeNull();
+    expect(checkToolsHashedAfterScripts(config(undefined))).toBeNull();
+    expect(checkToolsHashedAfterScripts(config(false))).toBeNull();
+    expect(
+      checkToolsHashedAfterScripts({ ok: false, path: "/h/config.yaml", error: "bad" }),
+    ).toBeNull();
+    expect(checkToolsHashedAfterScripts(config(true))).toMatchObject({
+      name: "check tools",
+      status: "warn",
+      detail: expect.stringMatching(
+        /gates\.allow_tools_hashed_after_scripts is on in \/h\/config\.yaml.*install script/,
+      ) as string,
+    });
   });
 
   it("vtc doctor reports the sandbox in use, fails without one and warns about the opt-in", async () => {

@@ -22,6 +22,7 @@ import type {
   PromptVersionRef,
   PullRequestService,
   RemoteMergeService,
+  ReplayGrader,
   ReplayInfraOutcome,
   RoleMcpToolName,
   RoleResult,
@@ -301,13 +302,55 @@ export interface RoutingProposalCell {
   readonly detail: string;
 }
 
+/** An `automation.skipped` draft, the only event `LookbackRetro.replays` may hand core to log. */
+export type LookbackSkippedDraft = EventDraft & { readonly type: "automation.skipped" };
+
 /**
- * Lookback's routing step at RETRO (D-cn): write the routing scorecard
- * (`.vtc/lookback/scorecards/routing.json`, `RoutingScorecard`) from the history and return the
- * cells whose start tier it proposes to change. The lookback module implements it (the
- * lookback-research team's routing scorecard writer and routing proposals, `lookback/`, which names
- * this type from core's index); the daemon calls it at RETRO, beside the `LookbackRetro` seam it
- * hands core. Core itself never calls it.
+ * One trial of a tier replay the routing step asks RETRO to launch (D-cn; spine §5 readings
+ * 247(6) and 250): the recorded dispatch it runs again (`trace` of `run`, task key `task`,
+ * `<run>:<task>`), its arm and the arm's tier (`ReplayTrialRef.tier`).
+ */
+export interface RoutingReplayTrialPlan {
+  readonly task: string;
+  readonly arm: "a" | "b";
+  readonly trial: number;
+  readonly tier: ModelTier;
+  readonly regressionSet: boolean;
+  readonly trace: string;
+  readonly run: string;
+}
+
+/**
+ * A tier replay's trials to launch at this RETRO (the lookback module's `RoutingReplayLaunch`):
+ * the replay id (`routingReplayId`), the one prompt version both arms run, how it is graded, the
+ * grader bundle its trials carry (`ReplayTrialRef.grader_bundle_sha`) and the trials, whole
+ * pairs within the RETRO's trial budget.
+ */
+export interface RoutingReplayPlan {
+  readonly proposal: string;
+  readonly subject: string;
+  readonly role: string;
+  readonly mode?: string;
+  readonly host: HostId;
+  readonly prompt: PromptVersionRef;
+  readonly grader: ReplayGrader;
+  readonly graderBundleSha: string;
+  readonly trials: readonly RoutingReplayTrialPlan[];
+  /** Ungraded trials left for a later RETRO. */
+  readonly remaining: number;
+}
+
+/**
+ * Lookback's routing step at RETRO (D-cn; spine §5 readings 219, 247(6) and 250): write the
+ * routing scorecard (`.vtc/lookback/scorecards/routing.json`, `RoutingScorecard`) from the history,
+ * plan and grade the tier replays of the changes it proposes, and return the cells whose start
+ * tier it proposes to change (each backed by a graded tier replay where the trial budget allows
+ * one), the tier replay trials to launch now and the `automation.skipped` drafts to log. The
+ * lookback module implements it (`routingReplayStep`, which names this type from core's index);
+ * the daemon calls it inside RETRO's replay planning (`LookbackRetro.replays`), launches the
+ * returned trials as `lookback_replay` trials on their arm's tier, records each outcome in the
+ * replay ledger, and hands every run's tier replay trial events back at the next RETRO. Core
+ * itself never calls it.
  */
 export type RoutingLookback = (input: {
   readonly projectRoot: string;
@@ -324,18 +367,26 @@ export type RoutingLookback = (input: {
     mode: string | undefined,
     host: HostId,
   ) => string | undefined;
-  /** The VTC home whose recorded AI tiebreaks let an `ai_tiebreak` attribution count. */
+  /** The VTC home: its recorded AI tiebreaks and its replay ledger. */
   readonly vtcHome: string;
   /**
    * What is left of this RETRO's trial cap (`lookbackPaceFor(...).maxTrialsPerRetro`, D-cq) after
    * the prompt replays it launches (D-cn; spine §5 reading 247(6)): the tier replays a routing
-   * change may plan. 0 while the weekly window or the budget holds the replays back.
+   * change may launch. 0 while the weekly window or the budget holds the replays back.
    */
   readonly trialBudget?: number;
-}) => Promise<readonly RoutingProposalCell[]>;
-
-/** An `automation.skipped` draft, the only event `LookbackRetro.replays` may hand core to log. */
-export type LookbackSkippedDraft = EventDraft & { readonly type: "automation.skipped" };
+  /** How many failure and regression tasks one replay samples (D-cq, the user's pace). */
+  readonly pace?: { readonly failureTasks: number; readonly regressionTasks: number };
+  /**
+   * The tier replay trials' own events (`purpose: lookback_replay`, left out of `history`), of
+   * every run: where each trial ran and what it cost.
+   */
+  readonly replayEvents: readonly VtcEvent[];
+}) => Promise<{
+  readonly cells: readonly RoutingProposalCell[];
+  readonly replays: readonly RoutingReplayPlan[];
+  readonly skipped: readonly LookbackSkippedDraft[];
+}>;
 
 /**
  * Lookback at RETRO (spec §13 steps 1–2; AD-21 rules 4 and 8; spine §5 reading 154): the lookback

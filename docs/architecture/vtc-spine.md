@@ -4223,6 +4223,44 @@ about 3 min 15 s, the engine suite 189 to 195 s), so the root `test` script no l
 once) still starved one short adapters test past 5 s. The engine suite's own process load (about
 600 s of system time per run, mostly git spawns) is the remaining shared cause, an open follow-up.
 
+**Reading 250 (2026-10-16, the round-6 review fixes).** The Lead's fixes for the review findings
+on the round-6 merge: the tier replay arm wired end to end, and two H-14 gaps closed. **Lead
+decision 2026-10-16, pending human review.**
+
+250.  **The round-6 review fixes** (amends readings 238, 247(6) and 249). _Lead decision
+      2026-10-16, pending human review._ (1) _Tier replays run_ (closes 249(2)'s open follow-up):
+      engine core's `RoutingLookback` seam is `routingReplayStep`'s shape. Its input adds the
+      user's pace (D-cq) and `replayEvents` (every run's tier replay trial events, from the
+      engine's own logs); it returns the cells, the tier replays to launch (`RoutingReplayPlan`)
+      and the `automation.skipped` drafts. The daemon runs it inside RETRO's replay planning
+      (`LookbackRetro.replays`), once the prompt replays are planned and with what is left of the
+      trial cap, serialised with the Lookback queue. Each planned replay becomes a RETRO replay
+      whose trials are the recorded dispatches run again (pack, start commit, protected tests) with
+      the one prompt version both arms run, on the arm's tier (`armTier`), carrying the grader
+      bundle; core launches them after the prompt replays, under the same window, budget and
+      isolation rules. Each outcome goes to the ledger with its tier (`recordRoutingReplayTrial`);
+      a tier replay writes nothing when its trials finish, since the routing step grades it at a
+      later RETRO from the ledger and the trials' events and raises its fact with
+      `routing.replay_verdict` only when the verdict backs the change. A replay whose recorded
+      dispatch or prompt version cannot be found is not launched (told on stderr), and its change
+      stays withheld as a started or due replay would. `lookbackRoutingStep` remains for a caller
+      that launches nothing (no budget, no events); 249(2)'s withholding of a change only because
+      the seam could not launch its replay is gone. (2) _Check tools fail closed_ (amends 238 and
+      249(1)/(8); the owner's H-14: a tool install scripts could replace is not trusted): a verify
+      gate whose `project` tool was hashed only after an install gate with no scripts-free form ran
+      its scripts (`ToolIntegrity.baseline` `after_scripts`) does not run (`infra`, with the reason
+      and the ways out in its log) unless `~/.vtc/config.yaml` `gates.allow_tools_hashed_after_scripts`
+      is set, which only the user-level file can do (contracts 5.9.0). With it, the gate runs marked
+      `after_scripts`, and `vtc doctor` warns while it is on. `vtc calibrate` still runs such gates
+      (it measures the base) and warns which ones runs will not run. (3) _Gate-command files before
+      every verify gate_ (amends 238): an install-phase script that writes `.npmrc`
+      `script-shell` / `node-options`, a dotenv preload, or a `package.json` script ending in
+      `|| true` swaps what an L0 or L2 Node gate runs without touching a hashed tool file. Before
+      every verify gate on the head checkout, the gate-command files (`isGateCommandFile`) and the
+      mixed configs (`package.json`, `pyproject.toml`, `pnpm-workspace.yaml`) are put back to the
+      head commit, as L1's configs already were, and the gate's log names what was put back. A
+      rewritten package script therefore runs as the commit has it, rather than being refused.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

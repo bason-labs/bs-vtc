@@ -26,7 +26,14 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   script. A tool that an install script changed, including an interpreter or shell tool planted
   beside it and the plugins its lint config loads, fails the gate as tampering. `vtc calibrate`
   records each gate's tool and replaces one that went stale. A tool that could only be hashed
-  after an install's own scripts ran is marked as such.
+  after an install's own scripts ran (Yarn, `npm install`, `uv sync`, a custom install script)
+  does not run unless you set `gates.allow_tools_hashed_after_scripts: true` in
+  `~/.vtc/config.yaml`; `vtc calibrate` warns which gates that affects, and `vtc doctor` warns
+  while the setting is on. Every check gate runs with the commit's own package-manager config,
+  task-runner files and package scripts, so an install script cannot rewrite what a gate runs.
+- **Routing changes are replayed before they are proposed (D-cn).** When the weekly window and
+  budget allow it, RETRO re-runs a proposed routing change's held-out tasks on the current and the
+  proposed start tier, and the change is proposed only once that replay backs it.
 - **Reviewers start on their own tier (D-cu).** Difficulty routing picks the start tier of the
   engineers and the QA author only. A task that starts on the lowest tier moves up after every
   failed round (D-cv).

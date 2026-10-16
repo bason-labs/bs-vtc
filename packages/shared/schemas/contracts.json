@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.8.0",
+  "contracts_version": "5.9.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -14472,6 +14472,9 @@
           "properties": {
             "allow_unsandboxed": {
               "default": false,
+              "type": "boolean"
+            },
+            "allow_tools_hashed_after_scripts": {
               "type": "boolean"
             }
           },

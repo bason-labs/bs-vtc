@@ -4,9 +4,8 @@
  * current start tier and arm `b` on the proposed one), keeps its graded trials in the replay ledger
  * across RETROs, grades it into a `RoutingReplayResult` with the paired sign test, and raises the
  * routing `config` fact only once the replay is graded, its trials' events show each ran on its
- * arm's tier, and it backs the change (`routingReplayBacks`). With no budget, or through engine
- * core's seam (`lookbackRoutingStep`), the fact carries the scorecard alone, as before; through the
- * seam, a change whose replay the budget had room for says in its detail that it was not replayed.
+ * arm's tier, and it backs the change (`routingReplayBacks`). With no budget (or through
+ * `lookbackRoutingStep`, which launches nothing), the fact carries the scorecard alone, as before.
  */
 import {
   engineRepoKey,
@@ -275,10 +274,10 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     );
   });
 
-  it("fits engine core's RoutingLookback seam with lookbackRoutingStep", () => {
-    // a compile-time check: the seam passes neither tier replay launches nor their events
-    const seam: RoutingLookback = lookbackRoutingStep;
-    expect(seam).toBe(lookbackRoutingStep);
+  it("fits engine core's RoutingLookback seam with routingReplayStep (reading 250)", () => {
+    // a compile-time check: the seam carries the tier replays to launch and their trials' events
+    const seam: RoutingLookback = routingReplayStep;
+    expect(seam).toBe(routingReplayStep);
   });
 
   it("plans the replay within the RETRO's trial budget and withholds the fact until it is graded", async () => {
@@ -469,10 +468,10 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
     }
   });
 
-  it("through the seam, launches and grades no tier replay, and withholds a change whose replay is due (reading 249)", async () => {
+  it("for a caller that launches nothing, plans no replay and still holds a started one's fact (reading 250)", async () => {
     const s = await setup("seam");
     const history = lowStarts();
-    const seam = (trialBudget?: number) =>
+    const scorecardOnly = () =>
       lookbackRoutingStep({
         table: DCM,
         projectRoot: s.root,
@@ -482,24 +481,18 @@ describe("planning a tier replay (D-cn, reading 247(6))", () => {
         lockedShaFor,
         vtcHome: s.home,
         pace: PACE,
-        ...(trialBudget === undefined ? {} : { trialBudget }),
       });
-    // no budget, or one too small for a pair: no replay was due
-    for (const budget of [undefined, 0, 1]) {
-      const cells = await seam(budget);
-      expect(cells).toHaveLength(1);
-      expect(cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
-      expect(cells[0]?.detail).toContain("No tier replay backs it");
-      expect(cells[0]?.detail).not.toContain("247(6)");
-    }
-    // a budget with room for the replay: reading 247(6) raises the fact only after the graded
-    // replay backs it, and the seam cannot launch one, so the change is withheld
-    expect(await seam(24)).toEqual([]);
-    // nothing launched through the seam: the ledger holds no row of the replay
+    // no trial budget: no replay is due, so the fact carries the scorecard alone
+    const cells = await scorecardOnly();
+    expect(cells).toHaveLength(1);
+    expect(cells[0]?.metrics[ROUTING_FACT_METRICS.replayPlanned]).toBe(0);
+    expect(cells[0]?.detail).toContain("No tier replay backs it");
+    // nothing launched: the ledger holds no row of the replay
     await expect(readFile(join(s.home, LOOKBACK_HOME.replayTrialsFile), "utf8")).rejects.toThrow();
-    // a replay the ledger holds every trial of: the seam has no trial events to grade it on
+    // a replay the ledger holds every trial of, without the trials' events to grade it on: its
+    // change stays withheld, never raised on the scorecard alone
     await runToEnd(s, history, () => true);
-    expect(await seam(24)).toEqual([]);
+    expect(await scorecardOnly()).toEqual([]);
     await expect(readFile(join(s.root, routingReplayPath(LOW_MID)), "utf8")).rejects.toThrow();
   });
 

@@ -321,6 +321,13 @@ const walkGuarded = (
   return { dirs, files };
 };
 
+/**
+ * Files that define or wrap the command any gate runs (H-14): task-runner files, package-manager
+ * configs and dotenv preloads (`isGateCommandFile`), and the mixed configs whose script or tool
+ * sections do (`package.json` `scripts`, `pyproject.toml`, `pnpm-workspace.yaml` settings).
+ */
+const commandGuarded = (path: string): boolean => isGateCommandFile(path) || isMixedConfig(path);
+
 /** True when anything (a symlink included, not followed) is at `abs`. */
 const present = (abs: string): boolean => {
   try {
@@ -387,6 +394,8 @@ class Run {
    * their `ToolIntegrity.baseline` is `after_scripts`.
    */
   private readonly hashedAfterScripts = new Set<string>();
+  /** The install gates that ran their scripts outside the two-pass install (H-14). */
+  private unverifiedInstalls: readonly string[] = [];
   private readonly attempt: string;
   private readonly evidenceRoot: string;
   private readonly stateRoot: string;
@@ -550,8 +559,9 @@ class Run {
   private async runGates(config: GatesConfig): Promise<void> {
     let hiddenCopied = false;
     const gates = this.selectGates(config);
-    if (gates.some((g) => g.phase === "verify" && g.layer === "L1")) {
-      // Before any command ran: the checkout is still the clean head commit.
+    if (gates.some((g) => g.phase === "verify")) {
+      // Before any command ran: the checkout is still the clean head commit. Every head verify
+      // gate runs with the commit's gate-command files (H-14), and L1 with its lint configs too.
       this.guardedAtStart = walkGuarded(this.checkoutAbs, this.lintGuarded);
     }
     const verify = gates.filter((g) => g.phase !== "install");
@@ -658,6 +668,7 @@ class Run {
       unverified.push(gate.id);
       if (!(await run(gate, gate.command, true))) failed = gate.id;
     }
+    this.unverifiedInstalls = unverified;
     if (failed === null) this.noteTools(verify, unverified);
     for (const { gate } of plans) {
       this.results.push(
@@ -812,7 +823,7 @@ class Run {
         }
       }
       lines.push(
-        `install gate(s) ${unverified.join(", ")} have no scripts-free form VTC knows (npm ci, pnpm install, bun install, go mod download and cargo fetch have one), so they ran with their scripts outside the two-pass install: a file their scripts wrote into a check tool before it was hashed is not detected (H-14)`,
+        `install gate(s) ${unverified.join(", ")} have no scripts-free form VTC knows (npm ci, pnpm install, bun install, go mod download and cargo fetch have one), so they ran with their scripts outside the two-pass install: a file their scripts wrote into a check tool before it was hashed is not detected (H-14), ${this.deps.allowToolsHashedAfterScripts === true ? "and gates.allow_tools_hashed_after_scripts lets the gates whose tools were hashed after them run" : "so the gates whose tools were hashed after them do not run (gates.allow_tools_hashed_after_scripts in ~/.vtc/config.yaml runs them anyway)"}`,
       );
       if (late.length > 0) {
         lines.push(
@@ -879,10 +890,27 @@ class Run {
       ].sort();
       if (tampered.length > 0) return { tool: tool(tampered), tampered };
     }
+    const refusal = this.afterScriptsRefusal(gate);
+    if (refusal !== null) return { refused: refusal };
     const again = this.rederived(gate, baseline?.paths ?? []);
     if (again !== null && "refused" in again) return again;
     if (again !== null) return { tool: tool(again.added), tampered: again.added };
     return baseline === undefined ? {} : { tool: tool([]) };
+  }
+
+  /**
+   * H-14 fails closed (spine §5 reading 250): a `project` tool hashed only after an install gate
+   * ran its lifecycle scripts cannot be vouched for, since those scripts could have replaced it
+   * before the hash, so the gate does not run (`infra`) unless the user's
+   * `gates.allow_tools_hashed_after_scripts` (`~/.vtc/config.yaml`, never `project.yaml`) says to.
+   * `vtc calibrate` measures the base and is not refused; it says which gates runs will refuse.
+   */
+  private afterScriptsRefusal(gate: Gate): string | null {
+    if (!this.hashedAfterScripts.has(gate.id)) return null;
+    if (this.deps.allowToolsHashedAfterScripts === true) return null;
+    if (this.request.reason === "calibration") return null;
+    const installs = this.unverifiedInstalls.join(", ");
+    return `not run: its tool was hashed only after install gate(s) ${installs} ran their scripts (VTC knows no scripts-free form for them), so the hash cannot vouch for what those scripts wrote (H-14). Use an install command VTC can run scripts-free first (npm ci, pnpm install, bun install, go mod download, cargo fetch), a pinned tool, or set gates.allow_tools_hashed_after_scripts: true in ~/.vtc/config.yaml to run it anyway`;
   }
 
   /**
@@ -1177,19 +1205,25 @@ class Run {
     } catch (error) {
       return { refused: `not run: ${errorText(error)}` };
     }
-    if (head && gate.layer === "L1" && checkoutAbs === this.checkoutAbs) {
-      // Install scripts and L0 builds ran role code in this checkout: L1 reads the commit's configs.
+    if (head && gate.phase === "verify" && checkoutAbs === this.checkoutAbs) {
+      // Install scripts and L0 builds ran role code in this checkout: L1 reads the commit's lint
+      // configs, and every verify gate the commit's gate-command files (H-14, spine §5 reading
+      // 250): an install-phase script that wrote `.npmrc` `script-shell` / `node-options`, or a
+      // package.json script ending in `|| true`, swaps what the gate runs without touching a
+      // hashed tool file
+      const lint = gate.layer === "L1";
+      const what = lint ? "lint configs" : "gate-command files";
       try {
-        const put = await this.restoreLintConfigs();
+        const put = await this.restoreLintConfigs(lint ? this.lintGuarded : commandGuarded);
         if (put.length > 0) {
           this.note(
             `${gate.id}-configs`,
-            `an earlier gate changed these lint configs in the checkout; ${gate.id} ran with the commit's version:\n${put.join("\n")}`,
+            `an earlier gate changed these ${what} in the checkout; ${gate.id} ran with the commit's version:\n${put.join("\n")}`,
           );
         }
       } catch (error) {
         return {
-          refused: `not run: the lint configs an earlier gate changed could not be put back: ${errorText(error)}`,
+          refused: `not run: the ${what} an earlier gate changed could not be put back: ${errorText(error)}`,
         };
       }
     }
@@ -1262,17 +1296,21 @@ class Run {
   }
 
   /**
-   * Puts every L1-guarded file of the run checkout back to the head commit, whether or not the
-   * diff touched it: an install script, an L0 build or anything else an earlier gate ran may have
+   * Puts every `guarded` file (default: L1-guarded; the gate-command files for any other head
+   * verify gate) of the run checkout back to the head commit, whether or not the diff touched it: an install script, an L0 build or anything else an earlier gate ran may have
    * edited, added, deleted or replaced one, and L5 sees only the diff. Files the head does not
    * have are removed; the hidden tests stay. Returns the paths it changed, sorted.
    */
-  private async restoreLintConfigs(): Promise<string[]> {
+  private async restoreLintConfigs(
+    guarded: (path: string) => boolean = this.lintGuarded,
+  ): Promise<string[]> {
     const start = this.guardedAtStart;
     if (start === null) return [];
-    const now = walkGuarded(this.checkoutAbs, this.lintGuarded, start.dirs);
+    const now = walkGuarded(this.checkoutAbs, guarded, start.dirs);
     const hidden = new Set(this.hiddenFiles);
-    const paths = [...new Set([...start.files, ...now.files])].filter((p) => !hidden.has(p)).sort();
+    const paths = [...new Set([...start.files.filter(guarded), ...now.files])]
+      .filter((p) => !hidden.has(p))
+      .sort();
     const rel = relative(this.deps.repoRoot, this.checkoutAbs).split(sep).join("/");
     const wanted = new Map<string, Uint8Array | undefined>();
     for (const path of paths) wanted.set(path, await this.headFile(path));

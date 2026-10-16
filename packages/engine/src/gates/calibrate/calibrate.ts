@@ -71,6 +71,11 @@ export interface CalibrateDeps {
   readonly sandbox?: GateSandbox;
   /** `gates.allow_unsandboxed` from `~/.vtc/config.yaml`, read by the cli. Default false. */
   readonly allowUnsandboxed?: boolean;
+  /**
+   * `gates.allow_tools_hashed_after_scripts` from `~/.vtc/config.yaml` (H-14, reading 250), read
+   * by the cli. Calibration runs such gates either way; without it, it warns that runs will not.
+   */
+  readonly allowToolsHashedAfterScripts?: boolean;
   /** Finds the machine's sandbox when `sandbox` is absent; tests pass `() => null`. */
   readonly detectSandbox?: () => GateSandbox | null;
 }
@@ -401,6 +406,21 @@ export const calibrate = async (
         "  the vulnerable-dependency check needs the OSV offline database: run vtc calibrate again and accept the download",
       );
     }
+  }
+  // H-14 (reading 250): a tool hashed only after an install's scripts ran does not run in a real
+  // run without the user's opt-in, though calibration measured it
+  const afterScripts = proposed.gates.filter(
+    (g) =>
+      !broken.includes(g) &&
+      first.results.find((x) => x.gate_id === g.id)?.tool?.baseline === "after_scripts",
+  );
+  if (afterScripts.length > 0 && deps.allowToolsHashedAfterScripts !== true) {
+    const installs = proposed.gates
+      .filter((g) => g.phase === "install" && scriptsFreeInstall(g.command) === null)
+      .map((g) => g.id);
+    deps.out(
+      `WARNING: gate(s) ${afterScripts.map((g) => g.id).join(", ")}: the tool was hashed only after install gate(s) ${installs.join(", ")} ran their scripts (VTC knows no scripts-free form for them), so runs will NOT run these gates (H-14). Use an install command VTC can run scripts-free (npm ci, pnpm install, bun install, go mod download, cargo fetch), a pinned tool, or set gates.allow_tools_hashed_after_scripts: true in ~/.vtc/config.yaml`,
+    );
   }
   const gates = proposed.gates.filter((g) => !broken.includes(g));
   if (gates.length === 0)

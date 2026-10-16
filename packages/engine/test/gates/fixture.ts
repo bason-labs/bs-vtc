@@ -332,6 +332,8 @@ export const harness = (
     sandbox?: GateSandbox | null;
     /** `gates.allow_unsandboxed` from the user config. */
     allowUnsandboxed?: boolean;
+    /** `gates.allow_tools_hashed_after_scripts` from the user config (H-14, reading 250). */
+    allowToolsHashedAfterScripts?: boolean;
     /** The visual step's runner and toolchains (AD-24); tests never start a browser. */
     visual?: Pick<GateRunnerOptions, "visualRunner" | "visualToolchains" | "node">;
   } = {},
@@ -354,6 +356,9 @@ export const harness = (
       ...(options.allowUnsandboxed === undefined
         ? {}
         : { allowUnsandboxed: options.allowUnsandboxed }),
+      ...(options.allowToolsHashedAfterScripts === undefined
+        ? {}
+        : { allowToolsHashedAfterScripts: options.allowToolsHashedAfterScripts }),
     },
     {
       scanners: (options.scanners ?? fakeScanners)(home),

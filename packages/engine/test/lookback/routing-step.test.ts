@@ -23,6 +23,7 @@ import {
   computeRoutingScorecard,
   lookbackRoutingStep,
   readAttributions,
+  routingReplayStep,
   routingProposalCells,
   routingProposals,
   type RoutingCell,
@@ -64,7 +65,7 @@ const lowStarts = (n: number, escalated: number, role = "engineer"): VtcEvent[] 
 
 describe("the routing step at RETRO (D-cn, engine core's RoutingLookback seam)", () => {
   it("fits engine core's seam", () => {
-    const step: RoutingLookback = lookbackRoutingStep;
+    const step: RoutingLookback = routingReplayStep;
     expect(typeof step).toBe("function");
   });
 
