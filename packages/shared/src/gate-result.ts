@@ -138,6 +138,11 @@ export const TOOL_TAMPER_RULE_ID = "vtc/tool-tampered";
  * `node_modules/.bin` entry and the package it starts, each package a check config loads, each
  * virtual environment's `bin/` and `pyvenv.cfg`), taken at the same time, and `tampered` lists
  * those lines too. `sha256` of the command's own tool is extra detail, never the only check.
+ *
+ * Since 5.11.0 (spine §5 reading 252) `workspace_sha256` is the hash of every file and link of the
+ * checkout (every dependency tree whole, and the checkout's own files), and `tampered` lists any
+ * path the install phase's scripts changed, removed or added outside a package rebuilding itself
+ * (`self_rebuilt`), and any change since before the gate.
  */
 export const ToolIntegritySchema = z.strictObject({
   source: z.enum(["pinned", "project"]),
@@ -156,6 +161,23 @@ export const ToolIntegritySchema = z.strictObject({
    * when `sha256` was; a `project` gate on the run checkout always has it. New in 5.10.0.
    */
   workspace_sha256: Sha256HexSchema.optional(),
+  /**
+   * The packages whose own install script changed or added files in their own directory during
+   * the install phase (spine §5 reading 252: esbuild-style packages that rebuild themselves),
+   * which the check allows and the gate report shows as a warning: each package's directory
+   * (`.` for the checkout's root package), up to 50 of the files, and how many there were.
+   * Absent when none did. New in 5.11.0.
+   */
+  self_rebuilt: z
+    .array(
+      z.strictObject({
+        package: RelPathSchema,
+        files: z.array(RelPathSchema).max(50),
+        file_count: z.int().nonnegative(),
+      }),
+    )
+    .max(50)
+    .optional(),
 });
 export type ToolIntegrity = z.infer<typeof ToolIntegritySchema>;
 

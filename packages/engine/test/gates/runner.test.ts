@@ -1382,8 +1382,13 @@ process.exit(problems.length === 0 ? 0 : 1);
     ]);
     expect(report.sandbox).toBe("sandbox-exec");
     expect(h.specs.map((s) => s.phase)).toEqual(["install", "verify", "verify"]);
-    // One empty HOME for the run, a private temp dir per command, all outside the repo.
-    expect(new Set(h.specs.map((s) => s.home)).size).toBe(1);
+    // One empty HOME per phase, never shared between them (spine §5 reading 252), a private temp
+    // dir per command, all outside the repo.
+    const homes = (phase: string) =>
+      new Set(h.specs.filter((s) => s.phase === phase).map((s) => s.home));
+    expect(homes("install").size).toBe(1);
+    expect(homes("verify").size).toBe(1);
+    expect(homes("install")).not.toEqual(homes("verify"));
     expect(new Set(h.specs.map((s) => s.tempDir)).size).toBe(3);
     for (const s of h.specs) {
       expect(s.checkout.startsWith(realpathSync(h.repo))).toBe(true);
@@ -1392,8 +1397,9 @@ process.exit(problems.length === 0 ? 0 : 1);
       expect(s.denyRead).toContain(join(h.home, "allowlists"));
       expect(s.denyRead).not.toContain(join(h.home, "scanners"));
     }
-    // The run removes its home and temp dirs.
+    // The run removes its homes and temp dirs.
     expect(existsSync(h.specs[0]?.home ?? "")).toBe(false);
+    expect(existsSync(h.specs[1]?.home ?? "")).toBe(false);
   });
 
   it("passes gates.yml sandbox.verify_loopback to verify-phase commands only (D-av)", async () => {

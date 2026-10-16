@@ -722,9 +722,13 @@ describe("UI before/after evidence (D-ct, reading 223)", { timeout: 60_000 }, ()
     expect(result.partial).toBeUndefined();
     expect(read(h.outDir, "01-ui1-w1280-light-before.png")).toContain("input gone");
     expect(read(h.outDir, "02-ui1-w1280-light-after.png")).toContain("input gone");
-    // Each side ran in a jail of its own.
+    // Each side ran in a jail of its own, with one home per phase (spine §5 reading 252): no
+    // home is shared between the sides or between a side's install and verify phases.
     const homes = new Set(h.specs.map((s) => s.home));
-    expect(homes.size).toBe(2);
+    expect(homes.size).toBe(4);
+    for (const phase of ["install", "verify"]) {
+      expect(new Set(h.specs.filter((s) => s.phase === phase).map((s) => s.home)).size).toBe(2);
+    }
   });
 
   it("builds nothing without the injected GitOps, or for another repository", async () => {

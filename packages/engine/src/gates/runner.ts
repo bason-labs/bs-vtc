@@ -124,19 +124,18 @@ import {
 } from "./sandbox.js";
 import { computeScopeCreep, scopeCreepFindings, type ScopeCreep } from "./scope-creep.js";
 import {
-  changedToolFiles,
+  compareGate,
+  compareInstall,
   deriveProjectTool,
   hashTool,
-  lintPluginPaths,
-  nodeBinChain,
   scriptsFreeInstall,
   sha256File,
   ToolHashLimitError,
   toolPathsCover,
-  workspaceInstallChanges,
-  workspaceToolSnapshot,
+  workspaceTree,
+  type SelfRebuilt,
   type ToolSnapshot,
-  type WorkspaceTools,
+  type WorkspaceTree,
 } from "./tool-integrity.js";
 import { buildTraceability } from "./traceability.js";
 import { visualWithoutRenders } from "./visual/evaluate.js";
@@ -233,21 +232,12 @@ interface Execution {
 }
 
 /**
- * A `project` tool hashed after the scripts-free install (H-14), or why the gate cannot run
- * (`problem`, the rest of a "not run: ..." sentence).
+ * The tool a verify gate's command names (or its gates.yml `tool`), hashed after the scripts-free
+ * install: display detail in `ToolIntegrity.sha256` (spine §5 reading 252; the check is the
+ * whole-checkout diff), or why it could not be hashed (`problem`, noted in the run's evidence).
  */
 type ToolBaseline =
-  | {
-      readonly paths: readonly string[];
-      readonly snapshot: ToolSnapshot;
-      /**
-       * What the tool runs with beside its own files (reading 249), hashed with it but not part
-       * of its `sha256`: the `node_modules/.bin` directories on its run-script `PATH` and, for an
-       * L1 gate, the packages its lint config loads ({@link GateRun.environmentPaths}).
-       */
-      readonly env: readonly string[];
-      readonly envSnapshot: ToolSnapshot;
-    }
+  | { readonly paths: readonly string[]; readonly snapshot: ToolSnapshot }
   | { readonly paths: readonly string[]; readonly problem: string };
 
 /** The snapshot of a tool with no file (H-14). */
@@ -389,33 +379,29 @@ class Run {
   /** Bytes of files at the head commit, read once per path. */
   private readonly headFiles = new Map<string, Promise<Uint8Array | undefined>>();
   private readonly baselines = new Map<string, Promise<BaselineFacts>>();
-  /** Each verify gate's `project` tool as hashed after the scripts-free install (H-14), by gate id. */
+  /** Each verify gate's command-named tool as hashed after the scripts-free install (detail). */
   private readonly tools = new Map<string, ToolBaseline>();
-  /**
-   * What each verify gate's command resolved to (`deriveProjectTool`'s paths, or `null`) when its
-   * tool was hashed, by gate id: {@link verifyTool} derives it again just before the gate runs.
-   */
-  private readonly derivedAtHash = new Map<string, readonly string[] | null>();
-  /**
-   * Gates whose tool was hashed only after an install gate ran its scripts (H-14, reading 249):
-   * their `ToolIntegrity.baseline` is `after_scripts`.
-   */
-  private readonly hashedAfterScripts = new Set<string>();
   /** The install gates that ran their scripts outside the two-pass install (H-14). */
   private unverifiedInstalls: readonly string[] = [];
   /**
-   * The workspace's tools (H-14, spine §5 reading 251; `workspaceToolSnapshot`), independent of
-   * any gate command: hashed where the gates' own tools are, before the install phase's scripts
-   * ran (`afterScripts` when an install gate with no scripts-free form already ran its scripts),
-   * and again when the install phase ended (`afterInstall`, with the lines its scripts changed in
-   * `installChanged`); `problem` when they could not be hashed, and no verify gate then runs.
+   * The whole checkout (H-14, spine §5 reading 252; `workspaceTree`), independent of any gate
+   * command: hashed before the install phase's scripts ran (`afterScripts` when an install gate
+   * with no scripts-free form ran its scripts, before or after that hash), and again when the
+   * install phase ended (`afterInstall`). `installChanged` is what its scripts changed that no rule
+   * allows (tampering for every verify gate), `selfRebuilt` the packages that rebuilt themselves
+   * (a warning), `mayChange` the checkout's own files those packages built. `problem` when it
+   * could not be hashed, and no verify gate then runs.
    */
   private workspace:
     | {
-        readonly baseline: WorkspaceTools;
-        readonly afterScripts: boolean;
-        afterInstall: WorkspaceTools | null;
+        readonly baseline: WorkspaceTree;
+        afterScripts: boolean;
+        afterInstall: WorkspaceTree | null;
         installChanged: readonly string[];
+        selfRebuilt: readonly SelfRebuilt[];
+        mayChange: ReadonlySet<string>;
+        /** The latest snapshot before a verify gate: the fast path's source, never the baseline. */
+        lastSeen: WorkspaceTree | null;
       }
     | { readonly problem: string }
     | null = null;
@@ -634,14 +620,16 @@ class Run {
   }
 
   /**
-   * The install phase in two passes (H-14, spine §5 reading 238), in config order: the leading
-   * install gates with no scripts-free form (`scriptsFreeInstall`) run as configured; the gates
-   * after them that have one, up to the next that has none, run scripts-free; then each verify
-   * gate's `project` tool is hashed; then those gates' second passes run the scripts they skipped,
-   * in order; then the remaining install gates run as configured. The gates that ran their
-   * scripts outside the two passes are named in evidence, and a tool first found after them is
-   * hashed then. Results are reported once per gate, in config order: a failed first pass is that
-   * gate's result. Returns the id of the install gate that did not pass, or `null`.
+   * The install phase in two passes (H-14, spine §5 readings 238 and 252), in config order: the
+   * leading install gates with no scripts-free form (`scriptsFreeInstall`) run as configured; the
+   * gates after them that have one, up to the next that has none, run scripts-free; then the whole
+   * checkout is hashed (`workspaceTree`, with each verify gate's command-named tool as detail);
+   * then those gates' second passes run the scripts they skipped, in order, and the checkout is
+   * hashed again and diffed (`compareInstall`); then the remaining install gates run as
+   * configured, and the checkout is hashed once more. The gates that ran their scripts outside
+   * the two passes are named in evidence. Results are reported once per gate, in config order: a
+   * failed first pass is that gate's result. Returns the id of the install gate that did not pass,
+   * or `null`.
    */
   private async runInstall(
     install: readonly Gate[],
@@ -686,14 +674,16 @@ class Run {
       const build = passes?.build ?? null;
       if (build !== null && !(await run(gate, build, true))) failed = gate.id;
     }
-    for (const { gate } of plans.slice(end)) {
+    if (failed === null && install.length > 0) this.workspaceAfterScripts();
+    const trailing = plans.slice(end);
+    for (const { gate } of trailing) {
       if (failed !== null) break;
       unverified.push(gate.id);
       if (!(await run(gate, gate.command, true))) failed = gate.id;
     }
     this.unverifiedInstalls = unverified;
     if (failed === null) {
-      this.workspaceAfterInstall();
+      if (trailing.length > 0) this.workspaceAfterPlainInstalls();
       this.noteTools(verify, unverified);
     }
     for (const { gate } of plans) {
@@ -706,9 +696,11 @@ class Run {
   }
 
   /**
-   * A verify gate's `project` tool (H-14): its `tool`, or, when that is absent, the one derived
-   * from its command; a `tool` that does not cover what the command runs is a problem (stale
-   * paths after a dependency change). A pinned scanner always runs from the store and has none.
+   * The tool a verify gate's command names (display detail since spine §5 reading 252): its
+   * `tool`, or, when that is absent, the one derived from its command; a `tool` that does not
+   * cover what the command runs (stale paths after a dependency change) is a `problem` the run's
+   * evidence notes, never a reason not to run. A pinned scanner always runs from the store and has
+   * none.
    */
   private projectToolOf(
     gate: Gate,
@@ -718,14 +710,13 @@ class Run {
     | null {
     if (!this.mayHaveProjectTool(gate) || gate.tool?.source === "pinned") return null;
     const derived = this.deriveTool(gate);
-    this.derivedAtHash.set(gate.id, derived?.paths ?? null);
     if (gate.tool === undefined) return derived === null ? null : { tool: derived };
     const paths = gate.tool.paths;
     const missing = (derived?.paths ?? []).filter((p) => !toolPathsCover(paths, p));
     if (missing.length > 0) {
       return {
         paths,
-        problem: `its command runs ${missing.join(", ")}, which its tool paths in gates.yml do not cover (stale after a dependency change?); re-run vtc calibrate`,
+        problem: `its command runs ${missing.join(", ")}, which its tool paths in gates.yml do not cover (stale after a dependency change?); re-run vtc calibrate to update what its result shows`,
       };
     }
     return { tool: gate.tool };
@@ -743,67 +734,17 @@ class Run {
       : null;
   }
 
-  /**
-   * Derives the gate's tool again just before it runs (H-14): an install script or an earlier gate
-   * that planted an executable the command now resolves to first (a `node_modules/.bin/<name>`
-   * nearer the gate's cwd), or that changed which executable it runs, did so after the hash.
-   * Returns the paths it now runs that the hashed paths do not cover, a refusal when it no longer
-   * runs a tool in the checkout although it did then, or `null`.
-   */
-  private rederived(
-    gate: Gate,
-    hashedPaths: readonly string[],
-  ): { readonly added: readonly string[] } | { readonly refused: string } | null {
-    if (!this.mayHaveProjectTool(gate) || !this.derivedAtHash.has(gate.id)) return null;
-    const then = this.derivedAtHash.get(gate.id) ?? null;
-    const now = this.deriveTool(gate)?.paths ?? null;
-    if (now === null) {
-      return then === null
-        ? null
-        : {
-            refused: `not run: its command no longer runs the tool hashed after the scripts-free install (${then.join(", ")}); the install phase or an earlier gate changed what it resolves to`,
-          };
-    }
-    const uncovered = now.filter((p) => !toolPathsCover(hashedPaths, p));
-    if (uncovered.length === 0) return null;
-    const files = uncovered.filter((p) => !/[*?{}[\]]/.test(p));
-    return { added: files.length > 0 ? files : uncovered };
-  }
-
-  /**
-   * What a `project` tool runs with beside its own files (H-14, spine §5 reading 249), hashed with
-   * it: for a Node tool, every `node_modules/.bin` directory from the gate's cwd up to the checkout
-   * (a run script puts each on `PATH`, and a shim runs a `node` beside it first), and for an L1
-   * Node gate the packages its lint config loads (`lintPluginPaths`: ESLint loads plugins, configs
-   * and parsers through its config, not as its dependencies), whether or not gates.yml lists them.
-   */
-  private environmentPaths(gate: Gate, toolPaths: readonly string[]): string[] {
-    if (!toolPaths.some((p) => p.split("/").includes("node_modules"))) return [];
-    const cwd = gate.cwd ?? "";
-    const plugins =
-      gate.layer === "L1"
-        ? lintPluginPaths(this.checkoutAbs, cwd).filter((p) => !toolPathsCover(toolPaths, p))
-        : [];
-    return [...nodeBinChain(this.checkoutAbs, cwd), ...plugins];
-  }
-
-  /** Hashes a gate's `project` tool in the run checkout, once per set of paths. */
+  /** Hashes the tool a gate's command names in the run checkout, once per set of paths. */
   private hashToolOf(gate: Gate, byPaths: Map<string, ToolBaseline>): ToolBaseline | null {
     const found = this.projectToolOf(gate);
     if (found === null) return null;
     if ("problem" in found) return found;
     const paths = found.tool.paths;
-    const env = this.environmentPaths(gate, paths);
-    const key = [...paths, "\u0001", ...env].join("\u0000");
+    const key = paths.join("\u0000");
     let hashed = byPaths.get(key);
     if (hashed === undefined) {
       try {
-        hashed = {
-          paths,
-          snapshot: hashTool(this.checkoutAbs, paths),
-          env,
-          envSnapshot: hashTool(this.checkoutAbs, env),
-        };
+        hashed = { paths, snapshot: hashTool(this.checkoutAbs, paths) };
       } catch (error) {
         hashed = { paths, problem: `its tool could not be hashed: ${errorText(error)}` };
       }
@@ -812,47 +753,75 @@ class Run {
     return hashed;
   }
 
+  /** The configs whose addition or change would swap what a gate runs (never a build output). */
+  private readonly protectedPath = (path: string): boolean =>
+    matchesAnyCaseless(
+      [...DEFAULT_PROTECTED_GLOBS, ...(this.config?.tests.protected_configs ?? [])],
+      path,
+    );
+
   /**
-   * Hashes each verify gate's `project` tool after the scripts-free installs (H-14);
-   * `afterScripts` when an install gate with no scripts-free form already ran its scripts.
+   * Hashes the whole checkout after the scripts-free installs (H-14, spine §5 reading 252), and
+   * each verify gate's command-named tool as detail; `afterScripts` when an install gate with no
+   * scripts-free form already ran its scripts.
    */
   private hashTools(verify: readonly Gate[], afterScripts: boolean): void {
     if (verify.some((g) => this.mayHaveProjectTool(g))) {
       try {
         this.workspace = {
-          baseline: workspaceToolSnapshot(this.checkoutAbs),
+          baseline: workspaceTree(this.checkoutAbs),
           afterScripts,
           afterInstall: null,
           installChanged: [],
+          selfRebuilt: [],
+          mayChange: new Set(),
+          lastSeen: null,
         };
       } catch (error) {
         this.workspace = {
-          problem: `the workspace's tools could not be hashed: ${errorText(error)}`,
+          problem: `the checkout could not be hashed: ${errorText(error)}`,
         };
       }
     }
     const byPaths = new Map<string, ToolBaseline>();
     for (const gate of verify) {
       const hashed = this.hashToolOf(gate, byPaths);
-      if (hashed === null) continue;
-      this.tools.set(gate.id, hashed);
-      if (afterScripts) this.hashedAfterScripts.add(gate.id);
+      if (hashed !== null) this.tools.set(gate.id, hashed);
     }
   }
 
   /**
-   * The workspace's tools when the install phase ended (H-14, reading 251): the lines its scripts
-   * changed since the baseline (`workspaceInstallChanges`) fail every verify gate as tampering, and
-   * this snapshot is what each verify gate's comparison starts from, so a tool an install added and
-   * a later gate changed is tampering too.
+   * The checkout once the two-pass installs' scripts ran (H-14, spine §5 reading 252), hashed from
+   * content and diffed against the baseline (`compareInstall`): what no rule allows fails every
+   * verify gate as tampering, the packages that rebuilt themselves are a warning, and this
+   * snapshot is what each verify gate's comparison starts from.
    */
-  private workspaceAfterInstall(): void {
+  private workspaceAfterScripts(): void {
     const ws = this.workspace;
     if (ws === null || "problem" in ws) return;
     try {
-      const after = workspaceToolSnapshot(this.checkoutAbs);
+      const after = workspaceTree(this.checkoutAbs);
+      const compared = compareInstall(ws.baseline, after, this.protectedPath);
       ws.afterInstall = after;
-      ws.installChanged = workspaceInstallChanges(ws.baseline, after);
+      ws.installChanged = compared.tampered;
+      ws.selfRebuilt = compared.selfRebuilt;
+      ws.mayChange = new Set(
+        compared.selfRebuilt
+          .filter((r) => !r.package.split("/").includes("node_modules"))
+          .flatMap((r) => r.files),
+      );
+      const notes: string[] = [];
+      if (compared.selfRebuilt.length > 0) {
+        notes.push(
+          `packages that rebuilt themselves in their own directory during the install phase (allowed, shown as a warning on each verify gate):\n${compared.selfRebuilt.map((r) => `${r.package}: ${r.files.join(", ")}`).join("\n")}`,
+        );
+      }
+      if (compared.managerState.length > 0) {
+        notes.push(
+          `package-manager state the install phase rewrote (allowed): ${compared.managerState.join(", ")}`,
+        );
+      }
+      if (notes.length > 0) this.note(`${TOOL_INTEGRITY_NOTE}-install`, notes.join("\n"));
     } catch (error) {
       if (error instanceof ToolHashLimitError) {
         ws.afterInstall = ws.baseline;
@@ -860,15 +829,39 @@ class Run {
         return;
       }
       this.workspace = {
-        problem: `the workspace's tools could not be hashed after the install phase: ${errorText(error)}`,
+        problem: `the checkout could not be hashed after the install phase: ${errorText(error)}`,
       };
     }
   }
 
   /**
-   * The workspace's tool lines changed since the install phase ended, with those its scripts
-   * changed (H-14, reading 251), just before a verify gate runs; `null` when there is no workspace
-   * baseline, a refusal when it cannot be hashed.
+   * The checkout once the install gates with no scripts-free form after the two passes ran: what
+   * they wrote cannot be told from tampering, so it is the new start of every verify gate's
+   * comparison and every verify gate is marked `after_scripts` (reading 251(4)).
+   */
+  private workspaceAfterPlainInstalls(): void {
+    const ws = this.workspace;
+    if (ws === null || "problem" in ws) return;
+    ws.afterScripts = true;
+    try {
+      ws.afterInstall = workspaceTree(this.checkoutAbs);
+    } catch (error) {
+      if (error instanceof ToolHashLimitError) {
+        ws.installChanged = [...ws.installChanged, error.path];
+        return;
+      }
+      this.workspace = {
+        problem: `the checkout could not be hashed after the install phase: ${errorText(error)}`,
+      };
+    }
+  }
+
+  /**
+   * What changed in the checkout since the install phase ended, with what its scripts changed
+   * (H-14, spine §5 reading 252), just before a verify gate runs (`compareGate`, always against
+   * the post-install snapshot; the fast path reuses the line of a file whose size, times and inode
+   * are unchanged since the last snapshot); `null` when there is no workspace baseline, a refusal
+   * when it cannot be hashed.
    */
   private workspaceTampered():
     { readonly tampered: readonly string[] } | { refused: string } | null {
@@ -877,27 +870,30 @@ class Run {
     if ("problem" in ws) return { refused: `not run: ${ws.problem}` };
     const from = ws.afterInstall ?? ws.baseline;
     try {
-      const now = workspaceToolSnapshot(this.checkoutAbs);
-      return {
-        tampered: [
-          ...new Set([...ws.installChanged, ...changedToolFiles(from.snapshot, now.snapshot)]),
-        ].sort(),
-      };
+      const now = workspaceTree(this.checkoutAbs, { previous: ws.lastSeen ?? from });
+      ws.lastSeen = now;
+      const hidden = new Set(this.hiddenFiles);
+      const changed = compareGate(from, now, {
+        isProtected: this.protectedPath,
+        ignore: (path) => hidden.has(path),
+        mayChange: ws.mayChange,
+      });
+      return { tampered: [...new Set([...ws.installChanged, ...changed])].sort() };
     } catch (error) {
       if (error instanceof ToolHashLimitError) {
         return { tampered: [...new Set([...ws.installChanged, error.path])].sort() };
       }
       return {
-        refused: `not run: the workspace's tools could not be hashed again: ${errorText(error)}`,
+        refused: `not run: the checkout could not be hashed again: ${errorText(error)}`,
       };
     }
   }
 
   /**
    * After the install phase (H-14): when install gates ran their scripts outside the two passes
-   * (`unverified`), a baseline for each tool not found before them, hashed now; and one run-level
-   * note naming those install gates, those tools and every verify gate that runs no tool VTC
-   * verifies (no project tool, and not a pinned scanner).
+   * (`unverified`), the command-named tool of each gate not found before them, hashed now (detail);
+   * and one run-level note naming those install gates, those gates and any command-named tool
+   * that could not be shown.
    */
   private noteTools(verify: readonly Gate[], unverified: readonly string[]): void {
     const lines: string[] = [];
@@ -910,13 +906,10 @@ class Run {
         const hashed = this.hashToolOf(gate, byPaths);
         if (hashed === null) continue;
         this.tools.set(gate.id, hashed);
-        if ("snapshot" in hashed && hashed.snapshot.files.size > 0) {
-          late.push(gate.id);
-          this.hashedAfterScripts.add(gate.id);
-        }
+        if ("snapshot" in hashed && hashed.snapshot.files.size > 0) late.push(gate.id);
       }
       lines.push(
-        `install gate(s) ${unverified.join(", ")} have no scripts-free form VTC knows (npm ci, pnpm install, bun install, go mod download and cargo fetch have one), so they ran with their scripts outside the two-pass install: a file their scripts wrote into a check tool before it was hashed is not detected (H-14). The gates whose tools were hashed after them run marked after_scripts, with a warning; the workspace's tools are still compared from the hash on, so a change after it fails the gate (spine §5 reading 251)`,
+        `install gate(s) ${unverified.join(", ")} have no scripts-free form VTC knows (npm ci, pnpm install, bun install, go mod download and cargo fetch have one), so they ran with their scripts outside the two-pass install: what their scripts wrote into the checkout is not told apart from tampering (H-14). The verify gates run marked after_scripts, with a warning; the whole checkout is still compared from the hash after them on, so a change after it fails the gate (spine §5 readings 251 and 252)`,
       );
       if (late.length > 0) {
         lines.push(
@@ -924,83 +917,56 @@ class Run {
         );
       }
     }
-    const none = verify.filter(
-      (g) => !this.tools.has(g.id) && !this.isPinnedScanner(g) && g.tool?.source !== "pinned",
-    );
-    if (none.length > 0) {
-      lines.push(
-        `gate(s) ${none.map((g) => g.id).join(", ")} run no tool VTC verifies (an executable outside the checkout, a package script whose commands name none, or a command that picks other packages to run in): an install script that changes what they run is not detected (H-14)`,
-      );
+    for (const gate of verify) {
+      const hashed = this.tools.get(gate.id);
+      if (hashed !== undefined && "problem" in hashed) {
+        lines.push(
+          `gate ${gate.id}: ${hashed.problem} (detail only: the gate is checked against the whole checkout)`,
+        );
+      }
     }
     if (lines.length > 0) this.note(TOOL_INTEGRITY_NOTE, lines.join("\n"));
   }
 
   /**
-   * Checks a verify gate's tools just before it runs (H-14). First the workspace's tools
-   * ({@link workspaceTampered}, spine §5 reading 251): every line the install phase's scripts
-   * changed, and every line changed since the install phase ended, whatever the gate's command
-   * runs. Then, as extra detail, the gate's own `project` tool: `tampered` adds every file the
-   * install phase or an earlier gate changed, added or removed since its hash. A tool that grew past
-   * the hash limits since then is tampered with at the file that crossed them; one whose paths
-   * match no file, then or now, does not run. Then the command's tool is derived again
-   * ({@link rederived}): an executable it now runs outside the hashed paths is tampering at that
-   * executable, and a command that no longer runs the hashed tool does not run. A gate whose
-   * hashes were taken only after an install's scripts ran is marked `after_scripts` (reading 251:
-   * it runs, with a warning).
+   * Checks a verify gate's tools just before it runs (H-14, spine §5 reading 252): the whole
+   * checkout against the snapshot taken when the install phase ended ({@link workspaceTampered}),
+   * with what the install phase's scripts changed that no rule allows. Any such path fails the
+   * gate as tampering, whatever the gate's command runs. The tool the command names is detail
+   * only (`sha256`). A gate whose baseline was taken only after an install's scripts ran is marked
+   * `after_scripts`, and the packages that rebuilt themselves are listed (`self_rebuilt`); both
+   * run with a warning.
    */
   private verifyTool(
     gate: Gate,
   ): { refused: string } | { tool?: ToolIntegrity; tampered?: readonly string[] } {
     if (!this.mayHaveProjectTool(gate)) return {};
-    const baseline = this.tools.get(gate.id);
-    if (baseline !== undefined && "problem" in baseline) {
-      return { refused: `not run: ${baseline.problem}` };
-    }
     const workspace = this.workspaceTampered();
     if (workspace !== null && "refused" in workspace) return workspace;
     const ws = this.workspace !== null && "baseline" in this.workspace ? this.workspace : null;
-    const afterScripts = this.hashedAfterScripts.has(gate.id) || ws?.afterScripts === true;
-    const tool = (tampered: readonly string[]): ToolIntegrity => ({
+    const display = this.tools.get(gate.id);
+    const own = display !== undefined && "snapshot" in display ? display.snapshot : undefined;
+    if (ws === null && own === undefined) return {};
+    const tampered = [...(workspace?.tampered ?? [])];
+    const tool: ToolIntegrity = {
       source: "project",
-      // the gate's own tool when its command names one; else the workspace's tools it ran with
-      sha256: (baseline?.snapshot ?? ws?.baseline.snapshot ?? EMPTY_TOOL).sha256,
+      // the command's own tool when it names one; else the checkout's hash it was checked against
+      sha256: (own ?? ws?.baseline.snapshot ?? EMPTY_TOOL).sha256,
       tampered: tampered.slice(0, 50),
       ...(ws === null ? {} : { workspace_sha256: ws.baseline.snapshot.sha256 }),
       // a hash taken after an install's scripts ran cannot vouch for what they wrote
-      ...(afterScripts ? { baseline: "after_scripts" as const } : {}),
-    });
-    const tampered = new Set(workspace?.tampered ?? []);
-    const done = (): { tool: ToolIntegrity; tampered: string[] } => {
-      const list = [...tampered].sort();
-      return { tool: tool(list), tampered: list };
+      ...(ws?.afterScripts === true ? { baseline: "after_scripts" as const } : {}),
+      ...(ws === null || ws.selfRebuilt.length === 0
+        ? {}
+        : {
+            self_rebuilt: ws.selfRebuilt.slice(0, 50).map((r) => ({
+              package: r.package,
+              files: r.files.slice(0, 50),
+              file_count: r.files.length,
+            })),
+          }),
     };
-    if (baseline !== undefined) {
-      let now: ToolSnapshot;
-      let envNow: ToolSnapshot;
-      try {
-        now = hashTool(this.checkoutAbs, baseline.paths);
-        envNow = hashTool(this.checkoutAbs, baseline.env);
-      } catch (error) {
-        if (error instanceof ToolHashLimitError) {
-          tampered.add(error.path);
-          return done();
-        }
-        return { refused: `not run: its tool could not be hashed again: ${errorText(error)}` };
-      }
-      for (const path of changedToolFiles(baseline.snapshot, now)) tampered.add(path);
-      for (const path of changedToolFiles(baseline.envSnapshot, envNow)) tampered.add(path);
-      if (tampered.size > 0) return done();
-      if (baseline.snapshot.files.size === 0 && now.files.size === 0) {
-        return {
-          refused: `not run: its tool paths (${baseline.paths.join(", ")}) match no file in the checkout; re-run vtc calibrate`,
-        };
-      }
-    }
-    const again = this.rederived(gate, baseline?.paths ?? []);
-    if (again !== null && "added" in again) for (const path of again.added) tampered.add(path);
-    if (tampered.size > 0) return done();
-    if (again !== null && "refused" in again) return again;
-    return baseline === undefined && ws === null ? {} : { tool: tool([]) };
+    return tampered.length > 0 ? { tool, tampered } : { tool };
   }
 
   /**
@@ -1019,7 +985,7 @@ class Run {
     this.writes.push({
       rel: logRel,
       redact: true,
-      text: `not run: ${String(tampered.length)} file(s) of this gate's tool changed after the scripts-free install was hashed (by an install-phase script or an earlier gate), so the tool cannot be trusted (H-14):\n${shown.join("\n")}${more > 0 ? `\n... and ${String(more)} more` : ""}\n`,
+      text: `not run: ${String(tampered.length)} file(s) of the checkout changed after it was hashed before the install phase's scripts (by an install-phase script, outside a package rebuilding itself, or by an earlier gate), so its check tools cannot be trusted (H-14, spine §5 reading 252):\n${shown.join("\n")}${more > 0 ? `\n... and ${String(more)} more` : ""}\n`,
     });
     const evidence: Evidence = { type: "command_output", ref: logRel };
     const title = `the tool of gate ${gate.id} was changed after it was hashed (${String(tampered.length)} file(s))`;
@@ -1319,7 +1285,8 @@ class Run {
     }
     let tool = prepared.tool;
     if (head && checkoutAbs === this.checkoutAbs) {
-      // H-14: the tool's files as they were after the scripts-free install, or the gate fails.
+      // H-14: the checkout as the install phase left it, minus what no rule allows, or the gate
+      // fails (spine §5 reading 252).
       const verified = this.verifyTool(gate);
       if ("refused" in verified) return { refused: verified.refused };
       if (verified.tampered !== undefined && verified.tool !== undefined) {
@@ -1510,14 +1477,23 @@ class Run {
    */
   private async runGate(gate: Gate, config: GatesConfig, pass?: string): Promise<GateResult> {
     const result = await this.runGateOnce(gate, config, pass);
-    if (result.tool?.baseline !== "after_scripts") return result;
-    // reading 251: allowed, with a warning on the gate's own report
+    const warnings: string[] = [];
+    if (result.tool?.baseline === "after_scripts") {
+      // reading 251: allowed, with a warning on the gate's own report
+      warnings.push(
+        `WARNING: this gate's checkout was hashed only after install gate(s) ${this.unverifiedInstalls.join(", ") || "with no scripts-free form"} ran their lifecycle scripts (VTC knows no scripts-free form for them), so what those scripts wrote is not told apart from tampering (H-14, baseline after_scripts). Changes after the hash are still compared, across the whole checkout. An install VTC can run scripts-free (npm ci, pnpm install, bun install, go mod download, cargo fetch) removes this warning.`,
+      );
+    }
+    const rebuilt = result.tool?.self_rebuilt ?? [];
+    if (rebuilt.length > 0) {
+      // reading 252: a package's own install script rebuilt it in its own directory (esbuild)
+      warnings.push(
+        `WARNING: these packages' own install scripts changed files in their own directory during the install phase (allowed: a package that rebuilds itself, such as esbuild's native binary; any change outside its own directory fails the gate, H-14):\n${rebuilt.map((r) => `${r.package}: ${r.files.join(", ")}${r.file_count > r.files.length ? ` and ${String(r.file_count - r.files.length)} more` : ""}`).join("\n")}`,
+      );
+    }
+    if (warnings.length === 0) return result;
     const rel = `${this.evidenceRoot}/${gate.id}-tool.log`;
-    this.writes.push({
-      rel,
-      redact: true,
-      text: `WARNING: this gate's tools were hashed only after install gate(s) ${this.unverifiedInstalls.join(", ") || "with no scripts-free form"} ran their lifecycle scripts (VTC knows no scripts-free form for them), so what those scripts wrote before the hash is not detected (H-14, baseline after_scripts). Changes after the hash are still compared, workspace-wide. An install VTC can run scripts-free (npm ci, pnpm install, bun install, go mod download, cargo fetch) removes this warning.\n`,
-    });
+    this.writes.push({ rel, redact: true, text: `${warnings.join("\n")}\n` });
     return { ...result, evidence: [...result.evidence, { type: "command_output", ref: rel }] };
   }
 

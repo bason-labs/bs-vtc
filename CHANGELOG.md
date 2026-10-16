@@ -23,19 +23,25 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   The dashboard shows each coverage check before G2.
 - **Check tools that install scripts cannot replace (H-14).** Lint, typecheck and test tools run
   from a pinned copy or are verified by content hash after an install that runs no lifecycle
-  script. The check covers the whole workspace, not only what a gate's command names: every
-  installed bin in every package and the package it starts, every package a lint, format or test
-  config loads, and every Python virtual environment's `bin/` and `pyvenv.cfg`. So a gate that
-  runs through `turbo`/`nx`, `pnpm -C`, `npm --prefix`, `yarn --cwd` or a script that changes
-  directory is covered too. Anything an install script changed, including an interpreter planted
-  or swapped beside a bin, fails every check gate as tampering. `vtc calibrate` records each
-  gate's tool and replaces one that went stale. When an install has no scripts-free form (Yarn,
-  `npm install`, `uv sync`, a custom install script), the gates still run, but the hash comes
-  after its scripts. The gate report and the dashboard show a warning for this, and any later
-  change still fails the gate. `vtc calibrate` warns which gates this affects.
-  `gates.allow_tools_hashed_after_scripts` no longer does anything, and `vtc doctor` says you
-  can remove it. Every check gate runs with the commit's own package-manager config, task-runner
-  files and package scripts, so an install script cannot rewrite what a gate runs.
+  script. The check no longer picks which files matter: every file of the checkout is hashed,
+  every dependency tree whole (each `node_modules`, `.yarn`, Yarn PnP files, every Python virtual
+  environment) and your own files too. So it does not matter how a gate runs its tools (`turbo`,
+  `pnpm -r`, `pnpm --filter`, `make`, `tox`, a script that changes directory), or what a test
+  runner loads by name (a Jest preset, a Babel preset, a pytest plugin). After the install's
+  scripts run, any change is tampering and fails every check gate, except a package that rebuilds
+  itself in its own directory (esbuild's native binary): that is allowed and shown as a warning on
+  the gate report and the dashboard. A dependency whose install script writes anywhere else fails
+  the gates. Before each check gate, anything changed since the install fails it too; build
+  outputs, reports and the tools' caches are fine. Check gates also get a fresh empty home of
+  their own, so an install script can no longer change them through `~/.npmrc`, `~/.yarnrc.yml`,
+  `~/.bunfig.toml` or a Python `usercustomize`. Hashing adds about 2 seconds per run on a
+  1 GiB checkout, and half a second before each check gate. `vtc calibrate` records each gate's
+  tool, which the report shows; a stale one no longer stops the gate. When an install has no
+  scripts-free form (Yarn, `npm install`, `uv sync`, a custom install script), the gates still
+  run, but the hash comes after its scripts. The gate report and the dashboard show a warning for
+  this, and any later change still fails the gate. `vtc calibrate` warns which gates this
+  affects. `gates.allow_tools_hashed_after_scripts` no longer does anything, and `vtc doctor`
+  says you can remove it.
 - **Routing changes are replayed before they are proposed (D-cn).** When the weekly window and
   budget allow it, RETRO re-runs a proposed routing change's held-out tasks on the current and the
   proposed start tier, and the change is proposed only once that replay backs it.

@@ -104,6 +104,10 @@
     {
       "version": "5.10.0",
       "schemas_sha256": "18258312d7e05460c485be6c33a1a1bbf33d32e20c3e7932229132c48c5afca6"
+    },
+    {
+      "version": "5.11.0",
+      "schemas_sha256": "c90c0bd7ee8eee5d51abe83706ea5e30217fac636e026a753c446c219ef11559"
     }
   ]
 }

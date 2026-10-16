@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.10.0",
+  "contracts_version": "5.11.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -5001,6 +5001,40 @@
                       "workspace_sha256": {
                         "type": "string",
                         "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "self_rebuilt": {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "package": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1024
+                            },
+                            "files": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1024
+                              }
+                            },
+                            "file_count": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "package",
+                            "files",
+                            "file_count"
+                          ],
+                          "additionalProperties": false
+                        }
                       }
                     },
                     "required": [
@@ -15723,6 +15757,40 @@
             "workspace_sha256": {
               "type": "string",
               "pattern": "^[a-f0-9]{64}$"
+            },
+            "self_rebuilt": {
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "package": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "files": {
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  },
+                  "file_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "package",
+                  "files",
+                  "file_count"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
@@ -16190,6 +16258,40 @@
                   "workspace_sha256": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "self_rebuilt": {
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "package": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
+                        "files": {
+                          "maxItems": 50,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          }
+                        },
+                        "file_count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "package",
+                        "files",
+                        "file_count"
+                      ],
+                      "additionalProperties": false
+                    }
                   }
                 },
                 "required": [
@@ -26173,6 +26275,40 @@
                         "workspace_sha256": {
                           "type": "string",
                           "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "self_rebuilt": {
+                          "maxItems": 50,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "package": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1024
+                              },
+                              "files": {
+                                "maxItems": 50,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 1024
+                                }
+                              },
+                              "file_count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "package",
+                              "files",
+                              "file_count"
+                            ],
+                            "additionalProperties": false
+                          }
                         }
                       },
                       "required": [
