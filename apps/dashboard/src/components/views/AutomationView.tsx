@@ -116,6 +116,11 @@ function Items({ model, now }: { model: Model; now: number }) {
                   </span>
                 )}
               </div>
+              {i.pr === null || i.pr.partialReason === null ? null : (
+                <p className="mt-1 text-xs text-warn-fg" data-testid="partial-reason">
+                  Evidence partial: {i.pr.partialReason}
+                </p>
+              )}
               <p className="mt-1 text-xs text-muted-fg">
                 First seen <time dateTime={i.first}>{formatLocalTime(i.first, now)}</time>, last
                 seen <time dateTime={i.last}>{formatLocalTime(i.last, now)}</time>

@@ -15,6 +15,8 @@ import { FindingItem, Section, Stat } from "./DrawerParts";
 import { GateReports } from "./GateReports";
 import { nodeEyebrow } from "./StepNode";
 import { REDACT } from "@/lib/redact";
+import type { RoleRunNote } from "@/lib/role-run-notes";
+import { RoleRunNoteLines } from "@/components/run/RoleRunNoteLines";
 
 export interface NodeDrawerProps {
   readonly run: string;
@@ -22,6 +24,8 @@ export interface NodeDrawerProps {
   /** The task behind the pipeline; `null` while it loads. */
   readonly detail: TaskDetail | null;
   readonly onClose: () => void;
+  /** Each role run's cost and model fallback by action id, from the run's event log. */
+  readonly notes?: ReadonlyMap<string, RoleRunNote>;
 }
 
 /**
@@ -30,7 +34,7 @@ export interface NodeDrawerProps {
  * escalation it raised, its timeline, the transcript's location, the plan file, evidence bundle
  * and diff.
  */
-export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
+export function NodeDrawer({ run, node, detail, onClose, notes }: NodeDrawerProps) {
   const model = useMemo(
     () => (node === null ? null : nodeDrawerModel(node, detail)),
     [node, detail],
@@ -128,6 +132,7 @@ export function NodeDrawer({ run, node, detail, onClose }: NodeDrawerProps) {
                       {r.verdicts.length === 0 ? null : (
                         <p>{r.verdicts.map((v) => `${v.subject}: ${v.verdict}`).join(" · ")}</p>
                       )}
+                      <RoleRunNoteLines note={notes?.get(r.action_id)} />
                     </li>
                   );
                 })}
