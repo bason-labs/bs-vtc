@@ -1,5 +1,5 @@
 /** Toolchain detection and `vtc calibrate` (§7.1, §15). */
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { GATE_SANDBOX, GatesConfigSchema, gateCommandAllowed } from "@vtc/shared";
 import { afterEach, describe, expect, it } from "vitest";
@@ -517,6 +517,100 @@ describe("calibrate", () => {
         ]),
       ),
     ).toEqual(["b", "c", "d"]);
+  });
+});
+
+describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
+  it("writes the project tool installed in the working tree, a package script's too, and none for pinned scanners", async () => {
+    const root = nodeRepo();
+    const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+    manifest.scripts.typecheck = "tsc --noEmit";
+    for (const dep of ["typescript-eslint", "@vue/eslint-plugin", "prettier", "eslint-plugin-gone"])
+      manifest.devDependencies[dep] = "1.0.0";
+    writeFile(root, "package.json", JSON.stringify(manifest));
+    for (const [pkg, file, bin] of [
+      ["eslint", "bin/eslint.js", "eslint"],
+      ["vitest", "vitest.mjs", "vitest"],
+      ["typescript", "bin/tsc", "tsc"],
+      ["typescript-eslint", "dist/index.js", null],
+      ["@vue/eslint-plugin", "index.js", null],
+      ["prettier", "index.js", null],
+    ] as const) {
+      writeFile(root, `node_modules/${pkg}/package.json`, JSON.stringify({ name: pkg }));
+      writeFile(root, `node_modules/${pkg}/${file}`, "#!/usr/bin/env node\n");
+      if (bin === null) continue;
+      mkdirSync(join(root, "node_modules/.bin"), { recursive: true });
+      symlinkSync(`../${pkg}/${file}`, join(root, "node_modules/.bin", bin));
+    }
+    const lines: string[] = [];
+    const outcome = await calibrate(
+      {
+        repoRoot: root,
+        vtcHome: tempDir(),
+        git: createGitOps({ repoRoot: initRepo() }),
+        revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+        out: (line) => lines.push(line),
+        confirm: () => Promise.resolve(false),
+        scanners: { names: SCANNERS, ensure: () => Promise.reject(new Error("no downloads")) },
+      },
+      { dryRun: true },
+    );
+    if (outcome.status !== "dry_run") throw new Error("expected a dry run");
+    const tools = Object.fromEntries(
+      parseGatesConfig(outcome.yaml).gates.map((g) => [g.id, g.tool ?? null]),
+    );
+    const tsc = {
+      source: "project",
+      paths: ["node_modules/.bin/tsc", "node_modules/typescript/**"],
+    };
+    expect(tools).toEqual({
+      install: null,
+      // Package scripts: `pnpm run build` runs `tsc -b`, `pnpm typecheck` runs `tsc --noEmit`.
+      build: tsc,
+      typecheck: tsc,
+      // The lint gate's tool has the ESLint plugins and parsers the package.json names too
+      // (ESLint loads them through its config); `eslint-plugin-gone` is not installed.
+      lint: {
+        source: "project",
+        paths: [
+          "node_modules/.bin/eslint",
+          "node_modules/eslint/**",
+          "node_modules/@vue/eslint-plugin/**",
+          "node_modules/typescript-eslint/**",
+        ],
+      },
+      test: { source: "project", paths: ["node_modules/.bin/vitest", "node_modules/vitest/**"] },
+      secrets: null,
+      dependencies: null,
+      sast: null,
+      iac: null,
+      // `depcruise` is not installed in this working tree.
+      arch: null,
+    });
+    expect(lines.join("\n")).toMatch(/recorded the check tool of build, typecheck, lint, test/);
+  });
+
+  it("asks the human to confirm the second pass of a two-pass install too", async () => {
+    const root = nodeRepo();
+    const outcome = await calibrate({
+      repoRoot: root,
+      vtcHome: tempDir(),
+      git: createGitOps({ repoRoot: initRepo() }),
+      revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+      out: () => undefined,
+      confirm: () => Promise.resolve(false),
+      scanners: { names: SCANNERS, ensure: () => Promise.reject(new Error("no downloads")) },
+      detectSandbox: () => null,
+      allowUnsandboxed: true,
+    });
+    if (outcome.status !== "commands_not_confirmed") throw new Error("expected no confirmation");
+    expect(outcome.pending.slice(0, 2)).toEqual([
+      ["pnpm", "install", "--frozen-lockfile"],
+      ["pnpm", "rebuild", "--recursive", "--pending"],
+    ]);
   });
 });
 

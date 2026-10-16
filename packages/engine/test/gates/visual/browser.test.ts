@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { BROWSER_PIN_FILE } from "@vtc/shared";
 import {
   checkProjectBrowser,
@@ -13,7 +13,9 @@ import {
   storeToolchain,
 } from "../../../src/gates/visual/browser.js";
 import type { BrowserCheck } from "../../../src/gates/visual/browser.js";
-import { tempDir } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 const reasonOf = (check: BrowserCheck | null): string =>
   check !== null && !check.ok ? check.reason : "(no failure)";

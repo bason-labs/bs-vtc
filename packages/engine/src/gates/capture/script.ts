@@ -32,6 +32,13 @@
  *   painted subtrees and declarative closed shadow roots is not scanned (research §3 residual).
  * - Video: `recordVideo` always with `size` (1280x800); the file exists only after
  *   `context.close()`, then it is kept (renamed to the shot's name and hashed) or deleted.
+ * - Scripted flow (D-ct, `BeforeAfterRequest.flow`): a recording with `flow` runs its steps
+ *   (goto a path on the origin, click, fill a value, press a key, wait for a selector, wait a
+ *   bounded time) once its first page loaded, every step and the hold after the last one within
+ *   `video_seconds` of the page opening. The whole page is checked and scanned before every step
+ *   and at the end, as above. A step that fails or runs out of time ends the flow as `failed`; the
+ *   recording up to it is kept (if its scan passes). No step's error text is reported (it may
+ *   hold a selector, which is project text).
  *
  * - App server (UI before/after, D-ct; spine §5 reading 223): with `app`, the script imports
  *   Playwright first, checks that nothing already answers on the app's loopback port, starts the
@@ -50,6 +57,8 @@
  * The script writes only into its output directory, a video directory beside it and the result
  * file. It never throws past `main`: a failure of the whole run is the result's `error`.
  */
+import { FLOW_HOLD_MS } from "./protocol.js";
+
 export const EVIDENCE_RUNNER_SCRIPT = String.raw`// VTC evidence runner (generated; see packages/engine/src/gates/capture/script.ts).
 import { spawn } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
@@ -328,6 +337,42 @@ const startRelay = (socketPath, port) =>
     server.listen(port, "127.0.0.1", () => resolve(server));
   });
 
+// ---------------------------------------------------------------- a scripted flow
+// Each step within the time left; the page is checked and scanned before it (a redaction failure
+// throws: the shot fails). A step that fails or runs out of time ends the flow as "failed".
+const runFlow = async (page, steps, deadline, hits, attached) => {
+  for (const step of steps) {
+    await checkPage(page, hits, attached);
+    const left = deadline - Date.now();
+    if (left <= 0) return "failed";
+    const timeout = Math.max(1, Math.min(left, input.nav_timeout_ms));
+    try {
+      if (step.action === "goto") {
+        const response = await page.goto(input.origin + step.path, { waitUntil: "load", timeout });
+        if (!response || response.status() >= 400) return "failed";
+      } else if (step.action === "click") {
+        await page.locator(step.selector).first().click({ timeout });
+      } else if (step.action === "fill") {
+        await page.locator(step.selector).first().fill(step.value, { timeout });
+      } else if (step.action === "press") {
+        await page.keyboard.press(step.key);
+      } else if (step.action === "wait_for") {
+        await page.locator(step.selector).first().waitFor({ state: "visible", timeout });
+      } else if (step.action === "wait") {
+        if (step.ms > left) return "failed";
+        await page.waitForTimeout(step.ms);
+      } else {
+        return "failed";
+      }
+    } catch {
+      return "failed";
+    }
+  }
+  const left = deadline - Date.now();
+  if (left > 0) await page.waitForTimeout(Math.min(${String(FLOW_HOLD_MS)}, left));
+  return "scripted";
+};
+
 // ---------------------------------------------------------------- one shot
 const capture = async (browser, shot, index) => {
   const record = { name: shot.name, status: "failed", hits: [] };
@@ -355,6 +400,7 @@ const capture = async (browser, shot, index) => {
     }
     await context.addInitScript(initScript(video));
     page = await context.newPage();
+    const deadline = Date.now() + Math.round((shot.video_seconds || 0) * 1000);
     page.on("frameattached", (frame) => { attached.push(frame); });
     const response = await page.goto(input.origin + shot.path, { waitUntil: "load", timeout: input.nav_timeout_ms });
     if (!response) throw new Error("no response for " + clip(shot.path, 200));
@@ -363,7 +409,8 @@ const capture = async (browser, shot, index) => {
       await page.locator(shot.wait_for).first().waitFor({ state: "visible", timeout: input.nav_timeout_ms });
     }
     if (video) {
-      await page.waitForTimeout(Math.round(shot.video_seconds * 1000));
+      if (shot.flow) record.flow = await runFlow(page, shot.flow.steps, deadline, hits, attached);
+      else await page.waitForTimeout(Math.round(shot.video_seconds * 1000));
       await checkPage(page, hits, attached);
     } else {
       await checkPage(page, hits, attached);

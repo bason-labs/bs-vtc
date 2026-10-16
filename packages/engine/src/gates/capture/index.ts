@@ -11,7 +11,9 @@ export {
   BEFORE_AFTER_STATE_DIR,
   buildGatesOf,
   captureBeforeAfter,
+  flowSteps,
   planBeforeAfter,
+  sideFlow,
   type BeforeAfterContext,
 } from "./before-after.js";
 export { cleanReason, deniedPattern } from "./clean.js";
@@ -39,9 +41,11 @@ export {
   EVIDENCE_PAINT_DEFAULTS,
   EVIDENCE_VIDEO_SIZE,
   EvidenceRunnerResultSchema,
+  FLOW_HOLD_MS,
   MAX_SCAN_CHARS,
   UI_VIEWPORT_HEIGHT,
   type EvidenceRunnerApp,
+  type EvidenceRunnerFlowStep,
   type EvidenceRunnerInput,
   type EvidenceRunnerResult,
   type EvidenceRunnerShot,

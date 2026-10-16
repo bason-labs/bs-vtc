@@ -30,10 +30,17 @@
  *   all, the base at most half of the bytes so the head's "after" files always have room:
  *   renders past the file budget are left out and listed in `failed`
  *   ({@link BEFORE_AFTER_FILE_LIMIT_REASON}).
- * - Flow video (known limit): `BeforeAfterRequest` has no flow steps, so the `flow_video` of each
- *   side records the first rendered screen (the first job of the matrix) loading and then left
- *   idle for `flowSeconds`, with reduced motion and no interaction. A real changed-flow
- *   recording needs flow steps in the contract.
+ * - Flow video (D-ct; spine §5 reading 247(7)): with `flow`, each side reads that flow from its
+ *   own commit's `.vtc/design/flows.yaml` (`DesignFlowsFileSchema`) and its `flow_video` starts at
+ *   the flow's `start` route and runs its steps while it records, all within `flowSeconds`
+ *   (`EvidenceRunnerShot.flow`: goto, click, fill from the file's named fixture, press, wait for,
+ *   wait), every frame redacted and scanned like any other. `BeforeAfterResult.flow` says per
+ *   side what the video shows: `scripted` (every step ran), `idle` (that commit has no such flow,
+ *   or no readable flows file, so its first rendered screen was recorded as without a flow) or
+ *   `failed` (a step failed or ran out of time, and the recording up to it is kept; or the side
+ *   recorded nothing). Without `flow`, each side records the first rendered screen (the first job
+ *   of the matrix) loading and then left idle for `flowSeconds`, with reduced motion and no
+ *   interaction; without `flowSeconds`, no video and no `flow` in the result.
  * - Partial: whatever was captured is returned, with `partial` when a side or a shot is missing:
  *   `base_build_failed` / `base_serve_failed` for the base, `no_visual_app`, `no_browser`, and
  *   `capture_failed` for everything else (the head, a discarded or failed shot, a bad request).
@@ -47,14 +54,20 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { parse } from "yaml";
 import {
+  DESIGN_FLOWS_PATH,
   DESIGN_SCREENS_PATH,
+  DesignFlowsFileSchema,
   EVIDENCE_LIMITS,
   gateCommandAllowed,
   GitShaSchema,
+  parsePersisted,
+  SlugSchema,
   visualConfigFor,
   type BeforeAfterRequest,
   type BeforeAfterResult,
+  type DesignFlow,
   type EvidenceCaptureRequest,
   type EvidencePartialReason,
   type EvidenceShot,
@@ -72,7 +85,11 @@ import { GateCommandJail, gateReadPolicy } from "../sandbox.js";
 import { SCANNER_PINS } from "../scanner-pins.js";
 import { expandMatrix, parseScreens, type RenderJob } from "../visual/matrix.js";
 import { cleanReason } from "./clean.js";
-import { EVIDENCE_VIDEO_SIZE, UI_VIEWPORT_HEIGHT } from "./protocol.js";
+import {
+  EVIDENCE_VIDEO_SIZE,
+  UI_VIEWPORT_HEIGHT,
+  type EvidenceRunnerFlowStep,
+} from "./protocol.js";
 import type { CaptureTarget, TargetCaptureResult } from "./target.js";
 
 /** Why a render was left out: one PR carries at most `maxFilesPerPr` evidence files. */
@@ -148,8 +165,47 @@ const requestProblem = (r: BeforeAfterRequest): string | null => {
       return `flowSeconds is more than 0 and at most ${String(EVIDENCE_LIMITS.maxFlowSeconds)}`;
     }
   }
+  if (r.flow !== undefined && !SlugSchema.safeParse(r.flow).success) {
+    return "flow is not a flow id (a slug)";
+  }
   return null;
 };
+
+/** The path under which the app serves its routes: the app URL's own path, no trailing `/`. */
+const appPrefix = (appUrl: string): string => new URL(appUrl).pathname.replace(/\/+$/, "");
+
+/** A side's flow (D-ct): the named flow of that commit's own flows file, or `null` (idle). */
+export const sideFlow = (
+  text: string | null,
+  id: string,
+): { readonly flow: DesignFlow; readonly fixtures: Readonly<Record<string, string>> } | null => {
+  if (text === null) return null;
+  try {
+    const parsed = parsePersisted(DesignFlowsFileSchema, parse(text, { uniqueKeys: true }));
+    if (!parsed.success) return null;
+    const flow = parsed.data.flows.find((f) => f.id === id);
+    return flow === undefined ? null : { flow, fixtures: parsed.data.fixtures };
+  } catch {
+    return null;
+  }
+};
+
+/** The runner's steps of a flow: `goto` paths under the app's path, `fill` values from the fixtures. */
+export const flowSteps = (
+  flow: DesignFlow,
+  fixtures: Readonly<Record<string, string>>,
+  prefix: string,
+): EvidenceRunnerFlowStep[] =>
+  flow.steps.map((step): EvidenceRunnerFlowStep => {
+    switch (step.action) {
+      case "goto":
+        return { action: "goto", path: prefix + step.route };
+      case "fill":
+        return { action: "fill", selector: step.selector, value: fixtures[step.fixture] ?? "" };
+      default:
+        return step;
+    }
+  });
 
 /** Both paths name the same existing directory. */
 const sameDir = (a: string, b: string): boolean => {
@@ -222,7 +278,7 @@ export const planBeforeAfter = (
   appUrl: string,
   flowSeconds: number | undefined,
 ): Plan => {
-  const prefix = new URL(appUrl).pathname.replace(/\/+$/, "");
+  const prefix = appPrefix(appUrl);
   const flowFiles = flowSeconds === undefined ? 0 : 2;
   const pairs = Math.floor((EVIDENCE_LIMITS.maxFilesPerPr - flowFiles) / 2);
   const plan: Plan = { before: [], after: [], schemes: new Map(), dropped: [] };
@@ -328,10 +384,12 @@ export const captureBeforeAfter = async (
       partial = { reason, detail: cleanReason(detail, deny) };
     }
   };
+  let flowResult: BeforeAfterResult["flow"] | undefined;
   const result = (): BeforeAfterResult => ({
     files,
     failed,
     ...(partial === null ? {} : { partial }),
+    ...(flowResult === undefined ? {} : { flow: flowResult }),
   });
   const stop = (reason: EvidencePartialReason, detail: string): BeforeAfterResult => {
     note(reason, detail);
@@ -352,6 +410,7 @@ export const captureBeforeAfter = async (
 
   let config: GatesConfig;
   let screensText: string | null;
+  const flowTexts: Record<Side, string | null> = { base: null, head: null };
   try {
     const bytes = await git.readFileAtCommit(request.base, GATES_CONFIG_PATH);
     if (bytes === undefined) {
@@ -372,6 +431,16 @@ export const captureBeforeAfter = async (
       (await git.readFileAtCommit(request.base, DESIGN_SCREENS_PATH)) ??
       (await git.readFileAtCommit(request.head, DESIGN_SCREENS_PATH));
     screensText = screens === undefined ? null : new TextDecoder().decode(screens);
+    if (request.flow !== undefined && request.flowSeconds !== undefined) {
+      // Each side scripts the flow from its own commit's flows file.
+      for (const [side, commit] of [
+        ["base", request.base],
+        ["head", request.head],
+      ] as const) {
+        const flows = await git.readFileAtCommit(commit, DESIGN_FLOWS_PATH);
+        flowTexts[side] = flows === undefined ? null : new TextDecoder().decode(flows);
+      }
+    }
   } catch {
     return stop("capture_failed", "the commits could not be read from the project's repository");
   }
@@ -443,6 +512,16 @@ export const captureBeforeAfter = async (
   }
   const plan = planBeforeAfter(jobs, app.url, request.flowSeconds);
   for (const name of plan.dropped) failed.push({ name, reason: BEFORE_AFTER_FILE_LIMIT_REASON });
+  // The flow each side scripts (D-ct): `null` records the first screen idle, as without a flow.
+  const flowId = request.flowSeconds === undefined ? undefined : request.flow;
+  const scripts: Record<Side, ReturnType<typeof sideFlow>> = {
+    base: flowId === undefined ? null : sideFlow(flowTexts.base, flowId),
+    head: flowId === undefined ? null : sideFlow(flowTexts.head, flowId),
+  };
+  const flowStatus: Record<Side, "scripted" | "idle" | "failed"> = {
+    base: scripts.base === null ? "idle" : "failed",
+    head: scripts.head === null ? "idle" : "failed",
+  };
 
   const policy = gateReadPolicy({ vtcHome: ctx.vtcHome, env: ctx.env, repoRoot });
   const gates = buildGatesOf(config);
@@ -504,11 +583,30 @@ export const captureBeforeAfter = async (
         note(notServed, `the ${side}'s visual.app working directory is not in its checkout`);
         return;
       }
+      // A scripted side's recording starts at its flow's start route and runs its steps.
+      const script = scripts[side];
+      const prefix = appPrefix(app.url);
+      const recordings = shots.filter((s) => s.kind === "flow_video").map((s) => s.name);
+      const sideShots =
+        script === null
+          ? shots
+          : shots.map((s) =>
+              s.kind === "flow_video" ? { ...s, path: prefix + script.flow.start } : s,
+            );
+      const flows =
+        script === null
+          ? undefined
+          : new Map(
+              recordings.map((name) => [
+                name,
+                { steps: flowSteps(script.flow, script.fixtures, prefix) },
+              ]),
+            );
       const captured = await ctx.capture(
         {
           origin,
           outDir: request.outDir,
-          shots,
+          shots: sideShots,
           redactSelectors: request.redactSelectors,
           denyText: deny,
         },
@@ -524,9 +622,19 @@ export const captureBeforeAfter = async (
           jail,
           budgetBytes,
           colorSchemes: plan.schemes,
+          ...(flows === undefined ? {} : { flows }),
         },
       );
       for (const f of captured.files) bytes += f.bytes;
+      if (script !== null) {
+        // Scripted only when every step ran and the recording was kept.
+        const kept = new Set(captured.files.map((f) => f.name));
+        flowStatus[side] = recordings.every(
+          (name) => kept.has(name) && captured.flows?.get(name) === "scripted",
+        )
+          ? "scripted"
+          : "failed";
+      }
       files.push(...captured.files);
       failed.push(...captured.failed);
       if (captured.app === "failed") {
@@ -551,7 +659,20 @@ export const captureBeforeAfter = async (
   // The base gets at most half of the bytes: the head's "after" files matter more.
   await runSide("base", request.base, plan.before, Math.floor(EVIDENCE_LIMITS.maxBytesPerPr / 2));
   await runSide("head", request.head, plan.after, EVIDENCE_LIMITS.maxBytesPerPr - bytes);
+  // A side whose recording is not among the files recorded nothing (it did not build or serve,
+  // or its recording was discarded): `failed`, whether or not that commit has the flow.
+  const kept = new Set(files.map((f) => f.name));
+  for (const [side, shots] of [
+    ["base", plan.before],
+    ["head", plan.after],
+  ] as const) {
+    if (shots.some((s) => s.kind === "flow_video" && !kept.has(s.name)))
+      flowStatus[side] = "failed";
+  }
   // Pairs read in order: before, after, ..., then the flow recordings.
   files.sort((a, b) => a.name.localeCompare(b.name));
+  if (flowId !== undefined && plan.before.some((s) => s.kind === "flow_video")) {
+    flowResult = { id: flowId, before: flowStatus.base, after: flowStatus.head };
+  }
   return result();
 };

@@ -233,6 +233,11 @@ export interface ScannerStore {
    * {@link ScannerError} for an unknown name or a checksum mismatch.
    */
   ensure(name: string): Promise<string>;
+  /**
+   * The pinned `binary_sha256` of a scanner on this platform, which a binary `ensure` returned
+   * was verified against; `undefined` without such a pin (H-14: `GateResult.tool.sha256`).
+   */
+  readonly pinnedBinarySha256?: (name: string) => string | undefined;
 }
 
 /** `gates.createScannerStore`: the typed factory the cli wires (doctor, Gate Runner). */
@@ -362,5 +367,10 @@ export const createScannerStore: CreateScannerStore = (options) => {
     return job;
   };
 
-  return { names: pins.scanners.map((s) => s.name), ensure };
+  const pinnedBinarySha256 = (name: string): string | undefined =>
+    platform === null
+      ? undefined
+      : pins.scanners.find((s) => s.name === name)?.binary_sha256?.[platform];
+
+  return { names: pins.scanners.map((s) => s.name), ensure, pinnedBinarySha256 };
 };

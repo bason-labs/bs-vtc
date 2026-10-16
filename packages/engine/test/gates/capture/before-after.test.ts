@@ -25,7 +25,7 @@ import {
   type GatesConfigInput,
   type GateSandbox,
 } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   BEFORE_AFTER_FILE_LIMIT_REASON,
   BEFORE_AFTER_LOGS_KEPT,
@@ -46,8 +46,10 @@ import { parseGatesConfig } from "../../../src/gates/config.js";
 import { GateCommandJail } from "../../../src/gates/sandbox.js";
 import { addToAllowlist } from "../../../src/gates/index.js";
 import { CHECKOUTS_DIR, createGitOps } from "../../../src/git/index.js";
-import { git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
+import { cleanupDirs, git, initRepo, tempDir, writeFile } from "../../helpers/repo.js";
 import { commitAll, config, NODE, recordingSandbox } from "../fixture.js";
+
+afterEach(cleanupDirs);
 
 /**
  * A Playwright stand-in: `goto` really fetches the page from the app server, the page's text is
@@ -69,7 +71,13 @@ export const chromium = {
       const routes = [];
       let body = "";
       let initConfig = null;
-      const locator = () => ({ first() { return this; }, waitFor: async () => undefined });
+      // A selector with "missing" in it never shows: a flow step on it fails.
+      const locator = (selector) => ({
+        first() { return this; },
+        waitFor: async () => { log({ wait_for: selector }); if (String(selector).includes("missing")) throw new Error("Timeout exceeded"); },
+        click: async () => { if (String(selector).includes("missing")) throw new Error("Timeout exceeded"); log({ click: selector }); },
+        fill: async (value) => { if (String(selector).includes("missing")) throw new Error("Timeout exceeded"); log({ fill: selector, value }); },
+      });
       const frame = {
         evaluate: async () => ({ state: { painted: true, broken: null }, texts: [body], error: null }),
         locator,
@@ -92,6 +100,7 @@ export const chromium = {
           return { status: () => response.status };
         },
         waitForTimeout: async (ms) => { log({ waited: ms }); },
+        keyboard: { press: async (key) => { log({ press: key }); } },
         screenshot: async (o) => { log({ mask: o.mask.length }); return Buffer.concat([PNG, Buffer.from(body)]); },
         video: () => (options.recordVideo ? { path: async () => join(options.recordVideo.dir, "v.webm") } : null),
       };
@@ -148,6 +157,7 @@ createServer((req, res) => {
   // temp directory with a runner's files in it (7), or the other side's HOME (8).
   "tools/snoop.mjs": `import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+
 const tmp = process.env.TMPDIR;
 const root = dirname(tmp);
 for (const name of readdirSync(root)) {
@@ -193,6 +203,37 @@ const freePort = (): Promise<number> =>
     });
   });
 
+/**
+ * A flows file with the flow `pay-invoice`: from /invoices, pay with the `amount` fixture, then
+ * the receipt page; `extra` steps follow.
+ */
+const flowsFile = (extra: readonly Record<string, unknown>[]): string =>
+  `${JSON.stringify(
+    {
+      version: 1,
+      fixtures: { amount: "42.00" },
+      flows: [
+        {
+          id: "pay-invoice",
+          start: "/invoices",
+          screens: ["invoices"],
+          paths: ["src/**"],
+          steps: [
+            { action: "click", selector: "#pay" },
+            { action: "fill", selector: "#amount", fixture: "amount" },
+            { action: "press", key: "Enter" },
+            { action: "goto", route: "/invoices/paid" },
+            { action: "wait_for", selector: ".receipt" },
+            { action: "wait", ms: 100 },
+            ...extra,
+          ],
+        },
+      ],
+    },
+    null,
+    2,
+  )}\n`;
+
 type Gate = GatesConfigInput["gates"][number];
 const install: Gate = {
   id: "install",
@@ -207,8 +248,8 @@ interface Setup {
   /** `visual` of the committed gates.yml (default: one width, light, the app on a free port). */
   visual?: (port: number) => Record<string, unknown> | undefined;
   gates?: Gate[];
-  base?: { page?: string; mode?: string };
-  head?: { page?: string; mode?: string };
+  base?: { page?: string; mode?: string; flows?: string };
+  head?: { page?: string; mode?: string; flows?: string };
   allow?: readonly (readonly string[])[];
   sandbox?: GateSandbox | null;
   /** `null`: the recorder gets no GitOps. */
@@ -237,10 +278,12 @@ const setup = async (s: Setup = {}) => {
     ".vtc/design/screens.yaml": SCREENS,
     "src/page.txt": `${s.base?.page ?? "the old page"}\n`,
     "src/mode.txt": `${s.base?.mode ?? "ok"}\n`,
+    ...(s.base?.flows === undefined ? {} : { ".vtc/design/flows.yaml": s.base.flows }),
   });
   const base = git(repo, "rev-parse", "HEAD");
   writeFile(repo, "src/page.txt", `${s.head?.page ?? "the new page"}\n`);
   writeFile(repo, "src/mode.txt", `${s.head?.mode ?? "ok"}\n`);
+  if (s.head?.flows !== undefined) writeFile(repo, ".vtc/design/flows.yaml", s.head.flows);
   const head = commitAll(repo, "head");
   // The user's own uncommitted work: never built, served or captured.
   writeFile(repo, "src/page.txt", "uncommitted work in progress\n");
@@ -381,7 +424,7 @@ describe("UI before/after evidence (D-ct, reading 223)", { timeout: 60_000 }, ()
     );
   });
 
-  it("records the changed flow on both sides, within maxFlowSeconds", async () => {
+  it("records the first rendered screen on both sides when no flow is named, within maxFlowSeconds", async () => {
     const h = await setup();
     const result = await h.capture({ screens: ["invoices"], flowSeconds: 5 });
     expect(result.partial).toBeUndefined();
@@ -401,9 +444,82 @@ describe("UI before/after evidence (D-ct, reading 223)", { timeout: 60_000 }, ()
       { waited: 5000 },
       { waited: 5000 },
     ]);
+    expect(result.flow).toBeUndefined();
     const tooLong = await h.capture({ flowSeconds: EVIDENCE_LIMITS.maxFlowSeconds + 1 });
     expect(tooLong.files).toEqual([]);
     expect(tooLong.partial?.reason).toBe("capture_failed");
+  });
+
+  it("scripts the named flow on each side from that side's own flows file (D-ct, reading 247(7))", async () => {
+    const h = await setup({
+      base: { flows: flowsFile([]) },
+      head: { flows: flowsFile([{ action: "click", selector: "#done" }]) },
+    });
+    const result = await h.capture({ screens: ["invoices"], flowSeconds: 10, flow: "pay-invoice" });
+    expect(result.partial).toBeUndefined();
+    expect(result.flow).toEqual({ id: "pay-invoice", before: "scripted", after: "scripted" });
+    expect(result.files.map((f) => [f.name, f.kind])).toEqual([
+      ["01-ui1-w1280-light-before.png", "ui_before"],
+      ["02-ui1-w1280-light-after.png", "ui_after"],
+      ["03-flow-before.webm", "flow_video"],
+      ["04-flow-after.webm", "flow_video"],
+    ]);
+    // Each recording ends on the page its own commit's flow led to.
+    expect(read(h.outDir, "03-flow-before.webm")).toBe("WEBM the old page at /invoices/paid");
+    expect(read(h.outDir, "04-flow-after.webm")).toBe("WEBM the new page at /invoices/paid");
+    const origin = `http://127.0.0.1:${String(h.port)}`;
+    const steps = (from: number) => {
+      const log = h.log();
+      const start = log.findIndex((e, i) => i >= from && e.goto === `${origin}/invoices`);
+      const end = log.findIndex((e, i) => i > start && e.goto === `${origin}/invoices`);
+      return log
+        .slice(start, end < 0 ? undefined : end)
+        .map((e) =>
+          typeof e.goto === "string"
+            ? `goto ${e.goto.slice(origin.length)}${e.video === true ? " (recording)" : ""}`
+            : JSON.stringify(e),
+        );
+    };
+    const expected = [
+      "goto /invoices (recording)",
+      '{"click":"#pay"}',
+      '{"fill":"#amount","value":"42.00"}',
+      '{"press":"Enter"}',
+      "goto /invoices/paid (recording)",
+      '{"wait_for":".receipt"}',
+      '{"waited":100}',
+    ];
+    const base = steps(0);
+    expect(base.slice(0, expected.length)).toEqual(expected);
+    expect(base[expected.length]).toMatch(/^\{"waited":\d+\}$/);
+    const head = steps(h.log().findIndex((e) => e.goto === `${origin}/invoices`) + 1);
+    expect(head.slice(0, expected.length + 1)).toEqual([...expected, '{"click":"#done"}']);
+  });
+
+  it("records the first screen on a side without the flow, and keeps a failed flow's recording", async () => {
+    const h = await setup({
+      head: {
+        flows: flowsFile([
+          { action: "click", selector: ".missing" },
+          { action: "click", selector: "#never" },
+        ]),
+      },
+    });
+    const result = await h.capture({ screens: ["invoices"], flowSeconds: 3, flow: "pay-invoice" });
+    expect(result.flow).toEqual({ id: "pay-invoice", before: "idle", after: "failed" });
+    expect(result.partial).toBeUndefined();
+    // The base has no flows file: its first screen, left idle for flowSeconds.
+    expect(read(h.outDir, "03-flow-before.webm")).toBe(
+      "WEBM the old page at /invoices?state=empty&theme=light",
+    );
+    expect(h.log().filter((e) => e.waited !== undefined)[0]).toEqual({ waited: 3000 });
+    // The head's recording up to the step that failed is kept.
+    expect(read(h.outDir, "04-flow-after.webm")).toBe("WEBM the new page at /invoices/paid");
+    expect(h.log().some((e) => e.click === "#never")).toBe(false);
+    // An id that is no flow id is a bad request.
+    const bad = await h.capture({ flowSeconds: 3, flow: "Not a flow" });
+    expect(bad.files).toEqual([]);
+    expect(bad.partial?.reason).toBe("capture_failed");
   });
 
   it("renders every width and theme of visual.widths / themes, a dark one in the dark scheme", async () => {
@@ -461,6 +577,14 @@ describe("UI before/after evidence (D-ct, reading 223)", { timeout: 60_000 }, ()
     expect(result.partial?.detail).not.toMatch(/broken|page|build\.mjs/);
     expect(result.files.map((f) => f.kind)).toEqual(["ui_after", "ui_after"]);
     expect(read(h.outDir, "02-ui1-w1280-light-after.png")).toContain("the new page");
+  });
+
+  it("says a side that recorded nothing failed its flow, even where that commit has no flow", async () => {
+    const h = await setup({ base: { page: "broken" }, head: { flows: flowsFile([]) } });
+    const result = await h.capture({ screens: ["invoices"], flowSeconds: 3, flow: "pay-invoice" });
+    expect(result.partial?.reason).toBe("base_build_failed");
+    expect(result.files.some((f) => f.name === "03-flow-before.webm")).toBe(false);
+    expect(result.flow).toEqual({ id: "pay-invoice", before: "failed", after: "scripted" });
   });
 
   it("returns the head's screens with base_serve_failed when the base's app does not serve", async () => {

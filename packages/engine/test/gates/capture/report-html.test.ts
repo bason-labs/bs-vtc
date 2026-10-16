@@ -6,7 +6,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GateReportSchema, type GateReport, type GateResultInput } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   createEvidenceRecorder,
   GATE_REPORT_HTML,
@@ -14,7 +14,9 @@ import {
   MAX_REPORT_FINDINGS,
   scrubLocalPaths,
 } from "../../../src/gates/capture/index.js";
-import { tempDir } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 const TOKEN = `ghp_${"z".repeat(36)}`;
 

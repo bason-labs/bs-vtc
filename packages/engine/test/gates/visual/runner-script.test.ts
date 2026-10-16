@@ -14,7 +14,7 @@ import {
 import { createServer } from "node:net";
 import { join } from "node:path";
 import type { GateSandbox } from "@vtc/shared";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { GateCommandJail } from "../../../src/gates/index.js";
 import {
   engineNodeExecutable,
@@ -27,7 +27,9 @@ import {
   type VisualRunnerCall,
 } from "../../../src/gates/visual/index.js";
 import { NODE, recordingSandbox } from "../fixture.js";
-import { tempDir } from "../../helpers/repo.js";
+import { cleanupDirs, tempDir } from "../../helpers/repo.js";
+
+afterEach(cleanupDirs);
 
 /** A Playwright stand-in: records what the script asked for into `log.json` next to it. */
 const FAKE_PLAYWRIGHT = String.raw`
@@ -150,6 +152,7 @@ const SERVER = String.raw`import { createServer } from "node:http";
 if (process.argv[3] === "signal") process.kill(process.ppid, "SIGUSR1");
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
 const tmp = process.env.TMPDIR;
 writeFileSync("seen.json", JSON.stringify({ input: existsSync(join(tmp, "input.json")), key: existsSync(join(tmp, "key")) }));
 createServer((req, res) => { res.writeHead(200); res.end("ok"); }).listen(Number(process.argv[2]), "127.0.0.1");`;
