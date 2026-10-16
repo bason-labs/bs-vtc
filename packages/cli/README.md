@@ -38,6 +38,14 @@ records an `unsandboxed_gate` incident. A repo's `.vtc/project.yaml` can set nei
 none by default, and then research search runs on the host's own web search in the Research
 Analyst's session and no search key is kept or sent. `vtc doctor` says which.
 
+**Prices** (H-12, spine §5 reading 236): you never fill a price table. A host that reports no
+cost (Codex) ships one with vtc, taken from the provider's public API pricing page with its URL
+and the day it was read, refreshed with each vtc release. `prices` in `~/.vtc/config.yaml` may
+override any model (model id → `input_per_mtok`, `cached_input_per_mtok`, `output_per_mtok`),
+and the override wins model by model. A model with no known price still runs: its cost shows as
+"unknown" and budgets count its tokens at the host's highest known price. A `config.yaml` that
+does not parse overrides nothing.
+
 Automatic issues and PRs (AD-27, contracts 5.0.0) read three user-level keys:
 
 ```yaml
@@ -123,6 +131,17 @@ the call.
   `PROVIDER_BILLING_NOTICE` (D-ci).
 - **host web**: where research roles get web search (D-cf): Claude Code, else Codex with
   `web_search = "cached"`, else none (the engine's own fetchers, `HOST_WEB_OFF_NOTICE`).
+
+## What `vtc doctor` reports since round 6
+
+- **prices** (H-12): each shipped price table's models, source page and as-of date, then your
+  `prices` overrides, naming the ones that replace a shipped price. It warns only when a host
+  that reports no cost has no known price at all: then budgets cannot count its runs.
+- **model ids** (D-cx, reading 244): each model id a host refused on your sign-in, from
+  `~/.vtc/engines/model-refusals.jsonl` (read only, never through a link; lines that do not parse
+  are skipped and counted), with how often, the last time and the host's message. A refused run
+  falls back to the host default and never fails the role, so these lines are `info`;
+  `hosts.models.<host>` in `.vtc/project.yaml` picks another id.
 
 `info` lines report and never fail. `vtc lookback pin|approve` warn when the target's agent is not
 `editable_in_pack` on a host whose runs load the compiled agent (Claude Code): the version would
