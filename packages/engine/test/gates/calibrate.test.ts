@@ -781,7 +781,7 @@ describe("calibrate says what to do about a code generator in the install (spine
     expect(tamperAdvice(report({}))).toBeNull();
   });
 
-  it("explains a name two installed packages share (spine §5 reading 254(1))", () => {
+  it("explains a name two installed packages share (spine §5 readings 254(1) and 255)", () => {
     const shared = report({
       test: ["node_modules/esbuild/bin/esbuild", "node_modules/esbuild/lib/main.js"],
     });
@@ -793,5 +793,7 @@ describe("calibrate says what to do about a code generator in the install (spine
       /esbuild \(node_modules\/esbuild, node_modules\/helper\/node_modules\/esbuild\)/,
     );
     expect(advice).toMatch(/one version of each/);
+    // spine §5 reading 255: the way out that keeps both versions
+    expect(advice).toMatch(/from the registry with an integrity hash in pnpm-lock\.yaml/);
   });
 });

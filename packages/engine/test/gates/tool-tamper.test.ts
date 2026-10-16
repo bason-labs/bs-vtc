@@ -132,7 +132,8 @@ if (!ignoring) for (const dir of installed()) lifecycle(dir);
  * `node_modules/.pnpm/<entry>/node_modules/<name>`, `vendor/links.json`'s links and
  * `vendor/modules.yaml` as `node_modules/.modules.yaml`, then,
  * unless `--ignore-scripts`, runs every package's install scripts; `rebuild --recursive <name>`
- * runs those of every package of the virtual store named `<name>`, as pnpm does (by name only).
+ * runs those of every package of the virtual store named `<name>`, and `<name>@<version>` those
+ * of that version (by its package.json, as pnpm's selector matches it).
  */
 const FAKE_PNPM = `#!/usr/bin/env node
 const { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } = require("node:fs");
@@ -163,8 +164,11 @@ const store = () => {
   return found;
 };
 if (args[0] === "rebuild") {
+  const at = args[1].indexOf("@", 1);
+  const [name, version] = at < 0 ? [args[1], null] : [args[1].slice(0, at), args[1].slice(at + 1)];
   for (const dir of store()) {
-    if (JSON.parse(readFileSync(dir + "/package.json", "utf8")).name === args[1]) lifecycle(dir);
+    const manifest = JSON.parse(readFileSync(dir + "/package.json", "utf8"));
+    if (manifest.name === name && (version === null || manifest.version === version)) lifecycle(dir);
   }
   process.exit(0);
 }
@@ -1542,26 +1546,151 @@ writeFileSync("dist/index.js", "built");
         ),
       };
       const { report, h, t } = await run([["npm", "ci"]], ["make", "test"], files);
-      // each esbuild rebuilt by location, and neither may rebuild itself: their name is shared
-      tamperedRun(report, h, [
-        "node_modules/esbuild/bin/esbuild",
-        "node_modules/esbuild/lib/main.js",
-      ]);
+      // each esbuild rebuilt by location: the real one's binary is its own (spine §5 reading
+      // 255), the second one's patch of the first is tampering
+      tamperedRun(report, h, ["node_modules/esbuild/lib/main.js"]);
       const check = result(report, "check");
-      expect(check.tool?.self_rebuilt).toBeUndefined();
-      // (the fixture's vendor/deps copy is an installed package too: every copy counts)
-      expect(check.findings[0]?.message).toMatch(
-        `${SHARED_NAME_NOTE}: esbuild (node_modules/esbuild, node_modules/helper/node_modules/esbuild, `,
-      );
+      expect(check.tool?.self_rebuilt).toEqual([
+        {
+          package: "node_modules/esbuild",
+          files: ["node_modules/esbuild/bin/esbuild"],
+          file_count: 1,
+        },
+      ]);
+      expect(check.findings[0]?.message).toBeUndefined();
       const npm = h.argvs.filter((a) => a[0] === t.npm).map((a) => a.slice(1).join(" "));
       expect(npm).toEqual([
         "ci --ignore-scripts",
         "rebuild ./node_modules/esbuild",
         "rebuild ./node_modules/helper/node_modules/esbuild",
       ]);
-      expect(evidenceLog(h.repo, "_tool-integrity-install.log")).toMatch(
-        /share a name[^]*esbuild: node_modules\/esbuild, node_modules\/helper\/node_modules\/esbuild/,
+      expect(evidenceLog(h.repo, "_tool-integrity-install.log")).not.toMatch(/share a name/);
+    });
+
+    it("reading 255: npm, esbuild 0.21 for vite and 0.25 beside it, each rebuilding its own binary, passes", async () => {
+      const files = {
+        ...ESBUILD,
+        "package.json": pkg("root", { dependencies: { esbuild: "0.25.0", vite: "5" } }),
+        "vendor/deps/esbuild/package.json": JSON.stringify({
+          name: "esbuild",
+          version: "0.25.0",
+          scripts: { postinstall: "node install.mjs" },
+          bin: { esbuild: "bin/esbuild" },
+        }),
+        "vendor/deps/vite/package.json": pkg("vite", { dependencies: { esbuild: "^0.21.3" } }),
+        ...under("vendor/deps/vite/node_modules/esbuild", {
+          ...realEsbuild,
+          "package.json": JSON.stringify({
+            name: "esbuild",
+            version: "0.21.5",
+            scripts: { postinstall: "node install.mjs" },
+            bin: { esbuild: "bin/esbuild" },
+          }),
+        }),
+      };
+      const { report, t, h } = await run([["npm", "ci"]], ["make", "test"], files);
+      const check = result(report, "check");
+      expect(check).toMatchObject({ status: "pass", tool: { tampered: [] } });
+      expect(check.tool?.self_rebuilt?.map((r) => r.package)).toEqual([
+        "node_modules/esbuild",
+        "node_modules/vite/node_modules/esbuild",
+      ]);
+      const npm = h.argvs.filter((a) => a[0] === t.npm).map((a) => a.slice(1).join(" "));
+      expect(npm).toEqual([
+        "ci --ignore-scripts",
+        "rebuild ./node_modules/esbuild",
+        "rebuild ./node_modules/vite/node_modules/esbuild",
+      ]);
+    });
+
+    /** A pnpm-lock.yaml (v9) with each `[key, resolution]` as a `packages` entry. */
+    const pnpmLock = (entries: [string, string][]): string =>
+      `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies: {}\n\npackages:\n\n${entries
+        .map(([key, resolution]) => `  ${key}:\n    resolution: ${resolution}\n`)
+        .join("\n")}\nsnapshots: {}\n`;
+    const SHA = (n: string): string => `{integrity: sha512-${Buffer.from(n).toString("base64")}==}`;
+    const esbuildVersion = (version: string): Record<string, string> => ({
+      ...realEsbuild,
+      "package.json": JSON.stringify({
+        name: "esbuild",
+        version,
+        scripts: { postinstall: "node install.mjs" },
+        bin: { esbuild: "bin/esbuild" },
+      }),
+    });
+
+    it("reading 255: pnpm, esbuild 0.21.5 and 0.25.0 from the registry, each rebuilt by name and version, passes", async () => {
+      const OLD = "node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild";
+      const NEW = "node_modules/.pnpm/esbuild@0.25.0/node_modules/esbuild";
+      const files = {
+        "package.json": pkg("root", { pnpm: { onlyBuiltDependencies: ["esbuild"] } }),
+        ...under("vendor/pnpm/esbuild@0.21.5/esbuild", esbuildVersion("0.21.5")),
+        ...under("vendor/pnpm/esbuild@0.25.0/esbuild", esbuildVersion("0.25.0")),
+        "vendor/links.json": JSON.stringify([
+          ["node_modules/esbuild", ".pnpm/esbuild@0.25.0/node_modules/esbuild"],
+        ]),
+        "vendor/modules.yaml": "pendingBuilds:\n  - esbuild@0.21.5\n  - esbuild@0.25.0\n",
+        "pnpm-lock.yaml": pnpmLock([
+          ["esbuild@0.21.5", SHA("0.21.5")],
+          ["esbuild@0.25.0", SHA("0.25.0")],
+        ]),
+      };
+      const { report, h, t } = await run(
+        [["pnpm", "install", "--frozen-lockfile"]],
+        ["make", "test"],
+        files,
       );
+      const check = result(report, "check");
+      expect(check).toMatchObject({ status: "pass", tool: { tampered: [] } });
+      expect(check.tool?.self_rebuilt).toEqual([
+        { package: OLD, files: [`${OLD}/bin/esbuild`], file_count: 1 },
+        { package: NEW, files: [`${NEW}/bin/esbuild`], file_count: 1 },
+      ]);
+      const pnpm = h.argvs.filter((a) => a[0] === t.pnpm).map((a) => a.slice(1).join(" "));
+      expect(pnpm).toEqual([
+        "install --frozen-lockfile --ignore-scripts",
+        "rebuild --recursive esbuild@0.21.5",
+        "rebuild --recursive esbuild@0.25.0",
+      ]);
+      expect(evidenceLog(h.repo, "_tool-integrity-install.log")).not.toMatch(/share a name/);
+    });
+
+    it("reading 255: pnpm, a fake esbuild from a tarball patching the registry one still fails", async () => {
+      const NEW = "node_modules/.pnpm/esbuild@0.25.0/node_modules/esbuild";
+      const files = {
+        "package.json": pkg("root", { pnpm: { onlyBuiltDependencies: ["esbuild"] } }),
+        ...under("vendor/pnpm/esbuild@0.25.0/esbuild", esbuildVersion("0.25.0")),
+        ...under(
+          "vendor/pnpm/esbuild@file+vendor+esbuild-0.0.1.tgz/esbuild",
+          fakeEsbuild("../../../esbuild@0.25.0/node_modules/esbuild/lib/main.js"),
+        ),
+        "vendor/links.json": JSON.stringify([
+          ["node_modules/esbuild", ".pnpm/esbuild@0.25.0/node_modules/esbuild"],
+        ]),
+        "vendor/modules.yaml":
+          "pendingBuilds:\n  - esbuild@0.25.0\n  - esbuild@file:vendor/esbuild-0.0.1.tgz\n",
+        "pnpm-lock.yaml": pnpmLock([
+          ["esbuild@0.25.0", SHA("0.25.0")],
+          [
+            "esbuild@file:vendor/esbuild-0.0.1.tgz",
+            "{integrity: sha512-ZmFrZQ==, tarball: file:vendor/esbuild-0.0.1.tgz}",
+          ],
+        ]),
+      };
+      const { report, h, t } = await run(
+        [["pnpm", "install", "--frozen-lockfile"]],
+        ["make", "test"],
+        files,
+      );
+      tamperedRun(report, h, [`${NEW}/bin/esbuild`, `${NEW}/lib/main.js`]);
+      expect(result(report, "check").findings[0]?.message).toMatch(
+        `${SHARED_NAME_NOTE}: esbuild (`,
+      );
+      const pnpm = h.argvs.filter((a) => a[0] === t.pnpm).map((a) => a.slice(1).join(" "));
+      expect(pnpm).toEqual([
+        "install --frozen-lockfile --ignore-scripts",
+        "rebuild --recursive esbuild",
+      ]);
     });
 
     it("h14-self-rebuild-allowance-not-attributed-to-writer: pnpm with onlyBuiltDependencies [esbuild], both pending, fails", async () => {

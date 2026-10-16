@@ -18,6 +18,7 @@ import {
   perPackageBuild,
   sharedInstallNames,
   ToolHashLimitError,
+  unverifiedSharedNames,
   WORKSPACE_HASH_LIMITS,
   workspaceTree as walk,
   type WorkspaceTree,
@@ -175,13 +176,17 @@ describe("workspaceTree: every file and link of the checkout, chosen by nothing"
       installed: true,
       scripts: ["postinstall"],
       name: "esbuild",
+      version: "1.0.0",
       pnpmSettings: false,
+      registry: false,
     });
     expect(tree.packages.get("packages/app")).toEqual({
       installed: false,
       scripts: [],
       name: "app",
+      version: "1.0.0",
       pnpmSettings: false,
+      registry: false,
     });
     expect(tree.refused).toEqual([]);
     expect(tree.binOwners.get("node_modules/.bin/esbuild")).toBe(ESBUILD);
@@ -555,11 +560,15 @@ describe("perPackageBuild: the scripts pass one writer at a time (reading 253)",
     expect(
       perPackageBuild(["pnpm", "install", "--frozen-lockfile"], root, "", workspaceTree(root)),
     ).toEqual([
+      // by name and version (spine §5 reading 255), never by name alone where pnpm can
       {
-        argv: ["pnpm", "rebuild", "--recursive", "@swc/core"],
-        writer: { dependency: "@swc/core" },
+        argv: ["pnpm", "rebuild", "--recursive", "@swc/core@1.3.0"],
+        writer: { dependency: "@swc/core", version: "1.3.0" },
       },
-      { argv: ["pnpm", "rebuild", "--recursive", "esbuild"], writer: { dependency: "esbuild" } },
+      {
+        argv: ["pnpm", "rebuild", "--recursive", "esbuild@0.25.0"],
+        writer: { dependency: "esbuild", version: "0.25.0" },
+      },
       {
         argv: [
           "pnpm",
@@ -824,13 +833,16 @@ describe("h14-open3: a self-rebuild is one installed directory's, never a name's
         writer: { installed: "node_modules/helper/node_modules/esbuild" },
       },
     ]);
-    // the real esbuild's own step: its binary, but its name is shared, so not even that
+    // the real esbuild's own step: npm rebuilt it by location, so its binary is its own even
+    // though its name is shared (spine §5 reading 255)
     const real = workspaceTree(root);
     put(root, "node_modules/esbuild/bin/esbuild", "\u007fELF native", 0o755);
     const afterReal = workspaceTree(root);
     expect(compareInstall(tree, afterReal, isProtected, steps?.[0]?.writer ?? null)).toEqual({
-      tampered: ["node_modules/esbuild/bin/esbuild"],
-      selfRebuilt: [],
+      tampered: [],
+      selfRebuilt: [
+        { package: "node_modules/esbuild", files: ["node_modules/esbuild/bin/esbuild"] },
+      ],
       managerState: [],
     });
     expect(real.snapshot.sha256).toBe(tree.snapshot.sha256);
@@ -1000,5 +1012,271 @@ describe("h14-open3: a self-rebuild is one installed directory's, never a name's
       ],
       managerState: [],
     });
+  });
+});
+
+describe("reading 255: a shared name keeps its allowance where the rebuild cannot mix the packages up", () => {
+  const isProtected = (path: string): boolean => matchesAnyCaseless(DEFAULT_PROTECTED_GLOBS, path);
+  const MAIN_JS = "export const transform = (code) => code;\n";
+  const PATCHED = "export const transform = (code) => code.replace(/expect\\(/g, 'void (');\n";
+  const NATIVE = "\u007fELF native";
+  const esbuildAt = (root: string, dir: string, version: string): void => {
+    put(
+      root,
+      `${dir}/package.json`,
+      JSON.stringify({
+        name: "esbuild",
+        version,
+        scripts: { postinstall: "node install.js" },
+        bin: { esbuild: "bin/esbuild" },
+      }),
+    );
+    put(root, `${dir}/install.js`, "// rebuilds bin/esbuild\n");
+    put(root, `${dir}/bin/esbuild`, "#!/usr/bin/env node\n// js fallback\n", 0o755);
+    put(root, `${dir}/lib/main.js`, MAIN_JS);
+  };
+  const integrity = (text: string): string =>
+    `sha512-${createHash("sha512").update(text).digest("base64")}`;
+  /** A pnpm-lock.yaml (v9) whose `packages` entries have the given resolutions. */
+  const lockfile = (entries: Record<string, string>): string =>
+    `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      esbuild:\n        specifier: ^0.25.0\n        version: 0.25.0\n\npackages:\n\n${Object.entries(
+      entries,
+    )
+      .map(
+        ([key, resolution]) =>
+          `  ${key.startsWith("@") ? `'${key}'` : key}:\n    resolution: ${resolution}\n    engines: {node: '>=18'}\n    hasBin: true\n`,
+      )
+      .join(
+        "\n",
+      )}\nsnapshots:\n\n  esbuild@0.25.0:\n    optionalDependencies:\n      '@esbuild/darwin-arm64': 0.25.0\n`;
+  const OLD = "node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild";
+  const NEW = "node_modules/.pnpm/esbuild@0.25.0/node_modules/esbuild";
+  /** vite's esbuild 0.21.5 beside the project's 0.25.0, both from the registry, under pnpm. */
+  const pnpmTwoVersions = (resolutions: Record<string, string> = {}): string => {
+    const root = tempDir("vtc-pnpm-");
+    put(root, "package.json", pkg("app", { pnpm: { onlyBuiltDependencies: ["esbuild"] } }));
+    esbuildAt(root, OLD, "0.21.5");
+    esbuildAt(root, NEW, "0.25.0");
+    put(root, "node_modules/.pnpm/vite@5.4.0/node_modules/vite/package.json", pkg("vite"));
+    link(
+      root,
+      "node_modules/.pnpm/vite@5.4.0/node_modules/esbuild",
+      "../../esbuild@0.21.5/node_modules/esbuild",
+    );
+    link(root, "node_modules/esbuild", ".pnpm/esbuild@0.25.0/node_modules/esbuild");
+    link(root, "node_modules/vite", ".pnpm/vite@5.4.0/node_modules/vite");
+    put(
+      root,
+      "pnpm-lock.yaml",
+      lockfile({
+        "esbuild@0.21.5": `{integrity: ${integrity("0.21.5")}}`,
+        "esbuild@0.25.0": `{integrity: ${integrity("0.25.0")}}`,
+        "vite@5.4.0": `{integrity: ${integrity("vite")}}`,
+        ...resolutions,
+      }),
+    );
+    put(
+      root,
+      "node_modules/.modules.yaml",
+      "pendingBuilds:\n  - esbuild@0.21.5\n  - esbuild@0.25.0\n",
+    );
+    return root;
+  };
+
+  it("npm: esbuild 0.21 for vite and 0.25 beside it each rebuild their own binary", () => {
+    const root = tempDir("vtc-npm-");
+    put(root, "package.json", pkg("app"));
+    esbuildAt(root, "node_modules/esbuild", "0.25.0");
+    put(root, "node_modules/vite/package.json", pkg("vite"));
+    esbuildAt(root, "node_modules/vite/node_modules/esbuild", "0.21.5");
+    const before = workspaceTree(root);
+    const steps = perPackageBuild(["npm", "ci"], root, "", before) ?? [];
+    expect(steps.map((s) => s.writer)).toEqual([
+      { installed: "node_modules/esbuild" },
+      { installed: "node_modules/vite/node_modules/esbuild" },
+    ]);
+    put(root, "node_modules/esbuild/bin/esbuild", NATIVE, 0o755);
+    put(root, "node_modules/esbuild/esbuild.node", NATIVE);
+    const mid = workspaceTree(root);
+    expect(compareInstall(before, mid, isProtected, steps[0]?.writer ?? null)).toEqual({
+      tampered: [],
+      selfRebuilt: [
+        {
+          package: "node_modules/esbuild",
+          files: ["node_modules/esbuild/bin/esbuild", "node_modules/esbuild/esbuild.node"],
+        },
+      ],
+      managerState: [],
+    });
+    put(root, "node_modules/vite/node_modules/esbuild/bin/esbuild", NATIVE, 0o755);
+    expect(compareInstall(mid, workspaceTree(root), isProtected, steps[1]?.writer ?? null)).toEqual(
+      {
+        tampered: [],
+        selfRebuilt: [
+          {
+            package: "node_modules/vite/node_modules/esbuild",
+            files: ["node_modules/vite/node_modules/esbuild/bin/esbuild"],
+          },
+        ],
+        managerState: [],
+      },
+    );
+    // still one directory each: the 0.25 step writing into 0.21, or its own JavaScript, fails
+    const again = workspaceTree(root);
+    put(root, "node_modules/vite/node_modules/esbuild/bin/esbuild", "other", 0o755);
+    put(root, "node_modules/vite/node_modules/esbuild/lib/main.js", PATCHED);
+    put(root, "node_modules/esbuild/lib/main.js", PATCHED);
+    expect(
+      compareInstall(again, workspaceTree(root), isProtected, steps[0]?.writer ?? null).tampered,
+    ).toEqual([
+      "node_modules/esbuild/lib/main.js",
+      "node_modules/vite/node_modules/esbuild/bin/esbuild",
+      "node_modules/vite/node_modules/esbuild/lib/main.js",
+    ]);
+  });
+
+  it("pnpm: both from the registry with an integrity hash, each rebuilt by name and version", () => {
+    const root = pnpmTwoVersions();
+    const before = workspaceTree(root);
+    expect(before.packages.get(OLD)?.registry).toBe(true);
+    expect(before.packages.get(NEW)?.registry).toBe(true);
+    expect([...sharedInstallNames(before).keys()]).toEqual(["esbuild"]);
+    expect(unverifiedSharedNames(before)).toEqual(new Map());
+    const steps = perPackageBuild(["pnpm", "install", "--frozen-lockfile"], root, "", before);
+    expect(steps).toEqual([
+      {
+        argv: ["pnpm", "rebuild", "--recursive", "esbuild@0.21.5"],
+        writer: { dependency: "esbuild", version: "0.21.5" },
+      },
+      {
+        argv: ["pnpm", "rebuild", "--recursive", "esbuild@0.25.0"],
+        writer: { dependency: "esbuild", version: "0.25.0" },
+      },
+    ]);
+    put(root, `${OLD}/bin/esbuild`, NATIVE, 0o755);
+    const mid = workspaceTree(root);
+    expect(compareInstall(before, mid, isProtected, steps?.[0]?.writer ?? null)).toEqual({
+      tampered: [],
+      selfRebuilt: [{ package: OLD, files: [`${OLD}/bin/esbuild`] }],
+      managerState: [],
+    });
+    put(root, `${NEW}/bin/esbuild`, NATIVE, 0o755);
+    put(root, `${NEW}/esbuild.node`, NATIVE);
+    expect(
+      compareInstall(mid, workspaceTree(root), isProtected, steps?.[1]?.writer ?? null),
+    ).toEqual({
+      tampered: [],
+      selfRebuilt: [{ package: NEW, files: [`${NEW}/bin/esbuild`, `${NEW}/esbuild.node`] }],
+      managerState: [],
+    });
+    // the 0.25.0 step may not touch 0.21.5, nor change its own JavaScript (reading 254(2))
+    const again = workspaceTree(root);
+    put(root, `${OLD}/bin/esbuild`, "other", 0o755);
+    put(root, `${OLD}/lib/main.js`, PATCHED);
+    put(root, `${NEW}/lib/main.js`, PATCHED);
+    expect(
+      compareInstall(again, workspaceTree(root), isProtected, steps?.[1]?.writer ?? null),
+    ).toEqual({
+      tampered: [`${OLD}/bin/esbuild`, `${OLD}/lib/main.js`, `${NEW}/lib/main.js`],
+      selfRebuilt: [],
+      managerState: [],
+    });
+    // a rebuild by name alone may write the binaries of every registry esbuild
+    const byName = workspaceTree(root);
+    put(root, `${OLD}/esbuild.node`, NATIVE);
+    put(root, `${NEW}/build/esbuild`, NATIVE);
+    expect(
+      compareInstall(byName, workspaceTree(root), isProtected, { dependency: "esbuild" })
+        .selfRebuilt,
+    ).toEqual([
+      { package: OLD, files: [`${OLD}/esbuild.node`] },
+      { package: NEW, files: [`${NEW}/build/esbuild`] },
+    ]);
+  });
+
+  it("pnpm: a fake esbuild from a tarball beside the registry one keeps the name's allowance off", () => {
+    const root = pnpmTwoVersions();
+    const FAKE = "node_modules/.pnpm/esbuild@file+vendor+esbuild-0.0.1.tgz/node_modules/esbuild";
+    esbuildAt(root, FAKE, "0.0.1");
+    rmSync(join(root, OLD), { recursive: true });
+    put(
+      root,
+      "pnpm-lock.yaml",
+      lockfile({
+        "esbuild@0.25.0": `{integrity: ${integrity("0.25.0")}}`,
+        "esbuild@file:vendor/esbuild-0.0.1.tgz": `{integrity: ${integrity("fake")}, tarball: file:vendor/esbuild-0.0.1.tgz}`,
+      }),
+    );
+    put(
+      root,
+      "node_modules/.modules.yaml",
+      "pendingBuilds:\n  - esbuild@0.25.0\n  - esbuild@file:vendor/esbuild-0.0.1.tgz\n",
+    );
+    const before = workspaceTree(root);
+    expect(before.packages.get(NEW)?.registry).toBe(true);
+    expect(before.packages.get(FAKE)?.registry).toBe(false);
+    expect(unverifiedSharedNames(before)).toEqual(new Map([["esbuild", [NEW, FAKE].sort()]]));
+    // a name with a source other than the registry: one rebuild by name, as before
+    const steps = perPackageBuild(["pnpm", "install", "--frozen-lockfile"], root, "", before);
+    expect(steps).toEqual([
+      { argv: ["pnpm", "rebuild", "--recursive", "esbuild"], writer: { dependency: "esbuild" } },
+    ]);
+    put(root, `${NEW}/bin/esbuild`, NATIVE, 0o755);
+    put(root, `${NEW}/lib/main.js`, PATCHED);
+    put(root, `${FAKE}/bin/esbuild`, NATIVE, 0o755);
+    for (const writer of [
+      { dependency: "esbuild" },
+      { dependency: "esbuild", version: "0.25.0" },
+      { dependency: "esbuild", version: "0.0.1" },
+    ]) {
+      expect(compareInstall(before, workspaceTree(root), isProtected, writer)).toEqual({
+        tampered: [`${NEW}/bin/esbuild`, `${NEW}/lib/main.js`, `${FAKE}/bin/esbuild`],
+        selfRebuilt: [],
+        managerState: [],
+      });
+    }
+  });
+
+  it("pnpm: only a registry resolution with an integrity hash and nothing else counts", () => {
+    for (const resolution of [
+      `{integrity: ${integrity("x")}, tarball: https://example.com/esbuild-0.21.5.tgz}`,
+      "{tarball: https://example.com/esbuild-0.21.5.tgz}",
+      "{type: git, repo: https://example.com/esbuild.git, commit: 0123456789abcdef}",
+      "{directory: ../esbuild, type: directory}",
+      "{}",
+    ]) {
+      const root = pnpmTwoVersions({ "esbuild@0.21.5": resolution });
+      const tree = workspaceTree(root);
+      expect(tree.packages.get(OLD)?.registry, resolution).toBe(false);
+      expect([...unverifiedSharedNames(tree).keys()], resolution).toEqual(["esbuild"]);
+      put(root, `${NEW}/bin/esbuild`, NATIVE, 0o755);
+      expect(
+        compareInstall(tree, workspaceTree(root), isProtected, {
+          dependency: "esbuild",
+          version: "0.25.0",
+        }).tampered,
+        resolution,
+      ).toEqual([`${NEW}/bin/esbuild`]);
+    }
+    // no lockfile entry at all, no lockfile, a manifest whose version is not its folder's, a
+    // package outside pnpm's virtual store
+    const missing = pnpmTwoVersions();
+    put(
+      missing,
+      "pnpm-lock.yaml",
+      lockfile({ "esbuild@0.25.0": `{integrity: ${integrity("0.25.0")}}` }),
+    );
+    expect(workspaceTree(missing).packages.get(OLD)?.registry).toBe(false);
+    const none = pnpmTwoVersions();
+    rmSync(join(none, "pnpm-lock.yaml"));
+    expect(workspaceTree(none).packages.get(NEW)?.registry).toBe(false);
+    const copied = pnpmTwoVersions();
+    esbuildAt(copied, OLD, "0.25.0");
+    expect(workspaceTree(copied).packages.get(OLD)?.registry).toBe(false);
+    const hoisted = pnpmTwoVersions();
+    esbuildAt(hoisted, "node_modules/other/node_modules/esbuild", "0.21.5");
+    const tree = workspaceTree(hoisted);
+    expect(tree.packages.get("node_modules/other/node_modules/esbuild")?.registry).toBe(false);
+    expect([...unverifiedSharedNames(tree).keys()]).toEqual(["esbuild"]);
   });
 });

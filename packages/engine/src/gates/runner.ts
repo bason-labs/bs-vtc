@@ -138,7 +138,7 @@ import {
   scriptsFreeInstall,
   sha256File,
   SHARED_NAME_NOTE,
-  sharedInstallNames,
+  unverifiedSharedNames,
   ToolHashLimitError,
   toolPathsCover,
   workspaceTree,
@@ -415,6 +415,11 @@ class Run {
         steps: WorkspaceTree | null;
         managerState: readonly string[];
         unattributed: readonly string[];
+        /**
+         * Whether a scripts step rebuilt a dependency by name (pnpm): only then does a shared
+         * name keep no allowance (spine §5 reading 255; npm rebuilds by location).
+         */
+        byName: boolean;
         /**
          * The checkout's own projects whose `lib/` the committed `.gitignore` files ignore, read
          * before any install script ran: their install scripts may add files there (reading 254).
@@ -828,6 +833,7 @@ class Run {
           steps: null,
           managerState: [],
           unattributed: [],
+          byName: false,
           ignoredLib: new Set(),
           lastSeen: null,
         };
@@ -918,6 +924,7 @@ class Run {
         ignoredLib: ws.ignoredLib,
       });
       ws.steps = after;
+      if (writer !== null && "dependency" in writer) ws.byName = true;
       ws.installChanged = [...new Set([...ws.installChanged, ...compared.tampered])].sort();
       const merged = new Map(ws.selfRebuilt.map((r) => [r.package, [...r.files]]));
       for (const r of compared.selfRebuilt) {
@@ -967,7 +974,7 @@ class Run {
         `packages whose own install scripts changed files in their own directory during the install phase (allowed, shown as a warning on each verify gate):\n${done.selfRebuilt.map((r) => `${r.package}: ${r.files.join(", ")}`).join("\n")}`,
       );
     }
-    const shared = sharedInstallNames(done.baseline);
+    const shared = done.byName ? unverifiedSharedNames(done.baseline) : new Map<string, string[]>();
     if (shared.size > 0) {
       notes.push(
         `${SHARED_NAME_NOTE}: every change under any of these is tampering:\n${[...shared].map(([name, dirs]) => `${name}: ${dirs.join(", ")}`).join("\n")}`,
@@ -1125,13 +1132,15 @@ class Run {
   }
 
   /**
-   * The names installed packages share that hold a tampered path (spine §5 reading 254(1)), as a
-   * finding's message beginning with {@link SHARED_NAME_NOTE}; `null` when none does.
+   * The names installed packages share that hold a tampered path and keep no allowance under a
+   * rebuild by name (spine §5 readings 254(1) and 255), as a finding's message beginning with
+   * {@link SHARED_NAME_NOTE}; `null` when none does.
    */
   private sharedNamesOf(tampered: readonly string[]): string | null {
     const ws = this.workspace;
     if (ws === null || "problem" in ws) return null;
-    const hits = [...sharedInstallNames(ws.baseline)].filter(([, dirs]) =>
+    if (!ws.byName) return null;
+    const hits = [...unverifiedSharedNames(ws.baseline)].filter(([, dirs]) =>
       tampered.some((path) => dirs.some((dir) => path.startsWith(`${dir}/`))),
     );
     if (hits.length === 0) return null;

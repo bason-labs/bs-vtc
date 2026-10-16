@@ -124,8 +124,9 @@ const PRISMA_CLIENT = /(^|\/)node_modules\/\.prisma\//;
  * reading 253(a)): an install script that wrote outside its own package, most often a code
  * generator, is never allowed, so the project runs the generator as an install gate of its own
  * after the install instead. When a tampered path is in a package whose name another installed
- * package shares (spine §5 reading 254(1): the finding's message begins with `SHARED_NAME_NOTE`),
- * it says to install one version of it or keep its script from running. `null` when no gate
+ * package shares and pnpm rebuilt by name (spine §5 readings 254(1) and 255: the finding's
+ * message begins with `SHARED_NAME_NOTE`), it says to install every package of that name from the
+ * registry, install one version of it, or keep its script from running. `null` when no gate
  * failed so.
  */
 export const tamperAdvice = (report: GateReport): string | null => {
@@ -142,7 +143,7 @@ export const tamperAdvice = (report: GateReport): string | null => {
     .find((m) => m.startsWith(SHARED_NAME_NOTE));
   if (shared !== undefined) {
     const names = shared.slice(SHARED_NAME_NOTE.length).replace(/^:\s*/, "");
-    return `WARNING: gate(s) ${gates} fail on the base commit as tampering: the install phase changed ${shown}, in packages installed more than once under one name where one declares an install script: ${names}. A package manager that rebuilds by name runs all of them in one step, and one's script could rewrite another's, so none may rebuild itself (H-14, spine §5 reading 254). Install one version of each (npm dedupe, or a pnpm override / npm override to a single version), or keep the install script from running (pnpm: leave the name out of onlyBuiltDependencies), then calibrate again`;
+    return `WARNING: gate(s) ${gates} fail on the base commit as tampering: the install phase changed ${shown}, in packages installed more than once under one name where one declares an install script: ${names}. pnpm rebuilds by name (and version), which another package can copy, so such a name may rebuild itself only when every package of it comes from the registry with an integrity hash in pnpm-lock.yaml; here one does not (a file:, link:, git, tarball-URL or workspace source), so none may (H-14, spine §5 readings 254 and 255). Install that package from the registry instead, or install one version of each (a pnpm override to a single version), or keep the install script from running (leave the name out of onlyBuiltDependencies), then calibrate again. npm rebuilds each installed directory on its own and needs none of this`;
   }
   if (paths.some((p) => PRISMA_CLIENT.test(p))) {
     return `WARNING: gate(s) ${gates} fail on the base commit as tampering: an install script wrote ${shown} outside its own package. That is Prisma's client generator, which H-14 does not allow in the install's scripts (spine §5 reading 253). Keep its install script from running (pnpm: leave @prisma/client and prisma out of onlyBuiltDependencies; or make the install scripts-free with --ignore-scripts), add the generator as an install gate after the install in .vtc/gates.yml, for example { id: generate, layer: L0, phase: install, command: [npx, prisma, generate] }, and calibrate again`;
