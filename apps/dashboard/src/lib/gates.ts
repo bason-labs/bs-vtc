@@ -39,7 +39,10 @@ export interface GateResultRow {
   /** The redacted report, when the artifacts route can serve it (AD-5 rule 10). */
   readonly report: { readonly path: string; readonly format: string } | null;
   readonly findings: readonly ToolFinding[];
-  /** What the result passed with but the human should know (H-14 `after_scripts`, reading 251). */
+  /**
+   * What the result passed with but the human should know (H-14 `after_scripts`, reading 251;
+   * `self_rebuilt`, reading 252).
+   */
   readonly warnings: readonly string[];
 }
 
@@ -113,8 +116,19 @@ const resultDetails = (r: GateResult): string[] => {
 export const AFTER_SCRIPTS_WARNING =
   "Tools hashed only after an install's scripts ran: what those scripts wrote before the hash is not checked (H-14). An install VTC can run scripts-free removes this warning.";
 
-const resultWarnings = (r: GateResult): string[] =>
-  r.tool?.baseline === "after_scripts" ? [AFTER_SCRIPTS_WARNING] : [];
+/**
+ * The tool-integrity warning of a gate run after packages rebuilt themselves in their own
+ * directory during the install phase (H-14 `self_rebuilt`, reading 252), naming them.
+ */
+export const selfRebuiltWarning = (packages: readonly string[]): string =>
+  `Packages rebuilt themselves during install (allowed: changes in their own directory only, H-14): ${packages.join(", ")}.`;
+
+const resultWarnings = (r: GateResult): string[] => [
+  ...(r.tool?.baseline === "after_scripts" ? [AFTER_SCRIPTS_WARNING] : []),
+  ...((r.tool?.self_rebuilt ?? []).length > 0
+    ? [selfRebuiltWarning((r.tool?.self_rebuilt ?? []).map((p) => p.package))]
+    : []),
+];
 
 const servable = (path: string | undefined): string | null =>
   path !== undefined && isServableArtifactPath(path) ? path : null;

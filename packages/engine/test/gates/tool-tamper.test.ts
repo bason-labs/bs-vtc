@@ -32,13 +32,16 @@ if (prefix >= 0) {
   args = [...args.slice(0, prefix), ...args.slice(prefix + 2)];
 }
 if (args[0] === "run") {
-  // \`npm run <script>\`: the script through .npmrc's script-shell (default sh), with the nearest
+  // \`npm run <script>\`: the script through the npmrc's script-shell (default sh) and with its
+  // node-options, the project's .npmrc first and then the user's $HOME/.npmrc, with the nearest
   // node_modules/.bin on PATH, as npm runs it
   const resolve = resolvePath;
   const script = JSON.parse(readFileSync("package.json", "utf8")).scripts[args[1]];
-  const rc = existsSync(".npmrc") ? readFileSync(".npmrc", "utf8") : "";
+  const user = process.env.HOME === undefined ? "" : resolvePath(process.env.HOME, ".npmrc");
+  const rc = [".npmrc", user].filter((f) => f !== "" && existsSync(f)).map((f) => readFileSync(f, "utf8")).join("\\n");
   const shell = /^script-shell=(.*)$/m.exec(rc)?.[1]?.trim() ?? "/bin/sh";
-  const env = { ...process.env, PATH: resolve("node_modules/.bin") + ":" + process.env.PATH };
+  const nodeOptions = /^node-options=(.*)$/m.exec(rc)?.[1]?.trim();
+  const env = { ...process.env, PATH: resolve("node_modules/.bin") + ":" + process.env.PATH, ...(nodeOptions === undefined ? {} : { NODE_OPTIONS: nodeOptions }) };
   const r = spawnSync(shell, ["-c", [script, ...args.slice(2)].join(" ")], { stdio: "inherit", env });
   process.exit(r.status ?? 1);
 }
@@ -214,10 +217,13 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     const clean = await h.run({ head: commitAll(h.repo), layers: ["L0", "L1"] });
     expect(result(clean, "lint")).toMatchObject({ status: "pass", tool: { tampered: [] } });
     expect(lintRan(h.argvs)).toBe(true);
-    // The build gate runs a committed script with the node on PATH: no tool VTC verifies.
-    expect(evidenceLog(h.repo, "_tool-integrity.log")).toMatch(
-      /gate\(s\) build run no tool VTC verifies/,
-    );
+    // The build gate runs a committed script with the node on PATH: it names no tool, yet it is
+    // checked against the whole checkout like every other (spine §5 reading 252).
+    expect(result(clean, "build").tool).toMatchObject({
+      source: "project",
+      tampered: [],
+      workspace_sha256: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+    });
 
     writeFile(
       h.repo,
@@ -342,15 +348,21 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       tool: { source: "project" as const, paths: ["node_modules/.prisma/**"] },
     };
     const files = {
+      // the dependency's own install script builds it in its own directory (reading 252)
+      "vendor/node_modules/native-dep/package.json": JSON.stringify({
+        name: "native-dep",
+        scripts: { postinstall: "node postinstall.mjs" },
+      }),
       "postinstall.mjs":
-        'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/.built", "native");\n',
+        'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/native-dep/.built", "native");\n',
       "tools/gen.mjs":
-        'import { existsSync, mkdirSync, writeFileSync } from "node:fs";\nif (!existsSync("node_modules/.built")) process.exit(3);\nmkdirSync("node_modules/.prisma", { recursive: true });\nwriteFileSync("node_modules/.prisma/client.js", "generated");\n',
+        'import { existsSync, mkdirSync, writeFileSync } from "node:fs";\nif (!existsSync("node_modules/native-dep/.built")) process.exit(3);\nmkdirSync("node_modules/.prisma", { recursive: true });\nwriteFileSync("node_modules/.prisma/client.js", "generated");\n',
       "tools/check.mjs":
         'import { existsSync } from "node:fs";\nprocess.exit(existsSync("node_modules/.prisma/client.js") ? 0 : 4);\n',
     };
-    // the build gate's tool is found only after the plain gate ran: it runs, marked after_scripts
-    // (reading 251); the lint tool, hashed after the scripts-free install, is not
+    // the build gate's tool is found only after the plain gate ran; what the plain gate wrote
+    // cannot be told from tampering, so every verify gate runs marked after_scripts (readings 251
+    // and 252)
     const { h, npm } = setup([gen, check, explicitLint], files);
     writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
     const report = await h.run({ head: commitAll(h.repo), layers: ["L0", "L1"] });
@@ -366,7 +378,15 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
       ["lint", "pass"],
     ]);
     expect(result(report, "lint").tool?.tampered).toEqual([]);
-    expect(result(report, "lint").tool?.baseline).toBeUndefined();
+    expect(result(report, "lint").tool?.baseline).toBe("after_scripts");
+    // the dependency that built itself is a warning, on every verify gate
+    expect(result(report, "lint").tool?.self_rebuilt).toEqual([
+      {
+        package: "node_modules/native-dep",
+        files: ["node_modules/native-dep/.built"],
+        file_count: 1,
+      },
+    ]);
     // What the plain gate wrote is hashed once it ran, and the evidence says so.
     expect(result(report, "build").tool).toMatchObject({ tampered: [], baseline: "after_scripts" });
     const log = evidenceLog(h.repo, "_tool-integrity.log");
@@ -376,7 +396,7 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     );
   });
 
-  it("does not run a gate whose tool paths are stale or match nothing", async () => {
+  it("runs a gate whose tool paths are stale or match nothing, and notes it: detail only (reading 252)", async () => {
     const stale = {
       id: "lint",
       layer: "L1" as const,
@@ -392,16 +412,17 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     const { h } = setup([stale, nothing]);
     writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
     const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    // the check is the whole checkout, which nothing changed: both run, and pass
     for (const id of ["lint", "lint-nothing"]) {
-      expect(result(report, id)).toMatchObject({ status: "error", failure_class: "infra" });
+      expect(result(report, id)).toMatchObject({
+        status: "pass",
+        tool: { source: "project", tampered: [] },
+      });
     }
-    expect(evidenceLog(h.repo, "lint.log")).toMatch(
-      /runs node_modules\/\.bin\/lint-tool, node_modules\/lint-tool\/\*\*, which its tool paths in gates\.yml do not cover.*re-run vtc calibrate/,
+    expect(lintRan(h.argvs)).toBe(true);
+    expect(evidenceLog(h.repo, "_tool-integrity.log")).toMatch(
+      /gate lint: its command runs node_modules\/\.bin\/lint-tool, node_modules\/lint-tool\/\*\*, which its tool paths in gates\.yml do not cover.*re-run vtc calibrate.*detail only/,
     );
-    expect(evidenceLog(h.repo, "lint-nothing.log")).toMatch(
-      /match no file in the checkout; re-run vtc calibrate/,
-    );
-    expect(lintRan(h.argvs)).toBe(false);
   });
 
   /**
@@ -455,16 +476,19 @@ symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
     expect(check).toMatchObject({
       status: "fail",
       failure_class: "product",
-      tool: { source: "project", tampered: ["packages/app/node_modules/.bin/lint-tool"] },
+      tool: {
+        source: "project",
+        // the planted bin and the script it starts, both new in the checkout (reading 252)
+        tampered: ["packages/app/evil.mjs", "packages/app/node_modules/.bin/lint-tool"],
+      },
     });
     expect(check.findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
     expect(h.argvs.some((a) => a[0] === "npx")).toBe(false);
   });
 
-  it("runs the commit's package script, not one a postinstall rewrote to run something else", async () => {
-    // The lint script ran the installed bin when the tool was hashed; a postinstall rewrites it.
-    // Before the gate the commit's package.json is put back (spine §5 reading 250), so the gate
-    // runs the hashed tool and the rewritten script never runs.
+  it("fails a gate as tampering when a postinstall rewrote the package script it runs (reading 252)", async () => {
+    // The lint script ran the installed bin when the checkout was hashed; a postinstall rewrites
+    // it. A changed file of the checkout's own is tampering: the gate never runs, neither script.
     const pkg = (lint: string): string => JSON.stringify({ name: "app", scripts: { lint } });
     const { report, h } = await viaPath(
       ["npm", "run", "lint"],
@@ -475,9 +499,13 @@ symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
       },
       `import { writeFileSync } from "node:fs";\nwriteFileSync("package.json", ${JSON.stringify(pkg("node evil.mjs"))});\n`,
     );
-    expect(result(report, "check")).toMatchObject({ status: "pass", tool: { tampered: [] } });
-    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(true);
-    expect(evidenceLog(h.repo, "check-configs.log")).toMatch(/package\.json/);
+    expect(result(report, "check")).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { tampered: ["package.json"] },
+    });
+    expect(result(report, "check").findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(false);
   });
 
   /** A package `typecheck` script whose tool always finds an error (exit 1). */
@@ -486,7 +514,7 @@ symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
     "vendor/lint.mjs": "#!/usr/bin/env node\nprocess.exit(1);\n",
   });
 
-  it("runs an L0 gate's package script as the commit has it, though an install script appended || true", async () => {
+  it("fails an L0 gate as tampering when an install script appended || true to its package script", async () => {
     const pkg = JSON.stringify({
       name: "app",
       scripts: { typecheck: "lint-tool out.json || true" },
@@ -496,20 +524,27 @@ symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
       typecheck(),
       `import { writeFileSync } from "node:fs";\nwriteFileSync("package.json", ${JSON.stringify(pkg)});\n`,
     );
-    // the commit's script ran: the tool's error fails the gate
-    expect(result(report, "check")).toMatchObject({ status: "fail", tool: { tampered: [] } });
-    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(true);
-    expect(evidenceLog(h.repo, "check-configs.log")).toMatch(/package\.json/);
+    // a changed package.json is tampering (reading 252): the gate fails and never runs
+    expect(result(report, "check")).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { tampered: ["package.json"] },
+    });
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(false);
   });
 
-  it("runs an L0 gate without the .npmrc script-shell an install script planted", async () => {
+  it("fails an L0 gate as tampering when an install script planted an .npmrc script-shell", async () => {
     const plant = `import { writeFileSync } from "node:fs";
 writeFileSync("x.sh", "#!/bin/sh\\nexit 0\\n", { mode: 0o755 });
 writeFileSync(".npmrc", "script-shell=./x.sh\\n");
 `;
     const { report, h } = await viaPath(["npm", "run", "typecheck"], typecheck(), plant);
-    expect(result(report, "check")).toMatchObject({ status: "fail", tool: { tampered: [] } });
-    expect(evidenceLog(h.repo, "check-configs.log")).toMatch(/\.npmrc/);
+    expect(result(report, "check")).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { tampered: [".npmrc", "x.sh"] },
+    });
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(false);
   });
 
   it("fails a gate whose shim or run script would find a planted node in a .bin on its PATH (reading 249)", async () => {
@@ -841,5 +876,277 @@ writeFileSync("packages/web/node_modules/.bin/node", "#!/bin/sh\\nexit 0\\n");
       failure_class: "product",
       tool: { tampered: ["packages/web/node_modules/.bin/node"] },
     });
+  });
+});
+
+describe("H-14: the whole checkout, diffed (reading 252; the round-7 findings)", () => {
+  const pkg = (name: string, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ name, version: "1.0.0", ...extra });
+  const PASS = "#!/usr/bin/env node\nprocess.exit(0);\n";
+  const STORE = "node_modules/.pnpm";
+  const VITEST = `${STORE}/vitest@1.0.0/node_modules/vitest`;
+  const EXPECT = `${STORE}/@vitest+expect@1.0.0/node_modules/@vitest/expect`;
+  const SITE = ".venv/lib/python3.12/site-packages";
+
+  /**
+   * A pnpm-layout monorepo the fake `npm ci` lays out: vitest in the virtual store with its
+   * dependency @vitest/expect, turbo at the root, packages/app with no bin of its own,
+   * packages/web's jest with ts-jest and a babel preset, and a virtual environment with pytest.
+   */
+  const monorepo = (): Record<string, string> => ({
+    "package.json": pkg("root", { scripts: { test: "turbo run test" } }),
+    "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+    Makefile: "test:\n\t.venv/bin/pytest\n",
+    "packages/app/package.json": pkg("app", { scripts: { test: "vitest run" } }),
+    "packages/web/package.json": pkg("web", {
+      scripts: { test: "jest" },
+      jest: { preset: "ts-jest" },
+    }),
+    "packages/web/babel.config.js": "module.exports = { presets: ['@acme/babel-preset'] };\n",
+    [`vendor/tree/${VITEST}/package.json`]: pkg("vitest", {
+      dependencies: { "@vitest/expect": "1" },
+    }),
+    [`vendor/tree/${VITEST}/vitest.mjs`]: PASS,
+    [`vendor/tree/${EXPECT}/package.json`]: pkg("@vitest/expect"),
+    [`vendor/tree/${EXPECT}/index.js`]:
+      "export const expect = (v) => ({ toBe: (w) => { if (v !== w) throw new Error(); } });\n",
+    "vendor/tree/node_modules/turbo/package.json": pkg("turbo", {
+      bin: { turbo: "bin/turbo.mjs" },
+    }),
+    "vendor/tree/node_modules/turbo/bin/turbo.mjs": PASS,
+    "vendor/tree/packages/web/node_modules/ts-jest/package.json": pkg("ts-jest"),
+    "vendor/tree/packages/web/node_modules/ts-jest/jest-preset.js":
+      "module.exports = { transform: {} };\n",
+    "vendor/tree/packages/web/node_modules/@acme/babel-preset/package.json":
+      pkg("@acme/babel-preset"),
+    "vendor/tree/packages/web/node_modules/@acme/babel-preset/index.js":
+      "module.exports = () => ({ plugins: [] });\n",
+    "vendor/tree/.venv/pyvenv.cfg": "home = /usr/bin\n",
+    "vendor/tree/.venv/bin/pytest": "#!/bin/sh\nexit 0\n",
+    [`vendor/tree/${SITE}/_pytest/assertion/rewrite.py`]: "def rewrite(): ...\n",
+    "vendor/links.json": JSON.stringify([
+      [
+        `${STORE}/vitest@1.0.0/node_modules/@vitest/expect`,
+        "../../../@vitest+expect@1.0.0/node_modules/@vitest/expect",
+      ],
+      ["node_modules/vitest", ".pnpm/vitest@1.0.0/node_modules/vitest"],
+      ["node_modules/.bin/vitest", "../vitest/vitest.mjs"],
+      ["node_modules/.bin/turbo", "../turbo/bin/turbo.mjs"],
+    ]),
+  });
+
+  /** One `check` verify gate running `command` after the fake `npm ci`, with `postinstall`. */
+  const run = async (
+    command: string[],
+    postinstall?: string,
+    files: Record<string, string> = monorepo(),
+    layer: "L0" | "L2" = "L0",
+  ): Promise<{ report: GateReport; h: ReturnType<typeof harness> }> => {
+    const { bin, npm } = fakePackageManagers();
+    // a `make` (and `tox`) that passes: the tool they would run is what the tests swap
+    for (const name of ["make", "tox"]) {
+      writeFile(bin, name, "#!/bin/sh\nexit 0\n");
+      chmodSync(join(bin, name), 0o755);
+    }
+    const h = harness(
+      { "vendor/lint.mjs": LINT, "src/a.ts": "export const a = 1;\n", ...files },
+      config([
+        { id: "install", layer: "L0", phase: "install", command: [npm, "ci"] },
+        { id: "check", layer, command },
+      ]),
+      {
+        allow: [[NODE], [npm], [command[0] ?? ""]],
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      },
+    );
+    if (postinstall !== undefined) writeFile(h.repo, "postinstall.mjs", postinstall);
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    return { report: await h.run({ head: commitAll(h.repo), layers: [layer] }), h };
+  };
+
+  /** A postinstall that writes each `[path, text]`, creating directories on the way. */
+  const writes = (files: [string, string][]): string =>
+    `import { mkdirSync, writeFileSync } from "node:fs";\nimport { dirname } from "node:path";\n${files
+      .map(
+        ([path, text]) =>
+          `mkdirSync(dirname(${JSON.stringify(path)}), { recursive: true });\nwriteFileSync(${JSON.stringify(path)}, ${JSON.stringify(text)}, { mode: 0o755 });`,
+      )
+      .join("\n")}\n`;
+
+  const shapes: { name: string; command: string[]; postinstall: string; tampered: string[] }[] = [
+    {
+      name: "h14-task-runner-tool-unverified: a transitive @vitest/expect, under turbo run test",
+      command: ["node_modules/.bin/turbo", "run", "test"],
+      postinstall: writes([
+        [`${EXPECT}/index.js`, "export const expect = () => ({ toBe() {} });\n"],
+      ]),
+      tampered: [`${EXPECT}/index.js`],
+    },
+    {
+      name: "h14-task-runner-tool-unverified: a transitive @vitest/expect, under pnpm -r test",
+      command: ["pnpm", "-r", "test"],
+      postinstall: writes([
+        [`${EXPECT}/index.js`, "export const expect = () => ({ toBe() {} });\n"],
+      ]),
+      tampered: [`${EXPECT}/index.js`],
+    },
+    {
+      name: "h14-bin-dir-interpreter-hijack: a .bin directory planted in packages/app, under pnpm --filter app test",
+      command: ["pnpm", "--filter", "app", "test"],
+      postinstall: writes([["packages/app/node_modules/.bin/vitest", "#!/bin/sh\nexit 0\n"]]),
+      tampered: ["packages/app/node_modules/.bin/vitest"],
+    },
+    {
+      name: "h14-runtime-derived-tool-misses-lint-plugins: a patched ts-jest and babel preset, under turbo",
+      command: ["node_modules/.bin/turbo", "run", "test"],
+      postinstall: writes([
+        [
+          "packages/web/node_modules/ts-jest/jest-preset.js",
+          "module.exports = { testMatch: [] };\n",
+        ],
+        [
+          "packages/web/node_modules/@acme/babel-preset/index.js",
+          "module.exports = () => ({ plugins: ['strip-expect'] });\n",
+        ],
+      ]),
+      tampered: [
+        "packages/web/node_modules/@acme/babel-preset/index.js",
+        "packages/web/node_modules/ts-jest/jest-preset.js",
+      ],
+    },
+    {
+      name: "h14-task-runner-tool-unverified (Python): a patched _pytest in the venv, under make test",
+      command: ["make", "test"],
+      postinstall: writes([
+        [`${SITE}/_pytest/assertion/rewrite.py`, "def rewrite(): return None\n"],
+      ]),
+      tampered: [`${SITE}/_pytest/assertion/rewrite.py`],
+    },
+    {
+      name: "h14-task-runner-tool-unverified (Python): a planted usercustomize in the venv, under tox",
+      command: ["tox"],
+      postinstall: writes([[`${SITE}/usercustomize.py`, "import builtins\n"]]),
+      tampered: [`${SITE}/usercustomize.py`],
+    },
+  ];
+
+  it.each(shapes)(
+    "$name: passes untouched, and fails when an install script swaps it",
+    async (shape) => {
+      const clean = await run(shape.command);
+      expect(result(clean.report, "check")).toMatchObject({
+        status: "pass",
+        tool: { source: "project", tampered: [] },
+      });
+      expect(clean.h.argvs.some((a) => a.join(" ") === shape.command.join(" "))).toBe(true);
+
+      const { report, h } = await run(shape.command, shape.postinstall);
+      const check = result(report, "check");
+      expect(check).toMatchObject({
+        status: "fail",
+        failure_class: "product",
+        tool: { source: "project", tampered: shape.tampered },
+      });
+      expect(check.findings).toHaveLength(1);
+      expect(check.findings[0]).toMatchObject({
+        rule_id: TOOL_TAMPER_RULE_ID,
+        category: "security",
+      });
+      // the gate never ran
+      expect(h.argvs.some((a) => a.join(" ") === shape.command.join(" "))).toBe(false);
+    },
+  );
+
+  it("h14-run-home-config-injection: a $HOME/.npmrc an install script writes never reaches a verify gate", async () => {
+    // a typecheck whose tool always finds an error; the install script's user-level npmrc would
+    // make every Node process exit 0 (node-options) and every script a no-op (script-shell)
+    const files = {
+      "package.json": pkg("app", { scripts: { typecheck: "lint-tool out.json" } }),
+      "vendor/lint.mjs": "#!/usr/bin/env node\nprocess.exit(1);\n",
+    };
+    const inject = `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+const home = process.env.HOME;
+writeFileSync(join(home, "p.cjs"), "const exit = process.exit; process.exit = () => exit(0);\\n");
+writeFileSync(join(home, "sh"), "#!/bin/sh\\nexit 0\\n", { mode: 0o755 });
+writeFileSync(join(home, ".npmrc"), "node-options=--require=" + join(home, "p.cjs") + "\\nscript-shell=" + join(home, "sh") + "\\n");
+writeFileSync(join(home, ".yarnrc.yml"), "yarnPath: " + join(home, "sh") + "\\n");
+writeFileSync(join(home, ".bunfig.toml"), "preload = [\\"" + join(home, "p.cjs") + "\\"]\\n");
+`;
+    const { report, h } = await run(["npm", "run", "typecheck"], inject, files);
+    // the real tool ran, without the injected config, and its error fails the gate
+    expect(result(report, "check")).toMatchObject({ status: "fail", tool: { tampered: [] } });
+    expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(true);
+    const install = h.specs.find((s) => s.phase === "install");
+    const verify = h.specs.find((s) => s.phase === "verify");
+    expect(verify?.home).toBeDefined();
+    expect(verify?.home).not.toBe(install?.home);
+  });
+
+  /** The fake npm's tree plus esbuild, whose postinstall rebuilds its own binary. */
+  const esbuild = (postinstall: [string, string][]): Record<string, string> => ({
+    "vendor/node_modules/esbuild/package.json": pkg("esbuild", {
+      scripts: { postinstall: "node install.js" },
+      bin: { esbuild: "bin/esbuild" },
+    }),
+    "vendor/node_modules/esbuild/bin/esbuild": "#!/usr/bin/env node\n// the JS fallback\n",
+    "postinstall.mjs": writes(postinstall),
+  });
+
+  it("lets an esbuild-style package rebuild itself in its own directory, with a warning", async () => {
+    const { h } = setup(
+      [explicitLint],
+      esbuild([
+        ["node_modules/esbuild/bin/esbuild", "\u007fELF native"],
+        ["node_modules/esbuild/esbuild.node", "native"],
+      ]),
+    );
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    const lint = result(report, "lint");
+    expect(lint).toMatchObject({ status: "pass", tool: { source: "project", tampered: [] } });
+    expect(lint.tool?.self_rebuilt).toEqual([
+      {
+        package: "node_modules/esbuild",
+        files: ["node_modules/esbuild/bin/esbuild", "node_modules/esbuild/esbuild.node"],
+        file_count: 2,
+      },
+    ]);
+    expect(lintRan(h.argvs)).toBe(true);
+    expect(lint.evidence.map((e) => e.ref)).toContainEqual(
+      expect.stringMatching(/lint-tool\.log$/),
+    );
+    expect(evidenceLog(h.repo, "lint-tool.log")).toMatch(
+      /^WARNING: these packages' own install scripts changed files in their own directory[^]*node_modules\/esbuild: node_modules\/esbuild\/bin\/esbuild, node_modules\/esbuild\/esbuild\.node/,
+    );
+  });
+
+  it("fails every gate when that same package also writes into another package", async () => {
+    const { h } = setup(
+      [explicitLint],
+      esbuild([
+        ["node_modules/esbuild/bin/esbuild", "\u007fELF native"],
+        ["node_modules/lint-tool/lint.mjs", "#!/usr/bin/env node\nprocess.exit(0);\n"],
+      ]),
+    );
+    writeFile(h.repo, "src/a.ts", "export const a = 2; // TODO\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    const lint = result(report, "lint");
+    expect(lint).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: {
+        tampered: ["node_modules/lint-tool/lint.mjs"],
+        self_rebuilt: [
+          {
+            package: "node_modules/esbuild",
+            files: ["node_modules/esbuild/bin/esbuild"],
+            file_count: 1,
+          },
+        ],
+      },
+    });
+    expect(lint.findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
+    expect(lintRan(h.argvs)).toBe(false);
   });
 });

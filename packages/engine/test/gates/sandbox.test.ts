@@ -125,6 +125,25 @@ describe("the macOS sandbox-exec profile", () => {
     expect(rules.filter((r) => r.startsWith("(allow signal"))).toHaveLength(1);
   });
 
+  it("makes the run's dependency caches writable when the jail gives them (reading 252)", () => {
+    const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(["node", "t.mjs"], {
+      ...spec(),
+      deps: "/tmp/vtc-gate-1/deps",
+    } as GateJailSpec);
+    const params = paramsOf(wrapped.args);
+    expect(params.DEPS).toBe("/tmp/vtc-gate-1/deps");
+    const rules = rulesOf(wrapped.args[1] ?? "");
+    expect(rules).toContainEqual(
+      expect.stringMatching(
+        /^\(allow file-read-data .*file-write\* .*\(subpath \(param "DEPS"\)\)\)$/,
+      ),
+    );
+    // without them, no DEPS parameter and nothing more writable
+    expect(
+      paramsOf(createSandboxExecSandbox({ realpath: same }).wrap(["x"], spec()).args).DEPS,
+    ).toBeUndefined();
+  });
+
   it("denies the network in the verify phase except Unix sockets inside the writable directories", () => {
     const wrapped = createSandboxExecSandbox({ realpath: same }).wrap(
       ["node", "test.mjs", "--x"],
@@ -379,6 +398,17 @@ describe("the Linux bwrap argv", () => {
     }
     return out;
   };
+
+  it("binds the run's dependency caches writable, beside the checkout, home and temp dir (reading 252)", () => {
+    const deps = "/tmp/vtc-gate-1/deps";
+    for (const phase of ["install", "verify"] as const) {
+      const args = bwrapArgs(["node", "t.mjs"], { ...spec({ phase }), deps }, fs);
+      expect(pairs(args, "--bind")).toContainEqual([deps, deps]);
+    }
+    expect(pairs(bwrapArgs(["node", "t.mjs"], spec(), fs), "--bind").map(([a]) => a)).not.toContain(
+      deps,
+    );
+  });
 
   it("builds a minimal root: system directories read-only, no host root, no host /tmp, /run or /var", () => {
     const args = bwrapArgs(["node", "t.mjs"], spec(), fs);
@@ -779,18 +809,44 @@ describe("what a gate may read (the read policy)", () => {
 });
 
 describe("the gate environment in the sandbox", () => {
-  it("points HOME and the temp variables at the per-run directories and drops VTC_HOME and caches outside them", () => {
+  it("points HOME, the XDG dirs and the temp variables at the per-run directories and drops VTC_HOME and caches outside them", () => {
     const env = sandboxEnv(
-      { PATH: "/usr/bin", HOME: "/home/u", VTC_HOME: "/home/u/.vtc", GOCACHE: "/home/u/go-cache" },
+      {
+        PATH: "/usr/bin",
+        HOME: "/home/u",
+        VTC_HOME: "/home/u/.vtc",
+        GOCACHE: "/home/u/go-cache",
+        CARGO_HOME: "/home/u/.cargo",
+      },
       { home: "/t/home", tempDir: "/t/tmp-0" },
     );
     expect(env).toEqual({
       PATH: "/usr/bin",
       HOME: "/t/home",
       USERPROFILE: "/t/home",
+      XDG_CONFIG_HOME: "/t/home/.config",
+      XDG_CACHE_HOME: "/t/home/.cache",
+      XDG_DATA_HOME: "/t/home/.local/share",
+      XDG_STATE_HOME: "/t/home/.local/state",
       TMPDIR: "/t/tmp-0",
       TMP: "/t/tmp-0",
       TEMP: "/t/tmp-0",
+    });
+  });
+
+  it("points Go's module cache and Cargo's home at the run's own dependency caches when given", () => {
+    const env = sandboxEnv(
+      { PATH: "/usr/bin", GOMODCACHE: "/home/u/go/pkg/mod", CARGO_HOME: "/home/u/.cargo" },
+      {
+        home: "/t/home-verify",
+        tempDir: "/t/tmp-1",
+        goModCache: "/t/deps/go-mod",
+        cargoHome: "/t/deps/cargo-verify",
+      },
+    );
+    expect(env).toMatchObject({
+      GOMODCACHE: "/t/deps/go-mod",
+      CARGO_HOME: "/t/deps/cargo-verify",
     });
   });
 });
@@ -832,7 +888,8 @@ describe("a jail: per-run home, per-command temp dirs", () => {
       expect(result.code).toBe(0);
     }
     expect(specs.map((s) => s.phase)).toEqual(["install", "verify"]);
-    expect(specs[0]?.home).toBe(specs[1]?.home);
+    // the install phase and the verify phase never share a home (spine §5 reading 252)
+    expect(specs[0]?.home).not.toBe(specs[1]?.home);
     expect(specs[0]?.tempDir).not.toBe(specs[1]?.tempDir);
     expect(specs[0]?.checkout).toBe(realpathSync(checkout));
     expect(specs[0]?.denyRead).toEqual(["/denied"]);
@@ -842,10 +899,72 @@ describe("a jail: per-run home, per-command temp dirs", () => {
     >;
     expect(a).toEqual({ home: specs[0]?.home, tmp: specs[0]?.tempDir, vtc: null, listed: [] });
     expect(jail.ran).toBe(true);
+    const b = JSON.parse(readFileSync(join(checkout, "env-b.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(b).toEqual({ home: specs[1]?.home, tmp: specs[1]?.tempDir, vtc: null, listed: [] });
     const home = specs[0]?.home ?? "";
     expect(existsSync(home)).toBe(true);
     jail.dispose();
     expect(existsSync(home)).toBe(false);
+    expect(existsSync(specs[1]?.home ?? "")).toBe(false);
+  });
+
+  it("gives the verify phase a fresh home and Cargo home, and keeps only the download caches (reading 252)", async () => {
+    const work = tempDir("vtc-jail-");
+    const checkout = join(work, "checkout");
+    mkdirSync(checkout);
+    const { sandbox, specs } = recording();
+    const jail = new GateCommandJail(sandbox, []);
+    // the install phase: user-level config in its home, a Cargo config in its own and in the
+    // verify phase's Cargo home, and a downloaded module in each shared cache
+    const plant = `const fs = require("fs"), p = require("path"), e = process.env;
+fs.writeFileSync(p.join(e.HOME, ".npmrc"), "node-options=--require=/x.cjs\\n");
+fs.mkdirSync(p.join(e.XDG_CONFIG_HOME, "pip"), { recursive: true });
+fs.writeFileSync(p.join(e.CARGO_HOME, "config.toml"), "[build]\\nrustc-wrapper = '/x'\\n");
+fs.mkdirSync(p.join(e.CARGO_HOME, "..", "cargo-verify"), { recursive: true });
+fs.writeFileSync(p.join(e.CARGO_HOME, "..", "cargo-verify", "config.toml"), "planted");
+fs.mkdirSync(p.join(e.GOMODCACHE, "example.com", "m@v1"), { recursive: true });
+fs.writeFileSync(p.join(e.GOMODCACHE, "example.com", "m@v1", "m.go"), "package m");
+fs.mkdirSync(p.join(e.CARGO_HOME, "registry", "src"), { recursive: true });
+fs.writeFileSync(p.join(e.CARGO_HOME, "registry", "src", "crate.rs"), "fn main() {}");`;
+    const look = `const fs = require("fs"), p = require("path"), e = process.env;
+fs.writeFileSync("seen.json", JSON.stringify({
+  home: fs.readdirSync(e.HOME),
+  cargo: fs.readdirSync(e.CARGO_HOME).sort(),
+  module: fs.existsSync(p.join(e.GOMODCACHE, "example.com", "m@v1", "m.go")),
+  crate: fs.existsSync(p.join(e.CARGO_HOME, "registry", "src", "crate.rs")),
+}));`;
+    for (const [phase, script] of [
+      ["install", plant],
+      ["verify", look],
+    ] as const) {
+      const result = await jail.run({
+        phase,
+        checkout,
+        argv: [process.execPath, "-e", script],
+        cwd: checkout,
+        env: sandboxEnvInput(),
+        timeoutMs: 20_000,
+        stdoutPath: join(work, `${phase}.out`),
+        stderrPath: join(work, `${phase}.err`),
+      });
+      expect(result.code, readFileSync(join(work, `${phase}.err`), "utf8")).toBe(0);
+    }
+    expect(JSON.parse(readFileSync(join(checkout, "seen.json"), "utf8"))).toEqual({
+      home: [],
+      cargo: ["git", "registry"],
+      module: true,
+      crate: true,
+    });
+    // the shared caches are writable in both phases; each home only in its own
+    const [install, verify] = specs as GateJailSpec[];
+    expect(install?.deps).toBeDefined();
+    expect(verify?.deps).toBe(install?.deps);
+    expect(verify?.home).not.toBe(install?.home);
+    expect((verify?.home ?? "").startsWith(`${install?.deps ?? ""}/`)).toBe(false);
+    jail.dispose();
   });
 
   it("removes one command's temp directory on request, and nothing outside the run's own", async () => {

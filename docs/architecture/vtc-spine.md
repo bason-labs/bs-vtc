@@ -4321,6 +4321,86 @@ questions. **Lead decision 2026-10-16, pending human review.**
       D-cx's split between the adapter (reading the refusal) and the engine (the retry, the
       fallback record and the refusals file).
 
+**Reading 252 (2026-10-16, H-14 by a full dependency-tree diff).** Reading 251's workspace snapshot
+still chose which files mattered (each bin's own package, the packages a check config names, a
+venv's `bin/`), and the round-7 review found four high bypasses in what it left out: a test
+runner's transitive dependency under a task runner, a `.bin` directory the baseline did not have,
+the packages a test runner loads by name from its config, and user-level config in the run's
+shared `HOME`. **Lead decision 2026-10-16, pending human review.** It replaces the selection parts
+of reading 251 ((1), (2) and (3)); 251(4)–(8) stand.
+
+252.  **H-14 by a full dependency-tree diff, and a verify home of its own** (amends readings 238,
+      250(3) and 251(1)–(3); closes the round-7 findings h14-task-runner-tool-unverified,
+      h14-bin-dir-interpreter-hijack, h14-runtime-derived-tool-misses-lint-plugins and
+      h14-run-home-config-injection). _Lead decision 2026-10-16, pending human review._
+      (1) _Nothing is selected_ (`workspaceTree`): after the scripts-free install, at the moment
+      reading 238 hashes, every file and symbolic link of the checkout is hashed by content (a link
+      as its target, never followed; `.git` never walked): every `node_modules` (`.pnpm`, `.bin`,
+      nested ones), `.yarn` (cache, unplugged) and Yarn's `.pnp.*` files, `__pypackages__`, every
+      Python virtual environment whole (any directory holding `pyvenv.cfg`, site-packages
+      included), and the checkout's own files. When the install phase's scripts have run, the
+      checkout is hashed again from content and diffed (`compareInstall`). Allowed: (a) a change
+      or an addition inside the directory of an installed package whose package.json declared
+      `preinstall`, `install` or `postinstall` (or that has a `binding.gyp`, which npm and pnpm
+      build as its install script) before the scripts ran, and a `.bin` entry that started that
+      package before and still does (pnpm relinks a rebuilt package's bin, checked against the
+      real pnpm 10.11); (b) a file added in the directory of one of the checkout's own packages
+      whose package.json declares an install or `prepare` script (the package managers run those
+      for workspace packages), never in a nested package or dependency tree, never a protected
+      config (`DEFAULT_PROTECTED_GLOBS` and `tests.protected_configs`), never a change to a file
+      that was there; (c) the package manager's own state files (`node_modules/.modules.yaml`,
+      `.pnpm/lock.yaml`, `.package-lock.json` and the like), which pnpm's rebuild rewrites. Each
+      package of (a) and (b) and its files is recorded in `ToolIntegrity.self_rebuilt` (contracts
+      5.11.0, MINOR, additive) and shown as a warning on the gate's report (a `WARNING` log in its
+      evidence) and on the dashboard. Everything else changed, removed or added (another package's
+      files, a new `.bin` entry or directory, a config file of the checkout, a virtual
+      environment's file, a package's own link) is tampering: `TOOL_TAMPER_RULE_ID`, every verify
+      gate fails. A known consequence: a dependency whose install script writes outside its own
+      directory (Prisma's client generator writes `node_modules/.prisma`) now fails every gate; the
+      ways out are reading 238's (a pinned tool, or an install that does not run that script).
+      (2) _Before each verify gate_ the checkout is compared with the snapshot taken when the
+      install phase ended (`compareGate`): any change in a dependency tree, and any change or
+      removal of a file of the checkout's own, fails the gate. Not compared: the tools' own caches
+      (`node_modules/.cache`, `.vite`, `.vitest`, `__pycache__`), the runner's hidden acceptance
+      tests, new files of the checkout's own that are not protected configs (build outputs,
+      reports, coverage), and the files (b) built, which a build gate rebuilds. Between gates a
+      fast path keeps a file's line while its size, modification and change times and inode are
+      unchanged; the baseline and the post-install snapshot are always hashed from content.
+      Reading 250(3)'s put-back of gate-command files stays for what an earlier verify gate
+      changed; an install script's change to them is now tampering. Past `WORKSPACE_HASH_LIMITS`
+      (500,000 entries, 8 GiB) or 200,000 directories at the baseline no verify gate runs
+      (`infra`); a checkout that grows past them later is tampering at the path that crossed them,
+      as before. Install gates with no scripts-free form after the two-pass ones (reading 251(4))
+      run, then the checkout is hashed again and every verify gate is marked `after_scripts`, since
+      what they wrote cannot be told from tampering. _Measured_ (Apple M3 Pro, this repository):
+      a run checkout (a clean export of the head plus its installed `node_modules`, 45,199 entries,
+      1.1 GiB) hashes from content in 1.8 s warm (5.6 s cold), the fast path takes 0.45 s and the
+      diff 15 ms; the developer working tree with its 3.2 GiB local `.turbo` cache (59,973 entries,
+      4.5 GiB) takes 10.9 s, fast path 0.52 s. A run pays two content hashes and one fast pass per
+      verify gate. (3) _A fresh verify home_: the install phase and the verify phase never share
+      `HOME`, the XDG directories (set under each phase's home), `TMPDIR` (already per command) or a
+      tool's config directory: the jail gives the verify phase a new empty home, made when its
+      first command runs in the run's private root, where no install command can write. This
+      closes the user-level `~/.npmrc` (`script-shell`, `node-options`), `~/.yarnrc.yml`,
+      `~/.bunfig.toml` and Python `usercustomize` vectors. What `go mod download` and `cargo fetch`
+      download stays usable: `GOMODCACHE` and Cargo's `registry` and `git` live in the run's
+      dependency caches, writable in both phases, and each phase gets its own `CARGO_HOME` linking
+      to them (the verify phase's made afresh), so Cargo's own config is never shared. A known
+      limit: those download caches are outside the checkout and not hashed, as before. (4) _The
+      command-derived tool is display only_: `deriveProjectTool` and a gate's `tool` paths give
+      `ToolIntegrity.sha256` and nothing else. Stale tool paths and paths that match no file no
+      longer stop a gate (the first is noted in the run's evidence), and the command is not
+      derived again before the gate (anything planted for it to find is in the diff); `hashTool` loses its dependency and distribution
+      closures, and `nodeBinChain`, the check-config package scan and reading 251's
+      `workspaceToolSnapshot` / `workspaceInstallChanges` are removed. `lintPluginPaths` stays for
+      what `vtc calibrate` records. (5) _Tests_ reproduce each finding end to end through the Gate
+      Runner (a patched transitive `@vitest/expect` under `turbo run test` and `pnpm -r test`; a
+      `.bin` planted in `packages/app` under `pnpm --filter app test`; a patched `ts-jest` preset
+      and babel preset; a patched `_pytest` and a planted `usercustomize.py` in a venv under
+      `make test` and `tox`; a `$HOME/.npmrc` with `node-options` and `script-shell`), an
+      esbuild-style self-rebuild that passes with its warning, and the same package also writing
+      into another package, which fails.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review

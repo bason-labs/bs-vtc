@@ -25,8 +25,10 @@
  * (neither tool can filter by registry host, so `WrappedGateCommand.network` says `full`) with the
  * same filesystem rules and no Unix socket outside the writable directories (on macOS DNS goes
  * through mDNSResponder, on Linux through pasta's forwarder); writes only to the checkout, the
- * command's private temp directory and
- * the run's empty `HOME`. Reads follow {@link gateReadPolicy}: the real home and the repo's
+ * command's private temp directory, the phase's empty `HOME` (the install phase and the verify
+ * phase never share one: spine §5 reading 252) and the run's dependency download caches (the Go
+ * module cache and Cargo's registry, which `go mod download` and `cargo fetch` fill for the
+ * verify phase; no tool reads configuration there). Reads follow {@link gateReadPolicy}: the real home and the repo's
  * `.vtc/state` are hidden except the toolchains, the VTC home entries the gates run with, the
  * repo's git directory and the command's own checkout; the deny list (VTC home, host config and
  * credential stores, the repo's evidence) is never readable. The environment is the allowlist of
@@ -55,6 +57,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -315,6 +318,12 @@ export interface GateJailSpec extends GateSandboxSpec {
    * loopback; on Linux the verify phase has a private loopback of its own, so nothing changes.
    */
   readonly loopbackPorts?: readonly number[];
+  /**
+   * The run's dependency download caches (`GOMODCACHE`, Cargo's `registry` and `git`, and each
+   * phase's `CARGO_HOME`), writable in both phases: what `go mod download` and `cargo fetch`
+   * download in the install phase, the verify phase builds from (spine §5 reading 252).
+   */
+  readonly deps?: string;
 }
 
 /** A wrapped command that runs under {@link REAPER_SCRIPT} (see `exec.ts` `ExecRequest.reaper`). */
@@ -333,12 +342,14 @@ const extrasOf = (
   reapSentinel?: string;
   resolvConf?: string;
   loopbackPorts: readonly number[];
+  deps?: string;
 } => {
   const extra = spec as GateJailSpec;
   return {
     hideRead: extra.hideRead ?? [],
     allowRead: extra.allowRead ?? [],
     loopbackPorts: extra.loopbackPorts ?? [],
+    ...(extra.deps === undefined ? {} : { deps: extra.deps }),
     ...(extra.reapSentinel === undefined ? {} : { reapSentinel: extra.reapSentinel }),
     ...(extra.resolvConf === undefined ? {} : { resolvConf: extra.resolvConf }),
   };
@@ -351,7 +362,14 @@ const extrasOf = (
  */
 export const sandboxEnv = (
   env: Readonly<Record<string, string>>,
-  dirs: { readonly home: string; readonly tempDir: string },
+  dirs: {
+    readonly home: string;
+    readonly tempDir: string;
+    /** The run's Go module cache (`GOMODCACHE`), shared by both phases. */
+    readonly goModCache?: string;
+    /** The phase's own `CARGO_HOME`, whose registry is the run's shared one. */
+    readonly cargoHome?: string;
+  },
 ): Record<string, string> => {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -361,9 +379,16 @@ export const sandboxEnv = (
     ...out,
     HOME: dirs.home,
     USERPROFILE: dirs.home,
+    // the tools' user config, data and caches follow the phase's own home (reading 252)
+    XDG_CONFIG_HOME: join(dirs.home, ".config"),
+    XDG_CACHE_HOME: join(dirs.home, ".cache"),
+    XDG_DATA_HOME: join(dirs.home, ".local", "share"),
+    XDG_STATE_HOME: join(dirs.home, ".local", "state"),
     TMPDIR: dirs.tempDir,
     TMP: dirs.tempDir,
     TEMP: dirs.tempDir,
+    ...(dirs.goModCache === undefined ? {} : { GOMODCACHE: dirs.goModCache }),
+    ...(dirs.cargoHome === undefined ? {} : { CARGO_HOME: dirs.cargoHome }),
   };
 };
 
@@ -374,6 +399,7 @@ const checkSpec = (argv: readonly string[], spec: GateSandboxSpec): void => {
     spec.checkout,
     spec.tempDir,
     spec.home,
+    ...(extra.deps === undefined ? [] : [extra.deps]),
     ...spec.denyRead,
     ...extra.hideRead,
     ...extra.allowRead,
@@ -397,7 +423,7 @@ const realOrSelf = (p: string): string => {
   }
 };
 
-/** The `-D` parameters of the writable directories. */
+/** The `-D` parameters of the writable directories (`DEPS` when the spec has {@link GateJailSpec.deps}). */
 const WRITABLE = ["CHECKOUT", "TEMP", "HOME"] as const;
 
 /**
@@ -473,6 +499,7 @@ export const sandboxExecProfile = (
     ["CHECKOUT", resolve(spec.checkout)],
     ["TEMP", resolve(spec.tempDir)],
     ["HOME", resolve(spec.home)],
+    ...(extra.deps === undefined ? [] : [["DEPS", resolve(extra.deps)] as [string, string]]),
   ];
   const keyed = (prefix: string, paths: readonly string[]): string[] => {
     const keys: string[] = [];
@@ -491,13 +518,14 @@ export const sandboxExecProfile = (
   const sentinel = extra.reapSentinel;
   if (sentinel !== undefined) params.push(["SENTINEL", sentinel]);
   const sub = (key: string): string => `(subpath (param "${key}"))`;
-  const writable = WRITABLE.map(sub).join(" ");
+  const writableKeys = [...WRITABLE, ...(extra.deps === undefined ? [] : ["DEPS"])];
+  const writable = writableKeys.map(sub).join(" ");
   const mach = [
     ...GATE_MACH_SERVICES.always,
     ...(spec.phase === "install" ? GATE_MACH_SERVICES.install : []),
   ];
   // One rule per path: a socket filter takes a single path filter, so rules are never combined.
-  const unixSockets = WRITABLE.flatMap((key) => [
+  const unixSockets = writableKeys.flatMap((key) => [
     `(allow network-bind network-inbound (local unix-socket ${sub(key)}))`,
     `(allow network-outbound (remote unix-socket ${sub(key)}))`,
   ]);
@@ -686,7 +714,12 @@ export const bwrapArgs = (
     }
   }
   for (const path of extra.allowRead) readOnly(path);
-  for (const dir of [spec.checkout, spec.home, spec.tempDir]) {
+  for (const dir of [
+    spec.checkout,
+    spec.home,
+    spec.tempDir,
+    ...(extra.deps === undefined ? [] : [extra.deps]),
+  ]) {
     const real = fs.realpath(dir);
     add({ op: "--bind", src: real, dest: real });
   }
@@ -1003,14 +1036,30 @@ export const REAPER_UNCONFIRMED =
   "the gate sandbox's reaper did not confirm that it stopped every process the command left behind (the command may have killed it), so no further gate command runs in this run";
 
 /**
- * The per-run side of the sandbox: one private temp root (mode 0700) holding the run's empty
- * `HOME`, the reaper's sentinel and a fresh temp directory per command, removed by
+ * A phase's `CARGO_HOME` in `deps`, made afresh (whatever was there is removed first: the install
+ * phase can write `deps`): empty but for links to the run's shared `registry` and `git`
+ * downloads, so Cargo's own config (`config.toml`, `credentials.toml`) is never shared between
+ * the phases (spine §5 reading 252).
+ */
+const freshCargoHome = (deps: string, phase: GatePhase): void => {
+  const dir = join(deps, `cargo-${phase}`);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { mode: 0o700 });
+  symlinkSync("../cargo-registry", join(dir, "registry"));
+  symlinkSync("../cargo-git", join(dir, "git"));
+};
+
+/**
+ * The per-run side of the sandbox: one private temp root (mode 0700) holding each phase's empty
+ * `HOME`, the dependency download caches, the reaper's sentinel and a fresh temp directory per
+ * command, removed by
  * {@link dispose}. Wraps and runs each command with the run's read policy; `ran` says whether any
  * command started (a report then names the sandbox).
  */
 export class GateCommandJail {
   private root: string | null = null;
   private home = "";
+  private verifyHome: string | null = null;
   private sentinel = "";
   private resolvConf = "";
   private count = 0;
@@ -1027,8 +1076,12 @@ export class GateCommandJail {
     return this.sandbox.kind;
   }
 
-  /** The run's empty `HOME` (created on first use); writable by every command of the run. */
-  homeDir(): string {
+  /**
+   * The run's private root (created on first use, mode 0700): the install phase's empty `HOME`,
+   * the reaper's sentinel, the install phase's `resolv.conf`, the dependency download caches
+   * (`deps`) and, once the verify phase starts, its own empty `HOME`.
+   */
+  private rootDir(): string {
     if (this.root === null) {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "vtc-gate-")));
       chmodSync(root, 0o700);
@@ -1039,21 +1092,60 @@ export class GateCommandJail {
       writeFileSync(this.sentinel, "", { mode: 0o600 });
       this.resolvConf = join(root, "resolv.conf");
       writeFileSync(this.resolvConf, PASTA_RESOLV_CONF, { mode: 0o644 });
+      const deps = join(root, "deps");
+      for (const dir of ["", "go-mod", "cargo-registry", "cargo-git"]) {
+        mkdirSync(join(deps, dir), { mode: 0o700 });
+      }
+      freshCargoHome(deps, "install");
     }
-    return this.home;
+    return this.root;
   }
 
-  private dirs(): { home: string; tempDir: string } {
-    const home = this.homeDir();
-    const tempDir = join(this.root ?? home, `tmp-${String(this.count)}`);
+  /**
+   * The phase's empty `HOME` (created on first use). The install phase and the verify phase never
+   * share one (spine §5 reading 252): user-level config an install script writes there
+   * (`~/.npmrc` `script-shell` or `node-options`, `~/.yarnrc.yml`, `~/.bunfig.toml`, a Python
+   * `usercustomize.py`, `~/.cargo/config.toml`) never reaches a verify gate. The verify phase's
+   * home is made when its first command runs, in the run's private root, where no install command
+   * can write; its `CARGO_HOME` is made afresh then too.
+   */
+  homeDir(phase: GatePhase = "install"): string {
+    const root = this.rootDir();
+    if (phase === "install") return this.home;
+    if (this.verifyHome === null) {
+      const home = join(root, "home-verify");
+      mkdirSync(home, { mode: 0o700 });
+      freshCargoHome(join(root, "deps"), "verify");
+      this.verifyHome = home;
+    }
+    return this.verifyHome;
+  }
+
+  private dirs(phase: GatePhase): {
+    home: string;
+    tempDir: string;
+    deps: string;
+    goModCache: string;
+    cargoHome: string;
+  } {
+    const home = this.homeDir(phase);
+    const root = this.rootDir();
+    const tempDir = join(root, `tmp-${String(this.count)}`);
     this.count += 1;
     mkdirSync(tempDir, { mode: 0o700 });
-    return { home, tempDir };
+    const deps = join(root, "deps");
+    return {
+      home,
+      tempDir,
+      deps,
+      goModCache: join(deps, "go-mod"),
+      cargoHome: join(deps, `cargo-${phase}`),
+    };
   }
 
   async run(jailed: JailedRequest): Promise<JailedResult> {
     if (this.broken !== null) throw new Error(this.broken);
-    const { home, tempDir } = this.dirs();
+    const { home, tempDir, deps, goModCache, cargoHome } = this.dirs(jailed.phase);
     const { allowRead: extraRead, setup, loopbackPorts, ...rest } = jailed;
     setup?.(tempDir);
     const request = {
@@ -1065,6 +1157,7 @@ export class GateCommandJail {
       checkout: realOrSelf(request.checkout),
       tempDir,
       home,
+      deps,
       denyRead: this.denyRead,
       hideRead: this.read.hideRead ?? [],
       allowRead: [...(this.read.allowRead ?? []), ...(extraRead ?? []).map(realOrSelf)],
@@ -1081,7 +1174,7 @@ export class GateCommandJail {
     const result = await runCommand({
       ...request,
       argv: [wrapped.command, ...wrapped.args],
-      env: sandboxEnv(request.env, { home, tempDir }),
+      env: sandboxEnv(request.env, { home, tempDir, goModCache, cargoHome }),
       ...(reaper ? { reaper: true } : {}),
     });
     if (reaper && result.spawnError === undefined && result.reaped !== true) {

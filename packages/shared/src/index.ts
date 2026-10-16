@@ -341,5 +341,10 @@ export * from "./json-schema.js";
  * install phase's scripts, which every `project` gate is checked against whatever its command;
  * `UserConfig.gates.allow_tools_hashed_after_scripts` has no effect any more (a gate hashed after
  * an install's scripts runs, marked `after_scripts` with a warning). All additive.
+ *
+ * 5.11.0 (MINOR): H-14 by a full dependency-tree diff (spine §5 reading 252).
+ * `ToolIntegrity.self_rebuilt`: the packages whose own install script changed files in their own
+ * directory (allowed, shown as a warning); `workspace_sha256` now covers every file of the
+ * checkout (doc). Additive.
  */
-export const CONTRACTS_VERSION = "5.10.0";
+export const CONTRACTS_VERSION = "5.11.0";
