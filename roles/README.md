@@ -256,14 +256,36 @@ human`, exits `done`, `blocked` or `unknown`, no verdicts, no success criteria a
   checklist for every issue kind. A PR body carries `{{diff}}` right after `{{changes}}`, as the
   shared doc on `AUTO_TEMPLATE_SLOTS` says: the renderer fills it with a prompt PR's fenced diff
   (the first part it drops when a body is too long), and it reads "unavailable" on any other PR.
-- **Start tier and `tier_hint`** (H-9, D-cm, reading 218). The Planner (2.0.0) sees the routing
-  table the engine starts each task's Engineer, QA and reviewers on (`{{routing_table}}`, rendered
-  from `DEFAULT_ROUTING_TABLE`, so a reviewed change to its values reaches the prompt at the next
-  compile), the high-risk tags, and QA author's floor (`QA_AUTHOR_MIN_TIER`). It sets a
+- **Start tier and `tier_hint`** (H-9, D-cm, reading 218; D-cu and D-cv, readings 241 and 242).
+  The Planner (3.0.0) sees the routing table (`{{routing_table}}`, rendered from
+  `DEFAULT_ROUTING_TABLE`, so a reviewed change to its values reaches the prompt at the next
+  compile), the high-risk tags, and QA author's floor (`QA_AUTHOR_MIN_TIER`). Since 3.0.0 it is
+  told the table starts the producers only (the Engineer family and QA author), that reviewers
+  start on their own tier, and that Security verify and the cross-family reviewer start one tier
+  up on a high-risk task (`{{routing_roles}}`), and how each start escalates after failed rounds
+  (`{{tier_escalation}}`: a Low start every round, a Mid or Top start every 2). Both are rendered
+  in `packages/compiler/src/routing.ts` by asking `routedByDifficulty`, `reviewerStartTier` and
+  `escalationSteps` about the per-task runs in `TASK_RUNS`, never from a prose copy. It sets a
   `tier_hint` (`tier`, a `TierHintReason` code, a one-sentence `detail`) only when the table
   clearly misjudges a task; the codes are rendered from `TierHintReasonSchema`, split into raising
   and lowering ones by `TIER_HINT_REASON_DIRECTION` in `packages/compiler/src/routing.ts`, which
   fails the typecheck when a new code is not placed.
+- **The coverage loop** (H-13, reading 237). Before G2 the engine checks that every REQ is named
+  by an AD or a component and every UI REQ is on a screen; a gap re-dispatches the Architect
+  (4.0.0) and, for UI gaps, the Designer (4.0.0) with `TaskPack.coverage_gaps`, which
+  `renderTaskPack` prints as Dispatch lines. Both prompts read those lines by the labels in
+  `COVERAGE_DISPATCH_LINES` (`instructions.ts`, checked against the renderer): each role closes
+  only its own gaps, reads the REQ text in the pack's Requirements section, and never drops a
+  REQ or edits the spec. The Architect writes **Covers** (the REQ-n and SEC-n ids it serves) on
+  every AD, since an AD naming a REQ counts as coverage, and follows the human's
+  `instruct_architect` answer when the loop parked.
+- **Flows** (D-ct, reading 247(7)). The Designer (4.0.0) writes `.vtc/design/flows.yaml`
+  (`DESIGN_FLOWS_PATH`, `DesignFlowsFileSchema`) beside `screens.yaml`: one flow per key user
+  journey with `id`, `start`, `screens`, `paths` and at most `FLOW_LIMITS.maxSteps` steps of
+  the `FlowStep` actions, with `fill` values only from named `fixtures` (never secrets) and no
+  script. The prompt's example file is parsed with the shared schema in the repo test. The
+  Designer's `write_paths` (`.vtc/design/**`) already cover the file, so `role.yaml`'s contract
+  (and the engine's fixture) are unchanged.
 - **Missing capabilities** (D-cs, reading 221). `_shared/result-protocol.md` tells every role that
   asks a question to add `missing_capability` (`slug`, `reason`) only when what blocks it is a
   capability it lacks (a tool, an engine fetcher, a runner); no role prompt repeats it. The Lead

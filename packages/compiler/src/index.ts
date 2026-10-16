@@ -14,8 +14,13 @@ export * from "./instructions.js";
 export {
   renderHighRiskTags,
   renderRoutingTable,
+  renderStartRoles,
+  renderTierEscalation,
+  TASK_RUNS,
   TIER_HINT_REASON_DIRECTION,
   tierHintReasons,
+  type StartRules,
+  type TaskRun,
 } from "./routing.js";
 export * from "./advisors.js";
 export * from "./compile.js";
