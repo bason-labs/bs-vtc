@@ -13,7 +13,10 @@ export const tempDir = (prefix = "vtc-test-"): string => {
 };
 
 export const cleanupDirs = (): void => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // Retries: a git child of the test can still be writing into `.git` while the directory goes
+  // (ENOTEMPTY on a loaded CI runner); Node retries those with a backoff.
+  for (const dir of dirs.splice(0))
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 };
 
 const ENV = {
