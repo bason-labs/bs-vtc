@@ -804,7 +804,9 @@ writeFileSync(".npmrc", "script-shell=./x.sh\\n");
       tool: { tampered: ["node_modules/lint-tool/big.bin"] },
     });
     expect(result(report, "lint").findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
-  });
+    // The workspace snapshot reads the 1 GiB sparse file in full (twice) by design, which takes
+    // about 6 s on a GitHub runner, so this one test gets its own budget.
+  }, 30_000);
 });
 
 describe("H-14: a pinned tool runs from VTC's store", () => {
