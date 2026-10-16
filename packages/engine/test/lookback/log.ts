@@ -134,6 +134,8 @@ export class RunLog {
         trial: number;
         /** A tier replay's arm tier (`ReplayTrialRef.tier`, 5.7.0). */
         tier?: "low" | "mid" | "top";
+        /** The grader bundle the trial is graded under (`ReplayTrialRef.grader_bundle_sha`, 5.8.0). */
+        grader_bundle_sha?: string;
       };
     } = {},
   ): string {

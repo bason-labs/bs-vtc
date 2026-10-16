@@ -710,6 +710,95 @@ describe(
         "limit.hit",
       );
     });
+    // H-12 for runs with no task (reading 236; contracts 5.8.0 `budget_usd` on the closing events):
+    // an advisor's unpriced run spends the advisor budget at the ceiling, and a front-half run's
+    // failure carries what it counts on its own event
+    it.each([
+      [
+        "submitted",
+        (action_id: string) => ({
+          kind: "result",
+          action_id,
+          result: { role: "advisor_estimator", summary: "estimate", exit: "done" },
+          usage: { model: "gpt-unknown-9", tokens: TOKENS, cost_usd: null },
+        }),
+      ],
+      [
+        "failed",
+        (action_id: string) => ({
+          kind: "failure",
+          action_id,
+          outcome: {
+            kind: "error",
+            message: "x",
+            retryable: false,
+            tokens: TOKENS,
+            cost_usd: null,
+          },
+        }),
+      ],
+      [
+        "limit-hit",
+        (action_id: string) => ({
+          kind: "failure",
+          action_id,
+          outcome: { ...LIMIT, tokens: TOKENS, cost_usd: null },
+        }),
+      ],
+    ])(
+      "an unpriced %s advisor run spends the advisor budget at the price ceiling (H-12)",
+      async (_closedAs, input) => {
+        const h = createHarness({
+          prices: { "gpt-test": PRICE },
+          project: { budgets: { advisor_usd: 0.15 } },
+        });
+        await start(h);
+        const { action } = await h.engine.consult(
+          { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
+          CLAUDE,
+        );
+        await h.engine.submit(SubmitInputSchema.parse(input(action.action_id)), CLAUDE);
+        await h.engine.settle();
+        expect(h.engine.states().at(-1)?.roleRuns.get(action.action_id)).toMatchObject({
+          costUsd: null,
+          budgetUsd: 0.31,
+        });
+        await expect(
+          h.engine.consult(
+            { advisor: "advisor_estimator", question: "Again?", inputs: [] },
+            CLAUDE,
+          ),
+        ).rejects.toThrow(/advisor budget is spent \(\$0\.31 of \$0\.15/);
+        await h.release();
+      },
+    );
+    it("a task-less unpriced run's failure carries its ceiling amount, so the run counts it (H-12)", async () => {
+      const h = createHarness({ prices: { "gpt-test": PRICE } });
+      await start(h, CLAUDE);
+      const carto = only(await next(h, CLAUDE), "repo_cartographer");
+      await h.engine.submit(
+        SubmitInputSchema.parse({
+          kind: "failure",
+          action_id: carto.action_id,
+          outcome: {
+            kind: "error",
+            message: "x",
+            retryable: false,
+            tokens: TOKENS,
+            cost_usd: null,
+          },
+        }),
+        CLAUDE,
+      );
+      const failed = events(h).findLast((e) => e.type === "role.failed");
+      expect(failed?.cost_usd ?? null).toBeNull();
+      expect(failed?.data).toMatchObject({ budget_usd: 0.31 });
+      expect(h.engine.states().at(-1)?.roleRuns.get(carto.action_id)).toMatchObject({
+        costUsd: null,
+        budgetUsd: 0.31,
+      });
+      await h.release();
+    });
     it("a limit-hit advisor run's reported cost spends the advisor budget", async () => {
       const h = createHarness({ project: { budgets: { advisor_usd: 0.15 } } });
       await start(h);

@@ -45,6 +45,8 @@ export const recordLimit = (
   h: RunHandle,
   run: RoleRunRecord,
   outcome: Extract<HostFailureOutcome, { kind: "limit" }>,
+  /** What the run counts toward the budgets (H-12; `null` when nothing is known). */
+  budgetUsd: number | null = null,
 ): void => {
   const at = resumeAt(k, outcome.resets_at);
   k.emit(h, {
@@ -63,6 +65,8 @@ export const recordLimit = (
       session_ref: outcome.session_ref,
       pending_action_ids: [run.action_id],
       auto_resume_at: at,
+      // H-12 (reading 249): an unknown cost counted at the host's price ceiling, on the event
+      ...(budgetUsd === null || budgetUsd === outcome.cost_usd ? {} : { budget_usd: budgetUsd }),
     },
   });
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);

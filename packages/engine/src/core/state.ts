@@ -118,9 +118,10 @@ export interface RoleRunRecord {
    * What the run counts toward the budgets (H-12, spine §5 reading 236): `cost_usd`, or for a
    * run whose model has no known price `role.submitted.budget_usd` (its tokens at the host's price
    * ceiling), or for a task's rejected, failed or limit-hit run the engine's spend that followed
-   * its close ({@link RunState.unpricedCloses}); `null` when nothing is known. Known limit until
-   * the contract carries `budget_usd` on those events too: a task-less run closed so before any
-   * feature exists has no spend event to read and counts 0 in `runBudget`.
+   * its close ({@link RunState.unpricedCloses}); `null` when nothing is known. Since contracts
+   * 5.8.0 (reading 249) those closing events carry `budget_usd` themselves, so a task-less run
+   * (an advisor, the front half) counts too; the inference from the following spend stays for
+   * logs written before 5.8.0.
    */
   budgetUsd: number | null;
   rejection?: { reason: string; issues: string[] };
@@ -505,7 +506,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.rejection = { reason: data.reason, issues: data.issues };
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
-      run.budgetUsd = run.costUsd;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
       noteUnpricedClose(state, run);
     }
   } else if (isEventOfType(event, "headless.ended")) {
@@ -536,7 +537,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "failed";
       run.closedSeq = event.seq;
       run.costUsd = event.cost_usd ?? null;
-      run.budgetUsd = run.costUsd;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
       noteUnpricedClose(state, run);
       if (
         data.message.startsWith(SUPERSEDED_RUN_PREFIX) ||
@@ -641,6 +642,9 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
         if (event.cost_usd !== undefined) {
           run.costUsd = event.cost_usd;
           run.budgetUsd = event.cost_usd;
+        } else if (data.budget_usd !== undefined && data.pending_action_ids.length === 1) {
+          // H-12 (reading 249): the ceiling amount of the one run the hit closed
+          run.budgetUsd = data.budget_usd;
         }
         noteUnpricedClose(state, run);
       }

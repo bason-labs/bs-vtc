@@ -21,7 +21,7 @@ afterEach(cleanupDirs);
  * dependency's lifecycle script would.
  */
 const FAKE_NPM = `#!/usr/bin/env node
-const { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
+const { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 if (args[0] !== "ci") process.exit(2);
@@ -32,6 +32,7 @@ chmodSync("node_modules/lint-tool/lint.mjs", 0o755);
 writeFileSync("node_modules/lint-tool/package.json", JSON.stringify({ name: "lint-tool", bin: { "lint-tool": "lint.mjs" } }));
 mkdirSync("node_modules/.bin", { recursive: true });
 symlinkSync("../lint-tool/lint.mjs", "node_modules/.bin/lint-tool");
+if (existsSync("vendor/node_modules")) cpSync("vendor/node_modules", "node_modules", { recursive: true });
 if (!args.includes("--ignore-scripts") && existsSync("postinstall.mjs")) {
   const r = spawnSync(process.execPath, ["postinstall.mjs"], { stdio: "inherit" });
   process.exit(r.status ?? 1);
@@ -209,7 +210,11 @@ describe("H-14: a project check tool is hashed after a scripts-free install", ()
     const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
     expect(h.argvs.filter((a) => a.includes("tools/install.mjs")).length).toBeGreaterThan(0);
     expect(result(report, "deps").status).toBe("pass");
-    expect(result(report, "lint")).toMatchObject({ status: "fail", tool: { tampered: [] } });
+    // hashed after an install's scripts ran: the result says so (contracts 5.8.0, reading 249)
+    expect(result(report, "lint")).toMatchObject({
+      status: "fail",
+      tool: { tampered: [], baseline: "after_scripts" },
+    });
     const log = evidenceLog(h.repo, "_tool-integrity.log");
     expect(log).toMatch(/deps have no scripts-free form/);
     expect(log).not.toMatch(/first found/);
@@ -359,6 +364,67 @@ symlinkSync("../../evil.mjs", "packages/app/node_modules/.bin/lint-tool");
       /no longer runs the tool hashed after the scripts-free install \(node_modules\/\.bin\/lint-tool, node_modules\/lint-tool\/\*\*\)/,
     );
     expect(h.argvs.some((a) => a[0] === "npm" && a[1] === "run")).toBe(false);
+  });
+
+  it("fails a gate whose shim or run script would find a planted node in a .bin on its PATH (reading 249)", async () => {
+    const derived = {
+      id: "lint",
+      layer: "L1" as const,
+      command: ["node_modules/.bin/lint-tool", REPORT, "{changed}"],
+      report: { format: "json" as const, path: REPORT },
+    };
+    const { h } = setup([derived], {
+      // the second pass's script plants an interpreter beside the bins: no tool file changes
+      "postinstall.mjs":
+        'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/.bin/node", "#!/bin/sh\\nexit 0\\n", { mode: 0o755 });\n',
+    });
+    writeFile(h.repo, "src/a.ts", "export const a = 2; // TODO\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    const lint = result(report, "lint");
+    expect(lint).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: { source: "project", tampered: ["node_modules/.bin/node"] },
+    });
+    expect(lint.findings[0]?.rule_id).toBe(TOOL_TAMPER_RULE_ID);
+    expect(lintRan(h.argvs)).toBe(false);
+  });
+
+  it("hashes the lint config's plugins with a lint gate's tool even when gates.yml names none (reading 249)", async () => {
+    const derived = {
+      id: "lint",
+      layer: "L1" as const,
+      command: ["node_modules/.bin/lint-tool", REPORT, "{changed}"],
+      report: { format: "json" as const, path: REPORT },
+    };
+    const files = {
+      "package.json": JSON.stringify({ devDependencies: { "eslint-plugin-strict": "1.0.0" } }),
+      "eslint.config.js": 'import globals from "globals";\nexport default [];\n',
+      "vendor/node_modules/eslint-plugin-strict/package.json": '{"name":"eslint-plugin-strict"}',
+      "vendor/node_modules/eslint-plugin-strict/index.js": "export const rules = { all: 1 };\n",
+      "vendor/node_modules/globals/package.json": '{"name":"globals"}',
+      "vendor/node_modules/globals/index.js": "export default {};\n",
+    };
+    const clean = setup([derived], files);
+    writeFile(clean.h.repo, "src/a.ts", "export const a = 2;\n");
+    const ok = await clean.h.run({ head: commitAll(clean.h.repo), layers: ["L1"] });
+    expect(result(ok, "lint")).toMatchObject({ status: "pass", tool: { tampered: [] } });
+
+    // an install script turns the plugin's rules off and edits what the config imports
+    const { h } = setup([derived], {
+      ...files,
+      "postinstall.mjs":
+        'import { writeFileSync } from "node:fs";\nwriteFileSync("node_modules/eslint-plugin-strict/index.js", "export const rules = {};\\n");\nwriteFileSync("node_modules/globals/index.js", "export default { x: 1 };\\n");\n',
+    });
+    writeFile(h.repo, "src/a.ts", "export const a = 2;\n");
+    const report = await h.run({ head: commitAll(h.repo), layers: ["L1"] });
+    expect(result(report, "lint")).toMatchObject({
+      status: "fail",
+      failure_class: "product",
+      tool: {
+        tampered: ["node_modules/eslint-plugin-strict/index.js", "node_modules/globals/index.js"],
+      },
+    });
   });
 
   it("fails a tool grown past the hash limits since the hash as tampering, not infrastructure", async () => {

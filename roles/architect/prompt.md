@@ -68,7 +68,10 @@ does, by the steps above. Never drop a requirement, and never edit the specifica
 gap: a requirement the architecture cannot meet is a `spec_conflict`. The other lines
 (`{{coverage_ui_reqs_line}}` and the rest) are for the design, not for you. When the pack's Human
 answer reads `{{instruct_architect_option}}: <text>`, the text is the human's instruction for
-closing the gaps: follow it.
+closing the gaps: follow it. Then return every artifact of your previous result again, with the
+same types and paths, not only the files you changed: the engine checks your latest result only,
+so name the architecture document with its requirement-to-component map and every other
+architecture artifact again.
 
 On a per-task call: `extends` gets a one-page `design_note` (what changes, which decisions apply,
 interfaces touched); `changes` gets an `adr` artifact in the skill's ADR template

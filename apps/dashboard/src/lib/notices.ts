@@ -14,6 +14,7 @@ import { AUTO_KIND_LABELS, PARTIAL_EVIDENCE_REASONS, SKIP_REASONS } from "./auto
 import { eventData, webUrl } from "./events";
 import { formatGateDuration } from "./gates";
 import { headlessOutcomeMeta, PREFLIGHT_CHECKS, PREFLIGHT_PURPOSES } from "./headless";
+import { refusedFallbacks } from "./role-run-notes";
 import { AUTO_MERGE_DISABLED, PREFLIGHT_FIXES } from "./level3";
 import { withoutReplayTrials } from "./replay-trials";
 import type { Tone } from "./states";
@@ -390,10 +391,26 @@ const body = (event: VtcEvent): NoticeBody | null => {
 };
 
 /** The notice an event makes, or `null` (other types, or a payload this version cannot read). */
-export const noticeForEvent = (event: VtcEvent): RunNotice | null => {
+export const noticeForEvent = (event: VtcEvent): RunNotice | null => noticeIn(event, new Set());
+
+/**
+ * {@link noticeForEvent} in its log: `refusedAgain` holds the action ids whose fallback dispatch
+ * the host refused too (`refusedFallbacks`, D-cx).
+ */
+const noticeIn = (event: VtcEvent, refusedAgain: ReadonlySet<string>): RunNotice | null => {
   let made: NoticeBody | null;
   try {
     made = body(event);
+    const ended = eventData(event, "headless.ended");
+    if (made !== null && ended !== null && refusedAgain.has(ended.action_id)) {
+      // reading 244: the default refused too is an ordinary error, and nothing follows it
+      const meta = headlessOutcomeMeta(ended, true);
+      made = {
+        ...made,
+        tone: meta.tone,
+        title: `Headless ${event.role ?? "role"} run ${ended.action_id} ended: ${meta.label}`,
+      };
+    }
   } catch {
     return null;
   }
@@ -466,9 +483,10 @@ const foldKey = (event: VtcEvent): string | null => {
 export const runNotices = (events: readonly VtcEvent[], feature?: string): RunNotice[] => {
   const notices: RunNotice[] = [];
   const folded = new Map<string, number>();
+  const refusedAgain = refusedFallbacks(events);
   for (const event of events) {
     if (feature !== undefined && event.feature !== feature) continue;
-    const notice = noticeForEvent(event);
+    const notice = noticeIn(event, refusedAgain);
     if (notice === null) continue;
     const resolved = events.some((later) => resolves(event, notice, later));
     const key = foldKey(event);

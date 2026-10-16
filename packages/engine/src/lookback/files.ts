@@ -128,6 +128,15 @@ export const writeRepoFileAtomic = async (
   relPath: string,
   data: string,
 ): Promise<void> => {
+  await writeAtomic(await repoFilePath(projectRoot, relPath), data);
+};
+
+/**
+ * The absolute path of the repo-tracked Lookback file at `relPath`, once every directory between
+ * `projectRoot` and it exists as a real directory of the repo: each is created if missing and must
+ * otherwise be a directory, never a symbolic link. Throws when one is not.
+ */
+const repoFilePath = async (projectRoot: string, relPath: string): Promise<string> => {
   const parts = relPath.split(/[\\/]/).filter((p) => p !== "" && p !== ".");
   if (parts.length === 0 || parts.includes(".."))
     throw new Error(`${relPath} is not a path inside the repo`);
@@ -147,7 +156,44 @@ export const writeRepoFileAtomic = async (
     if (info.isSymbolicLink() || !info.isDirectory())
       throw new Error(`${dir} is not a directory of the repo (a symbolic link or a file)`);
   }
-  await writeAtomic(join(projectRoot, ...parts), data);
+  return join(projectRoot, ...parts);
+};
+
+/**
+ * {@link appendJsonLines} for a repo-tracked Lookback log at `relPath` under `projectRoot` (spine
+ * §5 reading 249): the directories on the way as {@link writeRepoFileAtomic} checks them, and the
+ * file opened for appending without following a link (`O_NOFOLLOW`, never blocking on a FIFO) and
+ * checked to be a regular file before anything is written, so a repo that commits a link there
+ * (to a user's shell profile, say) never has engine lines appended outside the repo. Throws,
+ * writing nothing, when the file or a directory on the way is not the repo's own.
+ */
+export const appendRepoJsonLines = async (
+  projectRoot: string,
+  relPath: string,
+  values: readonly unknown[],
+): Promise<void> => {
+  if (values.length === 0) return;
+  const path = await repoFilePath(projectRoot, relPath);
+  const refused = (): Error => new Error(`${path} is not a regular file of the repo`);
+  let handle;
+  try {
+    handle = await open(
+      path,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NO_FOLLOW | NON_BLOCK,
+      0o644,
+    );
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ELOOP") throw refused();
+    throw error;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) throw refused();
+    // a link where the platform has no O_NOFOLLOW: the lstat stands alone
+    if ((await lstat(path)).isSymbolicLink()) throw refused();
+    await handle.write(values.map((v) => `${JSON.stringify(v)}\n`).join(""));
+  } finally {
+    await handle.close();
+  }
 };
 
 /**

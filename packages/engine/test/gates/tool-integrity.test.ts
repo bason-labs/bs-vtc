@@ -11,6 +11,8 @@ import {
   changedToolFiles,
   deriveProjectTool,
   hashTool,
+  lintPluginPaths,
+  nodeBinChain,
   scriptsFreeInstall,
   TOOL_HASH_LIMITS,
   ToolHashLimitError,
@@ -293,6 +295,8 @@ describe("hashTool: a tool's dependencies are part of it", () => {
       `${site}/pytest-8.3.0.dist-info/entry_points.txt`,
       `${site}/pytest/__init__.py`,
       `${site}/startup.pth`,
+      // the settings the script's interpreter reads (reading 249)
+      ".venv/pyvenv.cfg",
     ]);
     put(root, `${site}/pluggy/_hooks.py`, "planted");
     expect(changedToolFiles(before, hashTool(root, [".venv/bin/pytest"]))).toEqual([
@@ -500,6 +504,24 @@ describe("deriveProjectTool: the resolved executable and its package", () => {
     ]);
   });
 
+  it("takes a shim's script, never the `$basedir/node` interpreter it prefers (reading 249)", () => {
+    const root = tempDir();
+    put(root, "node_modules/eslint/package.json", JSON.stringify({ name: "eslint" }));
+    put(root, "node_modules/eslint/bin/eslint.js", "lint");
+    // the shim pnpm and cmd-shim write: `$basedir/node` first when it exists
+    put(
+      root,
+      "node_modules/.bin/eslint",
+      '#!/bin/sh\nbasedir=$(dirname "$(echo "$0" | sed -e \'s,\\\\,/,g\')")\nif [ -x "$basedir/node" ]; then\n  exec "$basedir/node"  "$basedir/../eslint/bin/eslint.js" "$@"\nelse\n  exec node  "$basedir/../eslint/bin/eslint.js" "$@"\nfi\n',
+      0o755,
+    );
+    const paths = ["node_modules/.bin/eslint", "node_modules/eslint/**"];
+    expect(deriveProjectTool(root, "", ["pnpm", "exec", "eslint", "."])?.paths).toEqual(paths);
+    // a planted interpreter beside the shim does not shrink the derived tool to the shim alone
+    put(root, "node_modules/.bin/node", "#!/bin/sh\nexit 0\n", 0o755);
+    expect(deriveProjectTool(root, "", ["pnpm", "exec", "eslint", "."])?.paths).toEqual(paths);
+  });
+
   it("resolves from the gate's working directory up to the checkout", () => {
     const root = nodeProject();
     mkdirSync(join(root, "web"));
@@ -576,5 +598,83 @@ describe("deriveProjectTool: the resolved executable and its package", () => {
     // A link out of the checkout is not the project's tool.
     link(root, "node_modules/.bin/outside", "/usr/bin/true");
     expect(deriveProjectTool(root, "", ["npx", "outside"])).toBeNull();
+  });
+});
+
+describe("nodeBinChain: the node_modules/.bin directories a Node tool runs with (reading 249)", () => {
+  it("lists each directory's .bin from the gate's cwd up to the checkout, nearest first", () => {
+    const root = tempDir();
+    mkdirSync(join(root, "packages/web"), { recursive: true });
+    expect(nodeBinChain(root, "packages/web")).toEqual([
+      "packages/web/node_modules/.bin/**",
+      "packages/node_modules/.bin/**",
+      "node_modules/.bin/**",
+    ]);
+    expect(nodeBinChain(root, "")).toEqual(["node_modules/.bin/**"]);
+  });
+
+  it("hashes the interpreter and shell tools a run script would find there first", () => {
+    const root = tempDir();
+    put(root, "node_modules/eslint/package.json", JSON.stringify({ name: "eslint" }));
+    put(root, "node_modules/eslint/bin/eslint.js", "lint");
+    link(root, "node_modules/.bin/eslint", "../eslint/bin/eslint.js");
+    const globs = ["node_modules/.bin/eslint", "node_modules/eslint/**", ...nodeBinChain(root, "")];
+    const before = hashTool(root, globs);
+    put(root, "node_modules/.bin/node", "#!/bin/sh\nexit 0\n", 0o755);
+    put(root, "node_modules/.bin/dirname", "#!/bin/sh\nexit 0\n", 0o755);
+    expect(changedToolFiles(before, hashTool(root, globs))).toEqual([
+      "node_modules/.bin/dirname",
+      "node_modules/.bin/node",
+    ]);
+  });
+});
+
+describe("hashTool: a virtual environment's interpreter is part of its scripts (reading 249)", () => {
+  it("hashes pyvenv.cfg and every bin/python* entry, so a replaced interpreter is tampering", () => {
+    const root = tempDir();
+    put(root, ".venv/pyvenv.cfg", "home = /usr/bin\ninclude-system-site-packages = false\n");
+    link(root, ".venv/bin/python", "python3.12");
+    link(root, ".venv/bin/python3.12", "/usr/bin/python3.12");
+    put(root, ".venv/bin/pytest", "#!/x/.venv/bin/python\nfrom pytest import console_main\n");
+    put(root, ".venv/bin/activate", "unrelated");
+    const before = hashTool(root, [".venv/bin/pytest"]);
+    expect([...before.files.keys()]).toEqual([
+      ".venv/bin/pytest",
+      ".venv/bin/python",
+      ".venv/bin/python3.12",
+      ".venv/pyvenv.cfg",
+    ]);
+    rmSync(join(root, ".venv/bin/python"));
+    put(root, ".venv/bin/python", "#!/bin/sh\nexit 0\n", 0o755);
+    put(root, ".venv/pyvenv.cfg", "home = /usr/bin\ninclude-system-site-packages = true\n");
+    expect(changedToolFiles(before, hashTool(root, [".venv/bin/pytest"]))).toEqual([
+      ".venv/bin/python",
+      ".venv/pyvenv.cfg",
+    ]);
+  });
+});
+
+describe("lintPluginPaths: what a lint config loads besides ESLint (reading 249)", () => {
+  it("adds the packages the lint config imports and the plugins the package.json lists", () => {
+    const root = tempDir();
+    put(
+      root,
+      "package.json",
+      JSON.stringify({ devDependencies: { "eslint-plugin-x": "1", "@eslint/js": "1", left: "1" } }),
+    );
+    put(
+      root,
+      "eslint.config.mjs",
+      'import js from "@eslint/js";\nimport globals from "globals";\nimport sub from "pkg-a/sub";\nimport local from "./local.js";\nconst r = require("@scope/cfg/x");\nexport default [];\n',
+    );
+    for (const pkg of ["eslint-plugin-x", "@eslint/js", "globals", "pkg-a", "@scope/cfg", "left"])
+      put(root, `node_modules/${pkg}/package.json`, JSON.stringify({ name: pkg }));
+    expect(lintPluginPaths(root, "").sort()).toEqual([
+      "node_modules/@eslint/js/**",
+      "node_modules/@scope/cfg/**",
+      "node_modules/eslint-plugin-x/**",
+      "node_modules/globals/**",
+      "node_modules/pkg-a/**",
+    ]);
   });
 });

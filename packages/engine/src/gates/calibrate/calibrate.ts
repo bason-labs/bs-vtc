@@ -15,7 +15,7 @@
  * tool installed in the working tree, which the Gate Runner verifies by content hash at each run.
  * The confirmed commands include the second pass of each two-pass install (`scriptsFreeInstall`).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   GATE_SANDBOX,
@@ -42,7 +42,13 @@ import { downloadOsvDatabase, osvDatabaseDir, osvDatabaseReady } from "../osv-db
 import { runWithConfig } from "../runner.js";
 import { detectGateSandbox, resolveGateSandbox } from "../sandbox.js";
 import { createScannerStore, type ScannerStore } from "../scanners.js";
-import { deriveProjectTool, scriptsFreeInstall } from "../tool-integrity.js";
+import {
+  deriveProjectTool,
+  lintPluginPaths,
+  scriptsFreeInstall,
+  toolPathsCover,
+  toolPathsExist,
+} from "../tool-integrity.js";
 import { appLoopbackPort } from "../visual/app.js";
 import { allowlistPrefix, detectToolchain, detectVisualApp, type ProposedGate } from "./detect.js";
 
@@ -120,7 +126,9 @@ export const visualAppQuestion = (app: Pick<VisualApp, "command" | "url">): stri
  * a file of the repository) gets the `project` tool `deriveProjectTool` finds, which the Gate
  * Runner then verifies by content hash at every run; a package script's gate gets the tools its
  * commands run (`pnpm typecheck` running `tsc`). A pinned scanner always runs from the store and
- * needs none; a gate that already names its tool keeps it. A gate with no tool found here (a
+ * needs none; a gate that already names its tool keeps it while that tool still covers what the
+ * command runs and names something in the working tree, and gets the derived one otherwise
+ * (`refreshed`, reading 249). A gate with no tool found here (a
  * script that runs nothing installed, a tool outside the repository, or one not installed in the
  * working tree) gets none, and each run derives one from its command when it can. A Node lint
  * gate's tool also gets the ESLint plugins, configs and parsers its package.json names (see
@@ -130,56 +138,43 @@ export const withCheckTools = (
   repoRoot: string,
   gates: readonly ProposedGate[],
   scanners: readonly string[],
-): { readonly gates: ProposedGate[]; readonly recorded: string[]; readonly none: string[] } => {
+): {
+  readonly gates: ProposedGate[];
+  readonly recorded: string[];
+  readonly none: string[];
+  readonly refreshed: string[];
+} => {
   const recorded: string[] = [];
   const none: string[] = [];
+  const refreshed: string[] = [];
   const out = gates.map((gate) => {
-    if (gate.phase === "install" || gate.tool !== undefined) return gate;
+    if (gate.phase === "install" || gate.tool?.source === "pinned") return gate;
     if (scanners.includes(gate.command[0] ?? "")) return gate;
     const tool = deriveProjectTool(repoRoot, gate.cwd ?? "", gate.command);
-    if (tool === null) {
+    if (gate.tool !== undefined) {
+      // reading 249: a recorded tool is kept while it still covers what the command runs and
+      // names something in the checkout; a stale one (a pnpm store path from before a version
+      // bump, say) is derived again, since the runner refuses to run a gate with it
+      const recordedPaths = gate.tool.paths;
+      const stale =
+        tool !== null &&
+        (tool.paths.some((p) => !toolPathsCover(recordedPaths, p)) ||
+          !toolPathsExist(repoRoot, recordedPaths));
+      if (!stale) return gate;
+      refreshed.push(gate.id);
+    } else if (tool === null) {
       none.push(gate.id);
       return gate;
+    } else {
+      recorded.push(gate.id);
     }
-    recorded.push(gate.id);
     const plugins =
       gate.layer === "L1" && tool.paths.some((p) => p.includes("node_modules/"))
         ? lintPluginPaths(repoRoot, gate.cwd ?? "").filter((p) => !tool.paths.includes(p))
         : [];
     return { ...gate, tool: { ...tool, paths: [...tool.paths, ...plugins].slice(0, 50) } };
   });
-  return { gates: out, recorded, none };
-};
-
-/** ESLint plugins, shareable configs and parsers, by package name. */
-const ESLINT_EXTENSION =
-  /^(eslint-(plugin|config)-[\w.-]+|@[\w.-]+\/eslint-(plugin|config)(-[\w.-]+)?|typescript-eslint|@typescript-eslint\/[\w.-]+)$/;
-
-/**
- * The `node_modules/<name>/**` path of each ESLint plugin, shareable config or parser that the
- * package.json in `cwd` (and the repository root's) lists in `dependencies` or `devDependencies`
- * and that is installed beside it; `hashTool` hashes each with its dependency closure.
- */
-export const lintPluginPaths = (repoRoot: string, cwd: string): string[] => {
-  const paths = new Set<string>();
-  for (const dir of [...new Set([cwd, ""])]) {
-    let manifest: unknown;
-    try {
-      manifest = JSON.parse(readFileSync(join(repoRoot, dir, "package.json"), "utf8"));
-    } catch {
-      continue;
-    }
-    if (manifest === null || typeof manifest !== "object") continue;
-    for (const field of ["dependencies", "devDependencies"]) {
-      const deps = (manifest as Record<string, unknown>)[field];
-      if (deps === null || typeof deps !== "object") continue;
-      for (const name of Object.keys(deps).sort()) {
-        const rel = [dir, "node_modules", name].filter((p) => p !== "").join("/");
-        if (ESLINT_EXTENSION.test(name) && existsSync(join(repoRoot, rel))) paths.add(`${rel}/**`);
-      }
-    }
-  }
-  return [...paths];
+  return { gates: out, recorded, none, refreshed };
 };
 
 /** `config` with `visual.app` set to `app` (`null`: as it is), every other `visual` setting kept. */
@@ -226,6 +221,11 @@ export const calibrate = async (
   if (tools.recorded.length > 0) {
     deps.out(
       `note: recorded the check tool of ${tools.recorded.join(", ")}: each run verifies its files by content hash, and an install script that changes one fails that gate (H-14)`,
+    );
+  }
+  if (tools.refreshed.length > 0) {
+    deps.out(
+      `note: replaced the stale check tool of ${tools.refreshed.join(", ")}: its recorded paths no longer covered what the command runs, or named nothing in this working tree (H-14)`,
     );
   }
   if (tools.none.length > 0) {

@@ -593,6 +593,71 @@ describe("calibrate records each check gate's tool (H-14, reading 238)", () => {
     expect(lines.join("\n")).toMatch(/recorded the check tool of build, typecheck, lint, test/);
   });
 
+  it("replaces a recorded tool that went stale or matches nothing, and keeps one that still covers (reading 249)", async () => {
+    const root = nodeRepo();
+    for (const [pkg, file, bin] of [
+      ["eslint", "bin/eslint.js", "eslint"],
+      ["vitest", "vitest.mjs", "vitest"],
+    ] as const) {
+      writeFile(root, `node_modules/${pkg}/package.json`, JSON.stringify({ name: pkg }));
+      writeFile(root, `node_modules/${pkg}/${file}`, "#!/usr/bin/env node\n");
+      mkdirSync(join(root, "node_modules/.bin"), { recursive: true });
+      symlinkSync(`../${pkg}/${file}`, join(root, "node_modules/.bin", bin));
+    }
+    const kept = {
+      source: "project" as const,
+      paths: ["node_modules/.bin/vitest", "node_modules/vitest/**", "vitest.config.ts"],
+    };
+    writeFile(
+      root,
+      ".vtc/gates.yml",
+      config([
+        {
+          id: "lint",
+          layer: "L1",
+          command: ["pnpm", "exec", "eslint", "."],
+          // a pnpm real-path fallback from before a version bump: it matches no file now
+          tool: { source: "project", paths: ["node_modules/.pnpm/eslint@0.9.0/**"] },
+        },
+        { id: "test", layer: "L2", command: ["pnpm", "exec", "vitest", "run"], tool: kept },
+        {
+          id: "typecheck",
+          layer: "L1",
+          command: ["pnpm", "exec", "vitest", "typecheck"],
+          // no longer covers the package it runs (moved, or a hand edit gone wrong)
+          tool: { source: "project", paths: ["node_modules/.bin/vitest", "gone/**"] },
+        },
+      ]),
+    );
+    const lines: string[] = [];
+    const outcome = await calibrate(
+      {
+        repoRoot: root,
+        vtcHome: tempDir(),
+        git: createGitOps({ repoRoot: initRepo() }),
+        revision: "4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39",
+        out: (line) => lines.push(line),
+        confirm: () => Promise.resolve(false),
+        scanners: { names: SCANNERS, ensure: () => Promise.reject(new Error("no downloads")) },
+      },
+      { dryRun: true },
+    );
+    if (outcome.status !== "dry_run") throw new Error("expected a dry run");
+    const tools = Object.fromEntries(
+      parseGatesConfig(outcome.yaml).gates.map((g) => [g.id, g.tool ?? null]),
+    );
+    expect(tools).toEqual({
+      lint: { source: "project", paths: ["node_modules/.bin/eslint", "node_modules/eslint/**"] },
+      // a hand-written tool that still covers what its command runs is kept
+      test: kept,
+      typecheck: {
+        source: "project",
+        paths: ["node_modules/.bin/vitest", "node_modules/vitest/**"],
+      },
+    });
+    expect(lines.join("\n")).toMatch(/replaced the stale check tool of lint, typecheck/);
+  });
+
   it("asks the human to confirm the second pass of a two-pass install too", async () => {
     const root = nodeRepo();
     const outcome = await calibrate({

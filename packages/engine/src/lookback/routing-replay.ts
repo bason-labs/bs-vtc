@@ -35,6 +35,7 @@ import {
   type PromptVersionRef,
   type ReplayGrader,
   type ReplayInfraOutcome,
+  type ReplayTrialRef,
   type RoutingReplayResult,
   type VtcEvent,
 } from "@vtc/shared";
@@ -106,6 +107,12 @@ export interface RoutingReplayLaunch {
   readonly host: HostId;
   readonly prompt: PromptVersionRef;
   readonly grader: ReplayGrader;
+  /**
+   * The grader bundle the replay is graded under: the launcher puts it on each trial's
+   * `ReplayTrialRef.grader_bundle_sha`, so the trial's dispatch is known to be this scope's
+   * (reading 249).
+   */
+  readonly graderBundleSha: string;
   /** In plan order, whole pairs. */
   readonly trials: readonly RoutingReplayTrial[];
   /** Ungraded trials left for a later RETRO. */
@@ -180,6 +187,22 @@ export const recordRoutingReplayTrial = async (
 };
 
 /**
+ * The scope a tier replay's dispatches are judged in (reading 249): its prompt version (the
+ * dispatch's `prompt_sha`) and its grader bundle (`ReplayTrialRef.grader_bundle_sha`; a dispatch
+ * without one, logged before 5.8.0, belongs to any bundle). Absent: every dispatch of the proposal.
+ */
+export interface RoutingReplayEventScope {
+  /** The prompt version's `effective_sha256`. */
+  readonly prompt: string;
+  readonly graderBundleSha: string;
+}
+
+const inScope = (event: VtcEvent, ref: ReplayTrialRef, scope?: RoutingReplayEventScope): boolean =>
+  scope === undefined ||
+  (event.prompt_sha === scope.prompt &&
+    (ref.grader_bundle_sha === undefined || ref.grader_bundle_sha === scope.graderBundleSha));
+
+/**
  * Pure: the cost each trial of tier replay `proposal` reported, by trial key (`replayTrialKey`),
  * from the replay trials' own events (`role.dispatched.replay`, `role.submitted` `cost_usd`; `null`
  * when the host reported none). A trial dispatched more than once keeps its last submission.
@@ -187,13 +210,14 @@ export const recordRoutingReplayTrial = async (
 export const routingReplayCosts = (
   events: readonly VtcEvent[],
   proposal: string,
+  scope?: RoutingReplayEventScope,
 ): Map<string, number | null> => {
   const trials = new Map<string, string>();
   const costs = new Map<string, number | null>();
   for (const event of events) {
     if (isEventOfType(event, "role.dispatched")) {
       const { replay, action_id } = readEventData(event);
-      if (replay?.proposal === proposal)
+      if (replay?.proposal === proposal && inScope(event, replay, scope))
         trials.set(`${event.run}:${action_id}`, replayTrialKey(replay));
       continue;
     }
@@ -222,11 +246,14 @@ export interface RoutingReplayTrialTiers {
  * when it ran on the host's default model (`model_fallback`, D-cx). Such a trial measures another
  * tier than the one its arm compares. The ledger cannot tell (its row carries the arm's tier the
  * caller names), so these events are what a tier replay is graded on: a trial with no on-tier
- * dispatch among them is not known to have run on its arm's tier.
+ * dispatch among them is not known to have run on its arm's tier. With `scope`, only the dispatches
+ * of that prompt version and grader bundle count (reading 249): a dispatch of an earlier scope
+ * neither stops nor covers this one's replay.
  */
 export const routingReplayTrialTiers = (
   events: readonly VtcEvent[],
   proposal: string,
+  scope?: RoutingReplayEventScope,
 ): RoutingReplayTrialTiers => {
   const onTier = new Set<string>();
   const offTier = new Set<string>();
@@ -234,7 +261,7 @@ export const routingReplayTrialTiers = (
     if (!isEventOfType(event, "role.dispatched")) continue;
     const data = readEventData(event);
     const ref = data.replay;
-    if (ref?.proposal !== proposal) continue;
+    if (ref?.proposal !== proposal || !inScope(event, ref, scope)) continue;
     const on =
       ref.tier !== undefined &&
       data.tier === ref.tier &&

@@ -10,7 +10,7 @@ import type {
 } from "@vtc/shared";
 import { eventsOfType } from "./events";
 import { formatGateDuration } from "./gates";
-import { roleRunNotes, type RoleRunNote } from "./role-run-notes";
+import { refusedFallbacks, roleRunNotes, type RoleRunNote } from "./role-run-notes";
 import type { StatusMeta } from "./states";
 
 /**
@@ -44,7 +44,7 @@ export const PREFLIGHT_PURPOSES: Readonly<Record<HeadlessPreflight["purpose"], s
   lookback_replay: "lookback replay",
 };
 
-const outcomeMeta = (ended: HeadlessEnded): StatusMeta => {
+const outcomeMeta = (ended: HeadlessEnded, refusedAgain = false): StatusMeta => {
   switch (ended.outcome) {
     case "done":
       return { label: "Done", tone: "ok" };
@@ -54,6 +54,9 @@ const outcomeMeta = (ended: HeadlessEnded): StatusMeta => {
       return { label: "Host login failed", tone: "danger" };
     case "error":
       // D-cx: a refused model is not a role failure; the engine dispatches the run once more.
+      // The fallback dispatch refused too is an ordinary error (reading 244): none follows.
+      if (ended.cause === "model_refused" && refusedAgain)
+        return { label: "Error: the host refused its default model too", tone: "danger" };
       if (ended.cause === "model_refused")
         return { label: "Model refused: dispatched again on the host default", tone: "warn" };
       return {
@@ -127,6 +130,7 @@ export const headlessRuns = (
   const live = new Set((inFlight ?? []).map((r) => r.action_id));
   const runEnded = eventsOfType(events, "run.finished").length > 0;
   const notes = roleRunNotes(events);
+  const refusedAgain = refusedFallbacks(events);
   const unended = (actionId: string): StatusMeta => {
     if (live.has(actionId)) return RUNNING;
     if (runEnded) return DID_NOT_FINISH;
@@ -153,7 +157,10 @@ export const headlessRuns = (
         host: event.host ?? "unknown host",
         task: event.task ?? null,
         startedAt: event.ts,
-        status: end === undefined ? unended(data.action_id) : outcomeMeta(end),
+        status:
+          end === undefined
+            ? unended(data.action_id)
+            : outcomeMeta(end, refusedAgain.has(data.action_id)),
         detail: parts.filter((p) => p !== null).join(" · "),
         note: notes.get(data.action_id) ?? null,
       };

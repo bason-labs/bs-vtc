@@ -67,6 +67,7 @@ import {
   ModelTierSchema,
   PromptVersionRefSchema,
   RoleIdSchema,
+  Sha256HexSchema,
   SlugSchema,
   TierReasonSchema,
   planDispatch,
@@ -237,6 +238,7 @@ const TrialShape = z.looseObject({
     .strictObject({ tier: ModelTierSchema, reason: TierReasonSchema, clamped: z.boolean() })
     .optional(),
   armTier: ModelTierSchema.optional(),
+  graderBundleSha: Sha256HexSchema.optional(),
 });
 const ReplayPlanShape = z.strictObject({
   v: z.literal(1),
@@ -723,6 +725,10 @@ export const replayTrialRef = (k: Kernel, run: string, t: TrialRef): ReplayTrial
         trial: trial.trial,
         // D-cn: a tier replay's arm runs on its tier, which the dispatch says (reading 247(6))
         ...(trial.armTier === undefined ? {} : { tier: trial.armTier }),
+        // reading 249: and the grader bundle whose scope the trial belongs to
+        ...(trial.graderBundleSha === undefined
+          ? {}
+          : { grader_bundle_sha: trial.graderBundleSha }),
       };
 };
 

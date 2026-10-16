@@ -20,8 +20,9 @@ const usd = (value: number): string =>
   value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
 
 /**
- * The cost of a submitted run (`cost_usd` on its `role.submitted`), and what it counts toward the
- * budget when that differs (`budget_usd`); `null` when neither is known.
+ * The cost of a closed run (`cost_usd` on its `role.submitted`, `role.rejected` or `role.failed`),
+ * and what it counts toward the budget when that differs (`budget_usd`); `null` when neither is
+ * known.
  */
 export const roleCostText = (
   cost: number | null | undefined,
@@ -38,24 +39,56 @@ export const roleCostText = (
 export const modelFallbackText = (fallback: ModelFallback): string =>
   `The host refused ${fallback.requested}; ran on the host default`;
 
+/** The fallback dispatch was refused too (reading 244: an ordinary error, no third dispatch). */
+export const modelFallbackRefusedText = (fallback: ModelFallback): string =>
+  `The host refused ${fallback.requested}; the host default was refused too`;
+
+/**
+ * The action ids whose dispatch was already the model fallback and whose host refused the model
+ * again (`headless.ended` cause `model_refused`, D-cx; spine §5 reading 244).
+ */
+export const refusedFallbacks = (events: readonly VtcEvent[]): ReadonlySet<string> => {
+  const fallbacks = new Set(
+    eventsOfType(events, "role.dispatched")
+      .filter(({ data }) => data.model_fallback !== undefined)
+      .map(({ data }) => data.action_id),
+  );
+  return new Set(
+    eventsOfType(events, "headless.ended")
+      .filter(({ data }) => data.cause === "model_refused" && fallbacks.has(data.action_id))
+      .map(({ data }) => data.action_id),
+  );
+};
+
 const EMPTY: RoleRunNote = { cost: null, fallback: null, fallbackDetail: null };
 
 /** Each role run's note, by action id. */
 export const roleRunNotes = (events: readonly VtcEvent[]): ReadonlyMap<string, RoleRunNote> => {
   const notes = new Map<string, RoleRunNote>();
+  const refusedAgain = refusedFallbacks(events);
   for (const { data } of eventsOfType(events, "role.dispatched")) {
     const fallback = data.model_fallback;
     notes.set(data.action_id, {
       ...(notes.get(data.action_id) ?? EMPTY),
-      fallback: fallback === undefined ? null : modelFallbackText(fallback),
+      fallback:
+        fallback === undefined
+          ? null
+          : refusedAgain.has(data.action_id)
+            ? modelFallbackRefusedText(fallback)
+            : modelFallbackText(fallback),
       fallbackDetail: fallback?.detail ?? null,
     });
   }
-  for (const { event, data } of eventsOfType(events, "role.submitted")) {
-    notes.set(data.action_id, {
-      ...(notes.get(data.action_id) ?? EMPTY),
-      cost: roleCostText(event.cost_usd, data.budget_usd),
-    });
+  // A run is paid for however it closed: accepted, rejected or failed (contracts 5.8.0 carries
+  // `budget_usd` on the rejected and failed ones too, reading 249).
+  for (const type of ["role.submitted", "role.rejected", "role.failed"] as const) {
+    for (const { event, data } of eventsOfType(events, type)) {
+      if (event.cost_usd === undefined && data.budget_usd === undefined) continue;
+      notes.set(data.action_id, {
+        ...(notes.get(data.action_id) ?? EMPTY),
+        cost: roleCostText(event.cost_usd, data.budget_usd),
+      });
+    }
   }
   return notes;
 };

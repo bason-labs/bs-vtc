@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.7.0",
+  "contracts_version": "5.8.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -4181,6 +4181,10 @@
                     "mid",
                     "low"
                   ]
+                },
+                "grader_bundle_sha": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
                 }
               },
               "required": [
@@ -4474,6 +4478,11 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "budget_usd": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
             }
           },
           "required": [
@@ -4534,6 +4543,11 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "budget_usd": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
             }
           },
           "required": [
@@ -4976,6 +4990,13 @@
                           "minLength": 1,
                           "maxLength": 1024
                         }
+                      },
+                      "baseline": {
+                        "type": "string",
+                        "enum": [
+                          "before_scripts",
+                          "after_scripts"
+                        ]
                       }
                     },
                     "required": [
@@ -6349,6 +6370,11 @@
                   "type": "null"
                 }
               ]
+            },
+            "budget_usd": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000
             }
           },
           "required": [
@@ -15679,6 +15705,13 @@
                 "minLength": 1,
                 "maxLength": 1024
               }
+            },
+            "baseline": {
+              "type": "string",
+              "enum": [
+                "before_scripts",
+                "after_scripts"
+              ]
             }
           },
           "required": [
@@ -16135,6 +16168,13 @@
                       "minLength": 1,
                       "maxLength": 1024
                     }
+                  },
+                  "baseline": {
+                    "type": "string",
+                    "enum": [
+                      "before_scripts",
+                      "after_scripts"
+                    ]
                   }
                 },
                 "required": [
@@ -26107,6 +26147,13 @@
                             "minLength": 1,
                             "maxLength": 1024
                           }
+                        },
+                        "baseline": {
+                          "type": "string",
+                          "enum": [
+                            "before_scripts",
+                            "after_scripts"
+                          ]
                         }
                       },
                       "required": [

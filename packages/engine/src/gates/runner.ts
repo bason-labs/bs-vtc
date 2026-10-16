@@ -123,6 +123,8 @@ import {
   changedToolFiles,
   deriveProjectTool,
   hashTool,
+  lintPluginPaths,
+  nodeBinChain,
   scriptsFreeInstall,
   sha256File,
   ToolHashLimitError,
@@ -228,7 +230,17 @@ interface Execution {
  * (`problem`, the rest of a "not run: ..." sentence).
  */
 type ToolBaseline =
-  | { readonly paths: readonly string[]; readonly snapshot: ToolSnapshot }
+  | {
+      readonly paths: readonly string[];
+      readonly snapshot: ToolSnapshot;
+      /**
+       * What the tool runs with beside its own files (reading 249), hashed with it but not part
+       * of its `sha256`: the `node_modules/.bin` directories on its run-script `PATH` and, for an
+       * L1 gate, the packages its lint config loads ({@link GateRun.environmentPaths}).
+       */
+      readonly env: readonly string[];
+      readonly envSnapshot: ToolSnapshot;
+    }
   | { readonly paths: readonly string[]; readonly problem: string };
 
 /** The snapshot of a tool with no file (H-14). */
@@ -370,6 +382,11 @@ class Run {
    * tool was hashed, by gate id: {@link verifyTool} derives it again just before the gate runs.
    */
   private readonly derivedAtHash = new Map<string, readonly string[] | null>();
+  /**
+   * Gates whose tool was hashed only after an install gate ran its scripts (H-14, reading 249):
+   * their `ToolIntegrity.baseline` is `after_scripts`.
+   */
+  private readonly hashedAfterScripts = new Set<string>();
   private readonly attempt: string;
   private readonly evidenceRoot: string;
   private readonly stateRoot: string;
@@ -630,7 +647,7 @@ class Run {
       if (!(await run(gate, passes.free, last, last ? undefined : "scripts-free")))
         failed = gate.id;
     }
-    if (failed === null) this.hashTools(verify);
+    if (failed === null) this.hashTools(verify, unverified.length > 0);
     for (const { gate, passes } of freed) {
       if (failed !== null) break;
       const build = passes?.build ?? null;
@@ -716,17 +733,40 @@ class Run {
     return { added: files.length > 0 ? files : uncovered };
   }
 
+  /**
+   * What a `project` tool runs with beside its own files (H-14, spine §5 reading 249), hashed with
+   * it: for a Node tool, every `node_modules/.bin` directory from the gate's cwd up to the checkout
+   * (a run script puts each on `PATH`, and a shim runs a `node` beside it first), and for an L1
+   * Node gate the packages its lint config loads (`lintPluginPaths`: ESLint loads plugins, configs
+   * and parsers through its config, not as its dependencies), whether or not gates.yml lists them.
+   */
+  private environmentPaths(gate: Gate, toolPaths: readonly string[]): string[] {
+    if (!toolPaths.some((p) => p.split("/").includes("node_modules"))) return [];
+    const cwd = gate.cwd ?? "";
+    const plugins =
+      gate.layer === "L1"
+        ? lintPluginPaths(this.checkoutAbs, cwd).filter((p) => !toolPathsCover(toolPaths, p))
+        : [];
+    return [...nodeBinChain(this.checkoutAbs, cwd), ...plugins];
+  }
+
   /** Hashes a gate's `project` tool in the run checkout, once per set of paths. */
   private hashToolOf(gate: Gate, byPaths: Map<string, ToolBaseline>): ToolBaseline | null {
     const found = this.projectToolOf(gate);
     if (found === null) return null;
     if ("problem" in found) return found;
     const paths = found.tool.paths;
-    const key = paths.join("\u0000");
+    const env = this.environmentPaths(gate, paths);
+    const key = [...paths, "\u0001", ...env].join("\u0000");
     let hashed = byPaths.get(key);
     if (hashed === undefined) {
       try {
-        hashed = { paths, snapshot: hashTool(this.checkoutAbs, paths) };
+        hashed = {
+          paths,
+          snapshot: hashTool(this.checkoutAbs, paths),
+          env,
+          envSnapshot: hashTool(this.checkoutAbs, env),
+        };
       } catch (error) {
         hashed = { paths, problem: `its tool could not be hashed: ${errorText(error)}` };
       }
@@ -735,12 +775,17 @@ class Run {
     return hashed;
   }
 
-  /** Hashes each verify gate's `project` tool after the scripts-free installs (H-14). */
-  private hashTools(verify: readonly Gate[]): void {
+  /**
+   * Hashes each verify gate's `project` tool after the scripts-free installs (H-14);
+   * `afterScripts` when an install gate with no scripts-free form already ran its scripts.
+   */
+  private hashTools(verify: readonly Gate[], afterScripts: boolean): void {
     const byPaths = new Map<string, ToolBaseline>();
     for (const gate of verify) {
       const hashed = this.hashToolOf(gate, byPaths);
-      if (hashed !== null) this.tools.set(gate.id, hashed);
+      if (hashed === null) continue;
+      this.tools.set(gate.id, hashed);
+      if (afterScripts) this.hashedAfterScripts.add(gate.id);
     }
   }
 
@@ -761,7 +806,10 @@ class Run {
         const hashed = this.hashToolOf(gate, byPaths);
         if (hashed === null) continue;
         this.tools.set(gate.id, hashed);
-        if ("snapshot" in hashed && hashed.snapshot.files.size > 0) late.push(gate.id);
+        if ("snapshot" in hashed && hashed.snapshot.files.size > 0) {
+          late.push(gate.id);
+          this.hashedAfterScripts.add(gate.id);
+        }
       }
       lines.push(
         `install gate(s) ${unverified.join(", ")} have no scripts-free form VTC knows (npm ci, pnpm install, bun install, go mod download and cargo fetch have one), so they ran with their scripts outside the two-pass install: a file their scripts wrote into a check tool before it was hashed is not detected (H-14)`,
@@ -803,11 +851,15 @@ class Run {
       // A gate whose command ran no tool in the checkout when tools were hashed: none, no file.
       sha256: (baseline?.snapshot ?? EMPTY_TOOL).sha256,
       tampered: tampered.slice(0, 50),
+      // reading 249: a hash taken after an install's scripts ran cannot vouch for what they wrote
+      ...(this.hashedAfterScripts.has(gate.id) ? { baseline: "after_scripts" as const } : {}),
     });
     if (baseline !== undefined) {
       let now: ToolSnapshot;
+      let envNow: ToolSnapshot;
       try {
         now = hashTool(this.checkoutAbs, baseline.paths);
+        envNow = hashTool(this.checkoutAbs, baseline.env);
       } catch (error) {
         if (error instanceof ToolHashLimitError) {
           return { tool: tool([error.path]), tampered: [error.path] };
@@ -819,7 +871,12 @@ class Run {
           refused: `not run: its tool paths (${baseline.paths.join(", ")}) match no file in the checkout; re-run vtc calibrate`,
         };
       }
-      const tampered = changedToolFiles(baseline.snapshot, now);
+      const tampered = [
+        ...new Set([
+          ...changedToolFiles(baseline.snapshot, now),
+          ...changedToolFiles(baseline.envSnapshot, envNow),
+        ]),
+      ].sort();
       if (tampered.length > 0) return { tool: tool(tampered), tampered };
     }
     const again = this.rederived(gate, baseline?.paths ?? []);

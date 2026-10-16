@@ -2168,16 +2168,17 @@ export class Engine implements Kernel {
 
   // ------------------------------------------------------------- advisors
 
-  /** The run's advisor spend so far (accepted, failed and limit-hit advisor runs, priced). */
+  /**
+   * The run's advisor spend so far: every closed advisor run at what it counts toward the budgets
+   * (`cost_usd`, else for a model with no known price its tokens at the host's price ceiling;
+   * H-12, readings 236 and 249), so an unpriced advisor never spends $0.
+   */
   private advisorSpend(state: RunState): number {
-    return state.events
-      .filter(
-        (e) =>
-          (e.type === "role.submitted" || e.type === "role.failed" || e.type === "limit.hit") &&
-          e.role !== undefined &&
-          this.deps.roles.get(e.role)?.kind === "advisor",
-      )
-      .reduce((sum, e) => sum + (e.cost_usd ?? 0), 0);
+    let sum = 0;
+    for (const run of state.roleRuns.values())
+      if (run.status !== "in_flight" && this.deps.roles.get(run.role)?.kind === "advisor")
+        sum += run.costUsd ?? run.budgetUsd ?? 0;
+    return sum;
   }
 
   /**

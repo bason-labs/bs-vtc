@@ -465,6 +465,12 @@ export const EVENT_PAYLOAD_SCHEMAS = {
      * signal counts tool use from runs the engine did not accept. New in 5.7.0.
      */
     command_shapes: z.array(CommandShapeCountSchema).max(MAX_COMMAND_SHAPES_PER_RUN).optional(),
+    /**
+     * What the run counts toward the budgets when that differs from the envelope's `cost_usd`
+     * (H-12; spine §5 readings 236 and 249), as on `role.submitted`: a run whose model has no
+     * known price counts its tokens at its host's price ceiling. New in 5.8.0.
+     */
+    budget_usd: z.number().nonnegative().max(1_000_000).optional(),
   }),
   "role.failed": z.strictObject({
     action_id: SlugSchema,
@@ -473,6 +479,12 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     retryable: z.boolean(),
     /** The failed run's shell calls as shapes (D-cs), as on `role.submitted`. New in 5.7.0. */
     command_shapes: z.array(CommandShapeCountSchema).max(MAX_COMMAND_SHAPES_PER_RUN).optional(),
+    /**
+     * What the run counts toward the budgets when that differs from the envelope's `cost_usd`
+     * (H-12; spine §5 readings 236 and 249), as on `role.submitted`: a run whose model has no
+     * known price counts its tokens at its host's price ceiling. New in 5.8.0.
+     */
+    budget_usd: z.number().nonnegative().max(1_000_000).optional(),
   }),
   "gate.result": GateReportSchema,
   "finding.recorded": z.strictObject({ finding: FindingSchema }),
@@ -537,6 +549,11 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     /** Steps marked `interrupted`, re-dispatched after the reset (§6.9 steps 2–3). */
     pending_action_ids: z.array(SlugSchema).default([]),
     auto_resume_at: IsoDateTimeSchema.nullable(),
+    /**
+     * What the interrupted run counts toward the budgets, as on `role.failed` (H-12, reading 249).
+     * New in 5.8.0.
+     */
+    budget_usd: z.number().nonnegative().max(1_000_000).optional(),
   }),
   /**
    * The merge queue merged a task into the feature's integration branch (§6.7). The Level-3 merge
