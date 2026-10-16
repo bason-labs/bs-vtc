@@ -1,13 +1,16 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { runTopic } from "@/lib/api/topics";
 import { hrefs, navigate } from "@/lib/router";
+import { roleRunNotes } from "@/lib/role-run-notes";
 import { taskStatusMeta } from "@/lib/states";
 import { useResource } from "@/lib/useResource";
+import { useRunEvents } from "@/lib/useRunEvents";
 import { FlowCanvas } from "@/components/flows/FlowCanvas";
 import { NodeDrawer } from "@/components/flows/NodeDrawer";
 import { NodeList } from "@/components/flows/NodeList";
+import { EventLogTruncated } from "@/components/notices/EventLogTruncated";
 import { TaskRouting } from "@/components/routing/TaskRouting";
 import { Badge, StatusPill } from "@/components/ui";
 import { Breadcrumbs, Loaded, MissingParam, PageHeader } from "./common";
@@ -35,6 +38,13 @@ export function TaskView({
     ok ? `task:${r}:${t}` : null,
     (c, s) => c.task(r, t, s),
     ok ? [runTopic(r, `task:${t}`), runTopic(r, "tasks")] : [],
+  );
+  // Each role run's cost (H-12) and model fallback (D-cx) are in the event log only: the role
+  // runs' notes come from it, and a log longer than the dashboard reads says so below.
+  const events = useRunEvents(ok ? r : null, [`task:${t}`]);
+  const notes = useMemo(
+    () => (events.data === undefined ? undefined : roleRunNotes(events.data.events)),
+    [events.data],
   );
   const select = useCallback(
     (id: string) => {
@@ -86,7 +96,14 @@ export function TaskView({
           <TaskRouting detail={detail.data} />
         </div>
       )}
-      <NodeDrawer run={run} node={selected} detail={detail.data ?? null} onClose={close} />
+      {events.data?.truncated === true ? <EventLogTruncated className="mt-4" /> : null}
+      <NodeDrawer
+        run={run}
+        node={selected}
+        detail={detail.data ?? null}
+        onClose={close}
+        {...(notes === undefined ? {} : { notes })}
+      />
     </>
   );
 }

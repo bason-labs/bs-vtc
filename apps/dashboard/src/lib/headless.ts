@@ -10,6 +10,7 @@ import type {
 } from "@vtc/shared";
 import { eventsOfType } from "./events";
 import { formatGateDuration } from "./gates";
+import { roleRunNotes, type RoleRunNote } from "./role-run-notes";
 import type { StatusMeta } from "./states";
 
 /**
@@ -25,7 +26,7 @@ export const HEADLESS_CAUSES: Readonly<Record<HostErrorCause, string>> = {
   budget: "budget cap reached",
   exit_code: "exited without a final result",
   spawn: "the process never started",
-  model_refused: "the host refused the model (retried on its default)",
+  model_refused: "the host refused the model (dispatched again on its default)",
 };
 
 export const PREFLIGHT_CHECKS: Readonly<Record<AutoResumeCheck, string>> = {
@@ -52,6 +53,9 @@ const outcomeMeta = (ended: HeadlessEnded): StatusMeta => {
     case "auth":
       return { label: "Host login failed", tone: "danger" };
     case "error":
+      // D-cx: a refused model is not a role failure; the engine dispatches the run once more.
+      if (ended.cause === "model_refused")
+        return { label: "Model refused: dispatched again on the host default", tone: "warn" };
       return {
         label: `Error: ${ended.cause === undefined ? "unknown cause" : HEADLESS_CAUSES[ended.cause]}`,
         tone: "danger",
@@ -69,6 +73,8 @@ export interface HeadlessRunView {
   readonly startedAt: string;
   readonly status: StatusMeta;
   readonly detail: string;
+  /** Its cost once submitted (H-12) and the model fallback of its dispatch (D-cx). */
+  readonly note: RoleRunNote | null;
 }
 
 const minutes = (ms: number): string => `${String(Math.round(ms / 60_000))} min`;
@@ -120,6 +126,7 @@ export const headlessRuns = (
   const ended = new Map(eventsOfType(events, "headless.ended").map((e) => [e.data.action_id, e]));
   const live = new Set((inFlight ?? []).map((r) => r.action_id));
   const runEnded = eventsOfType(events, "run.finished").length > 0;
+  const notes = roleRunNotes(events);
   const unended = (actionId: string): StatusMeta => {
     if (live.has(actionId)) return RUNNING;
     if (runEnded) return DID_NOT_FINISH;
@@ -148,6 +155,7 @@ export const headlessRuns = (
         startedAt: event.ts,
         status: end === undefined ? unended(data.action_id) : outcomeMeta(end),
         detail: parts.filter((p) => p !== null).join(" · "),
+        note: notes.get(data.action_id) ?? null,
       };
     },
   );
@@ -162,6 +170,7 @@ export const headlessRuns = (
       startedAt: r.started_at,
       status: RUNNING,
       detail: r.pid === null ? "In flight" : `pid ${String(r.pid)}`,
+      note: notes.get(r.action_id) ?? null,
     });
   }
   return runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
