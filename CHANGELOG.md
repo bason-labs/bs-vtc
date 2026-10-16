@@ -5,6 +5,13 @@ any release may change behaviour. Role prompt changes have their own log in `rol
 
 ## v0.2.0 (2026-10-16)
 
+- **Screenshots work on macOS.** The pinned Chromium now starts inside the gate sandbox on
+  macOS, so Visual QA and before/after evidence work on a Mac. Only the browser runner gets three
+  extra sandbox rules (Chromium's own process rendezvous and the power-management client); no
+  file, network or credential access was added.
+- **`vtc doctor --install-browser` works again.** It failed for everyone because one pinned
+  package (pngjs 7.0.0) ships a folder without its execute permission; files are now given normal
+  permissions after unpacking, as npm does.
 - **No price table to fill (H-12).** A host that reports no cost (Codex) ships its default
   prices with vtc, from the provider's public API pricing page with that page's URL and date.
   `prices` in `~/.vtc/config.yaml` now only overrides a model, and never has to be set.
