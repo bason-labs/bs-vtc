@@ -4,5 +4,5 @@
     "noEmit": true,
     "customConditions": ["@vtc/source"]
   },
-  "include": ["vitest.shared.ts", "vitest.config.ts"]
+  "include": ["vitest.shared.ts", "vitest.tmpdir.ts", "vitest.config.ts"]
 }

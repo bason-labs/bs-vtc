@@ -16,6 +16,33 @@ any release may change behaviour. Role prompt changes have their own log in `rol
 - **Release notes from this file (H-16).** The release workflow takes each release's notes from
   its section here, checks the section exists before building, and publishes only to the
   private repository's GitHub Releases.
+- **Design gaps are fixed before G2 (H-13).** When the design leaves an approved requirement
+  without an architecture decision, a component or (for UI) a screen, the Architect and the
+  Designer are sent the gaps and fix them, up to 3 rounds, before G2 is shown. A loop that is
+  stuck or hits the cap parks and names the uncovered requirements. There is no "approve anyway".
+  The dashboard shows each coverage check before G2.
+- **Check tools that install scripts cannot replace (H-14).** Lint, typecheck and test tools run
+  from a pinned copy or are verified by content hash after an install that runs no lifecycle
+  script. A tool that an install script changed, including an interpreter or shell tool planted
+  beside it and the plugins its lint config loads, fails the gate as tampering. `vtc calibrate`
+  records each gate's tool and replaces one that went stale. A tool that could only be hashed
+  after an install's own scripts ran is marked as such.
+- **Reviewers start on their own tier (D-cu).** Difficulty routing picks the start tier of the
+  engineers and the QA author only. A task that starts on the lowest tier moves up after every
+  failed round (D-cv).
+- **The changed flow on automatic UI pull requests.** The Designer writes the app's key journeys to
+  `.vtc/design/flows.yaml`, and an automatic UI pull request records the journey its change
+  touches on both sides, instead of only the first screen.
+- **Costs you can read.** A run on a model with no known price shows "Cost unknown" next to what
+  the budget counted for it, for failed and rejected runs too. A run whose model the host refused
+  shows that it ran on the host default, or that the default was refused too.
+
+### Known gaps
+
+- Routing proposals that a tier replay should back are held back until the engine can run tier
+  replays; the others carry the scorecard alone.
+- Token cost has not been calibrated on real runs.
+- Codex's usage-limit message has not been recorded yet.
 
 ## v0.1.0 (2026-10-15)
 
