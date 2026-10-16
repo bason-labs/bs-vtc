@@ -7,6 +7,7 @@ import {
   EventSchema,
   sha256Hex,
   type HostId,
+  type ModelFallback,
   type VtcEvent,
 } from "@vtc/shared";
 import { mkdtemp } from "node:fs/promises";
@@ -123,8 +124,17 @@ export class RunLog {
       tierReason?: "role" | "rule" | "planner_hint" | "escalation" | "budget_drop";
       /** `role.dispatched.tier_clamped`: the project's bounds or QA author's floor moved it. */
       tierClamped?: boolean;
+      /** `role.dispatched.model_fallback` (D-cx, 5.7.0): the host default ran instead. */
+      modelFallback?: ModelFallback;
       /** A Lookback replay trial (`purpose: lookback_replay`). */
-      replay?: { proposal: string; task: string; arm: "a" | "b" | "aa"; trial: number };
+      replay?: {
+        proposal: string;
+        task: string;
+        arm: "a" | "b" | "aa";
+        trial: number;
+        /** A tier replay's arm tier (`ReplayTrialRef.tier`, 5.7.0). */
+        tier?: "low" | "mid" | "top";
+      };
     } = {},
   ): string {
     this.actions += 1;
@@ -158,6 +168,7 @@ export class RunLog {
               tier_reason: options.tierReason ?? "rule",
               ...(options.tierClamped === undefined ? {} : { tier_clamped: options.tierClamped }),
             }),
+        ...(options.modelFallback === undefined ? {} : { model_fallback: options.modelFallback }),
         ...(options.replay === undefined
           ? {}
           : { purpose: "lookback_replay", replay: options.replay }),

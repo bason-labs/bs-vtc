@@ -15,7 +15,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 const isMissing = (error: unknown): boolean =>
   typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT";
@@ -114,6 +114,40 @@ export const writeAtomic = async (path: string, data: string): Promise<void> => 
   const temp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(temp, data);
   await rename(temp, path);
+};
+
+/**
+ * {@link writeAtomic} for a repo-tracked Lookback output at `relPath` under `projectRoot`: each
+ * directory between the root and the file is created if missing and must otherwise be a real
+ * directory, never a symbolic link (a repo that commits one there would send the write, and its
+ * temp file, outside the repo); the rename replaces a link at the file itself without writing
+ * through it. Throws, writing nothing, when a directory on the way is a link or not a directory.
+ */
+export const writeRepoFileAtomic = async (
+  projectRoot: string,
+  relPath: string,
+  data: string,
+): Promise<void> => {
+  const parts = relPath.split(/[\\/]/).filter((p) => p !== "" && p !== ".");
+  if (parts.length === 0 || parts.includes(".."))
+    throw new Error(`${relPath} is not a path inside the repo`);
+  await mkdir(projectRoot, { recursive: true });
+  let dir = projectRoot;
+  for (const part of parts.slice(0, -1)) {
+    dir = join(dir, part);
+    let info;
+    try {
+      info = await lstat(dir);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      // one level at a time: a link planted there meanwhile makes this mkdir fail (EEXIST)
+      await mkdir(dir);
+      continue;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory())
+      throw new Error(`${dir} is not a directory of the repo (a symbolic link or a file)`);
+  }
+  await writeAtomic(join(projectRoot, ...parts), data);
 };
 
 /**

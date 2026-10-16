@@ -231,13 +231,13 @@ describe("routingProposalCells (D-cn)", () => {
 
   it("names the shared field when two roles back the change", () => {
     const proposals = routingProposals(
-      card([escalating("engineer", "S", "none"), escalating("spec_verifier", "S", "none")]),
+      card([escalating("engineer", "S", "none"), escalating("engineer_backend", "S", "none")]),
       DCM,
     );
     const cells = routingProposalCells(proposals);
     expect(cells.map((c) => [c.role, c.size, c.risk])).toEqual([
       ["engineer", "S", "none"],
-      ["spec_verifier", "S", "none"],
+      ["engineer_backend", "S", "none"],
     ]);
     for (const c of cells) {
       expect(c.detail).toContain('set by_size.S to "mid"');

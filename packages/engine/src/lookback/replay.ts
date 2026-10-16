@@ -44,7 +44,7 @@ import {
 } from "@vtc/shared";
 import { join } from "node:path";
 import { lookbackEvent, type LookbackEventDraft } from "./events.js";
-import { appendJsonLines, readJsonLines, writeAtomic } from "./files.js";
+import { appendJsonLines, readJsonLines, writeRepoFileAtomic } from "./files.js";
 import { isRoleFailure, trustedAttributions, type AttributionHistory } from "./attribution.js";
 import { buildTraces, sameTarget, traceRef, traceSplit } from "./traces.js";
 import { recordedOutcome, type ExpectedVerdict } from "./verdict-grader.js";
@@ -328,7 +328,7 @@ export const writeReplayResult = async (
 ): Promise<LookbackEventDraft> => {
   const path = replayPath(result.proposal);
   const text = `${JSON.stringify(ReplayResultSchema.parse(result), null, 2)}\n`;
-  await writeAtomic(join(projectRoot, path), text);
+  await writeRepoFileAtomic(projectRoot, path, text);
   // The file's hash, so `vtc lookback approve` can tell the engine's file from an edited one.
   return lookbackEvent("lookback.replay_finished", {
     proposal: result.proposal,
