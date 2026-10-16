@@ -30,10 +30,21 @@
  * fields ({@link improvementReportFields}) open the bs-vtc PR. {@link lookbackRunEndFacts} maps the
  * drift regressions (D-cr) to the automation facts the daemon hands the upstream module at
  * `run.finished` (`wireLookback`'s `drift` argument).
- * At RETRO (D-cn, spine §5 reading 219) {@link lookbackRoutingStep} fits engine core's
+ * At RETRO (D-cn, spine §5 readings 219 and 247(6)) {@link lookbackRoutingStep} fits engine core's
  * `RoutingLookback` seam: it writes the routing scorecard and returns the routing-table cells it
- * proposes to change ({@link routingProposalCells}), which the daemon raises as `config` facts
- * (`wireLookback`'s `routing` argument).
+ * proposes to change for the producer roles (D-cu; {@link routingProposalCells}), which the daemon
+ * raises as `config` facts (`wireLookback`'s `routing` argument); through that seam every change
+ * carries its scorecard evidence alone, short of reading 247(6), and a change whose tier replay
+ * the RETRO's trial budget had room for says in its detail that it was not replayed (until engine
+ * core drives {@link routingReplayStep}). {@link routingReplayStep} is the same step with tier
+ * replays (for a caller that launches them and hands back their events): within the RETRO's
+ * remaining trial budget it plans tier replays of those changes (the same prompt on both arms, arm
+ * `a` on the current start tier and arm `b` on the proposed one; {@link planRoutingReplayTrials}),
+ * returns the trials to launch and the `automation.skipped` drafts beside the cells, grades a
+ * replay whose trials the ledger holds and whose events show each ran on its arm's tier
+ * ({@link recordRoutingReplayTrial}, {@link routingReplayTrialTiers}, {@link assembleRoutingReplay})
+ * into a `RoutingReplayResult`, and raises a change's fact only once its replay is graded and
+ * backs it.
  * AI tiebreak answers are recorded with {@link appendTiebreakRecord} under the VTC home; only
  * those {@link readTiebreakKeys} returns let an `ai_tiebreak` attribution count.
  * Promotion (D-cb, spine §5 reading 196): for everyone, the human's merge of the bs-vtc PR an
@@ -150,6 +161,7 @@ export {
   REPLAY_LIMIT_REASONS,
   replayLimitReason,
   replaySkippedEvent,
+  ungradedTrialGroups,
   type AutomationSkippedDraft,
   type LaunchedReplay,
   type PendingReplay,
@@ -183,19 +195,39 @@ export {
 export {
   computeRoutingScorecard,
   routedStartTier,
+  routingFactMetrics,
   routingProposalCells,
   routingProposals,
   routingReplayTasks,
+  routingReplayTrialCount,
   writeRoutingScorecard,
   type RoutingCell,
   type RoutingChange,
   type RoutingConfigFact,
+  type RoutingEvidence,
   type RoutingLift,
   type RoutingProposalCell,
   type RoutingProposals,
-  type RoutingTierReplay,
 } from "./routing.js";
-export { lookbackRoutingStep } from "./routing-step.js";
+export {
+  assembleRoutingReplay,
+  planRoutingReplayTrials,
+  recordRoutingReplayTrial,
+  routingReplayCosts,
+  routingReplayScope,
+  routingReplayTrialTiers,
+  writeRoutingReplayResult,
+  type RoutingReplayLaunch,
+  type RoutingReplayTrial,
+  type RoutingReplayTrialTiers,
+  type RoutingTrialRecord,
+} from "./routing-replay.js";
+export {
+  lookbackRoutingStep,
+  routingReplayStep,
+  type RoutingStepInput,
+  type RoutingStepResult,
+} from "./routing-step.js";
 export { computeScorecards, writeScorecards, type TimeWindow } from "./scorecards.js";
 export {
   appendTiebreakRecord,

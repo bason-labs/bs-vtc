@@ -1,7 +1,11 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { readRoleWrittenText, withFileLock } from "../../src/lookback/files.js";
+import {
+  readRoleWrittenText,
+  withFileLock,
+  writeRepoFileAtomic,
+} from "../../src/lookback/files.js";
 import { tempDir } from "./log.js";
 
 describe("withFileLock (spine §5 reading 128)", () => {
@@ -40,5 +44,40 @@ describe("readRoleWrittenText", () => {
     });
     expect((await readRoleWrittenText(join(dir, "big.json"), 5)).kind).toBe("refused");
     expect((await readRoleWrittenText(join(dir, "none.json"), 5)).kind).toBe("missing");
+  });
+});
+
+describe("writeRepoFileAtomic (repo-tracked Lookback outputs)", () => {
+  it("creates the directories on the way and writes the file", async () => {
+    const root = await tempDir("repo-write");
+    await writeRepoFileAtomic(root, ".vtc/lookback/replays/routing/x.json", "{}\n");
+    expect(await readFile(join(root, ".vtc/lookback/replays/routing/x.json"), "utf8")).toBe("{}\n");
+  });
+
+  it("writes nothing through a directory the repo commits as a symbolic link", async () => {
+    const root = await tempDir("repo-write-link");
+    const elsewhere = await tempDir("repo-write-elsewhere");
+    await mkdir(join(root, ".vtc/lookback/replays"), { recursive: true });
+    await symlink(elsewhere, join(root, ".vtc/lookback/replays/routing"));
+    await expect(
+      writeRepoFileAtomic(root, ".vtc/lookback/replays/routing/x.json", "{}\n"),
+    ).rejects.toThrow(/not a directory of the repo/);
+    expect(await readdir(elsewhere)).toEqual([]);
+    // a link higher up is refused too
+    const top = await tempDir("repo-write-top");
+    await symlink(elsewhere, join(top, ".vtc"));
+    await expect(writeRepoFileAtomic(top, ".vtc/lookback/a.json", "{}\n")).rejects.toThrow();
+    expect(await readdir(elsewhere)).toEqual([]);
+  });
+
+  it("refuses a path that leaves the repo, and replaces a link at the file itself", async () => {
+    const root = await tempDir("repo-write-file");
+    await expect(writeRepoFileAtomic(root, "../x.json", "{}")).rejects.toThrow();
+    const elsewhere = join(await tempDir("repo-write-target"), "kept.json");
+    await writeFile(elsewhere, "kept\n");
+    await symlink(elsewhere, join(root, "out.json"));
+    await writeRepoFileAtomic(root, "out.json", "new\n");
+    expect((await lstat(join(root, "out.json"))).isFile()).toBe(true);
+    expect(await readFile(elsewhere, "utf8")).toBe("kept\n");
   });
 });
