@@ -40,7 +40,12 @@ export interface RunLauncherOptions {
   readonly interruptGraceMs?: number;
   /** SIGTERM → SIGKILL grace. Default `HEADLESS_DEFAULTS.termGraceMs`. */
   readonly termGraceMs?: number;
-  readonly outcome: (lines: readonly string[], exit: RunExit) => HostOutcome;
+  /** Reads a finished run; `request` is the run's own (a reader may check what it asked for). */
+  readonly outcome: (
+    lines: readonly string[],
+    exit: RunExit,
+    request: SpawnRoleRequest,
+  ) => HostOutcome;
 }
 
 /** Starts headless runs and remembers the live ones until they settle or `dispose` kills them. */
@@ -70,7 +75,7 @@ export const createRunLauncher = (options: RunLauncherOptions) => {
           : { interruptGraceMs: options.interruptGraceMs }),
         ...(options.termGraceMs === undefined ? {} : { termGraceMs: options.termGraceMs }),
         spawner: options.spawner,
-        outcome: options.outcome,
+        outcome: (lines, exit) => options.outcome(lines, exit, request),
         onSettled: () => live.delete(run),
       });
       live.add(run);

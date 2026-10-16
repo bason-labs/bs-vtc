@@ -167,6 +167,18 @@ describe("Codex parseEvents: limits and auth (synthetic, documented shapes, §6.
     });
   });
 
+  it("the recorded logged-out run is auth, from its text alone (H-15, temporary CODEX_HOME)", () => {
+    // codex-cli 0.162.1, 2026-10-15: ten `Reconnecting... n/5` errors (WebSocket, then HTTPS),
+    // then a 401 with no `codexErrorInfo`; `codex login status` said "Not logged in" (exit 1)
+    const recorded = lines("codex/exec-signed-out.jsonl");
+    const message =
+      "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses, cf-ray: <cf-ray>, request id: <request-id>";
+    expect(valid(parse(recorded).outcome)).toEqual({ kind: "auth", message });
+    expect(codexOutcomeAfterExit(recorded, exit(1))).toEqual({ kind: "auth", message });
+    // the reconnect notices alone, before the turn fails, already read as a sign-in problem
+    expect(codexOutcomeAfterExit(recorded.slice(0, 4), exit(1)).kind).toBe("auth");
+  });
+
   it("any other failed turn is a retryable error", () => {
     const outcome = parse([
       JSON.stringify({ type: "turn.failed", error: { message: "stream disconnected" } }),
@@ -271,5 +283,165 @@ describe("Codex outcome after the process exits", () => {
 
   it("Codex has no turn cap of its own (§12.1): max_turns never comes from a Codex stream", () => {
     expect(adapter.capabilities.turnCap).toBe(false);
+  });
+});
+
+/**
+ * D-cx (spine §5 reading 244): Codex refuses a model id before any work. Recorded 2026-10-15
+ * (codex-cli 0.162.1, a ChatGPT plan, `live:h15 codex-model-refusal`): a warning item about the
+ * model's metadata, then `error` and `turn.failed` carrying the API's 400 as JSON text, "The '<id>'
+ * model is not supported when using Codex with a ChatGPT account." The engine retries without
+ * `-m`, so the adapter only names the cause and never retries itself.
+ */
+describe("Codex model refusal (D-cx)", () => {
+  const refused = lines("codex/exec-model-refused.jsonl");
+  const ONE_LINE =
+    "The 'vtc-probe-no-such-model' model is not supported when using Codex with a ChatGPT account.";
+
+  it("reads the recorded refusal as error, cause model_refused, retryable, with the host's one-line message", () => {
+    expect(valid(parse(refused).outcome)).toEqual({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: ONE_LINE,
+      tokens: null,
+      cost_usd: null,
+    });
+  });
+
+  const asked = (model?: string) => ({
+    model: {
+      tier: "mid" as const,
+      effort: "medium" as const,
+      ...(model === undefined ? {} : { model }),
+    },
+  });
+  const REFUSED_ID = asked("vtc-probe-no-such-model");
+
+  it("reads it the same after the process exits, whatever the exit status or launcher stop", () => {
+    expect(codexOutcomeAfterExit(refused, exit(1), REFUSED_ID)).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: ONE_LINE,
+    });
+    expect(codexOutcomeAfterExit(refused, exit(1, "", null, IDLE), REFUSED_ID)).toMatchObject({
+      cause: "model_refused",
+    });
+    // only the error event, then a bare exit
+    const errorOnly = refused.filter((l) => !l.includes('"turn.failed"'));
+    expect(codexOutcomeAfterExit(errorOnly, exit(1), REFUSED_ID)).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      message: ONE_LINE,
+    });
+  });
+
+  it("a run that asked for no model id never reads a refusal on its stream: the default refused too is an ordinary error (reading 244)", () => {
+    const errorOnly = refused.filter((l) => !l.includes('"turn.failed"'));
+    for (const request of [asked(), undefined]) {
+      const failed = valid(codexOutcomeAfterExit(refused, exit(1), request));
+      expect(failed).toMatchObject({ kind: "error", retryable: true });
+      expect(failed.kind === "error" && failed.cause).toBeUndefined();
+      // a launcher stop names the cause, as for any failed turn without one of its own
+      expect(codexOutcomeAfterExit(refused, exit(1, "", null, IDLE), request)).toMatchObject({
+        kind: "error",
+        cause: "idle",
+      });
+      expect(codexOutcomeAfterExit(errorOnly, exit(1), request)).toMatchObject({
+        kind: "error",
+        retryable: true,
+        cause: "exit_code",
+      });
+    }
+  });
+
+  it("reads a refusal printed on stderr when the stream has none and it names the id asked for", () => {
+    const stderr = "Error: model 'plan-model-x' is not available on your current plan\n";
+    expect(codexOutcomeAfterExit([], exit(1, stderr), asked("plan-model-x"))).toMatchObject({
+      kind: "error",
+      cause: "model_refused",
+      retryable: true,
+      message: "Error: model 'plan-model-x' is not available on your current plan",
+    });
+    // stderr is free-form: a refusal naming another id, or a run that asked for no id, is no
+    // refusal of this run's model
+    for (const request of [asked("other-model"), asked(), undefined]) {
+      const outcome = codexOutcomeAfterExit([], exit(1, stderr), request);
+      expect(outcome).toMatchObject({ kind: "error", cause: "exit_code" });
+    }
+  });
+
+  it("never reads a transient or unrelated failure that mentions a model as a refusal", () => {
+    for (const text of [
+      "stream error: model is unavailable, try again later",
+      "The model is currently overloaded; model is not available right now",
+      "error: the model output schema file /tmp/x.json does not exist",
+      "MCP server `vtc` failed: Model Context Protocol config file does not exist",
+      "model profile 'deep': file /home/u/.codex/profiles/deep.toml does not exist",
+      "The 'plan-model-x' model is not supported in this request: unknown parameter",
+    ]) {
+      const stream = parse([
+        JSON.stringify({ type: "thread.started", thread_id: THREAD }),
+        JSON.stringify({ type: "turn.failed", error: { message: text } }),
+      ]).outcome;
+      expect(stream, text).toMatchObject({ kind: "error", retryable: true });
+      expect(stream?.kind === "error" && stream.cause, text).toBeUndefined();
+      const onStderr = codexOutcomeAfterExit([], exit(1, `${text}\n`), asked("plan-model-x"));
+      expect(onStderr, text).toMatchObject({ kind: "error", cause: "exit_code" });
+    }
+  });
+
+  it("recognises the other wordings a host may use for a refused model", () => {
+    for (const text of [
+      "The 'plan-model-x' model is not supported when using Codex with a ChatGPT account.",
+      "model_not_found: The model `plan-model-x` does not exist or you do not have access to it.",
+      "You do not have access to the model plan-model-x.",
+      "Model plan-model-x is not available for your plan",
+    ]) {
+      const outcome = parse([
+        JSON.stringify({ type: "thread.started", thread_id: THREAD }),
+        JSON.stringify({ type: "turn.failed", error: { message: text } }),
+      ]).outcome;
+      expect(outcome, text).toMatchObject({ kind: "error", cause: "model_refused" });
+    }
+  });
+
+  it("is never the cause once the run has done work, or when the text names no refusal", () => {
+    const afterWork = parse([
+      JSON.stringify({ type: "thread.started", thread_id: THREAD }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_1", type: "agent_message", text: "working" },
+      }),
+      JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message:
+            "The 'plan-model-x' model is not supported when using Codex with a ChatGPT account.",
+        },
+      }),
+    ]).outcome;
+    expect(afterWork).toMatchObject({ kind: "error" });
+    expect(afterWork?.kind === "error" && afterWork.cause).toBeUndefined();
+    // the metadata warning alone is not a refusal: an accepted id the CLI does not know prints it
+    const warningOnly = codexOutcomeAfterExit(
+      [refused[0] ?? "", refused[1] ?? ""],
+      exit(1, "Model metadata for `x` not found. Defaulting to fallback metadata"),
+    );
+    expect(warningOnly).toMatchObject({ kind: "error", cause: "exit_code" });
+  });
+
+  it("a limit or a sign-in failure still wins over a refusal wording", () => {
+    const limit = parse([
+      JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message: "model not available: usage limit reached",
+          codexErrorInfo: "usageLimitExceeded",
+        },
+      }),
+    ]).outcome;
+    expect(limit?.kind).toBe("limit");
   });
 });

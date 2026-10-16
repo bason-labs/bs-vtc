@@ -38,6 +38,11 @@ export interface DclArgs {
   readonly pluginDir?: string;
   /** `claude-arm` only: the model id. Default `haiku`, the engine's low tier. */
   readonly model?: string;
+  /**
+   * `claude-arm` only: the `vtc` cli the run's plugin hooks call, put on `PATH` behind a recording
+   * shim (round-5 items). Default: the repo's build, `packages/cli/dist/bin.js`.
+   */
+  readonly vtcBin?: string;
 }
 
 const pick = <T extends string>(flag: string, text: string, options: readonly T[]): T => {
@@ -48,7 +53,15 @@ const pick = <T extends string>(flag: string, text: string, options: readonly T[
   return found;
 };
 
-const VALUE_FLAGS = ["--out", "--mode", "--profile", "--open", "--plugin-dir", "--model"] as const;
+const VALUE_FLAGS = [
+  "--out",
+  "--mode",
+  "--profile",
+  "--open",
+  "--plugin-dir",
+  "--model",
+  "--vtc-bin",
+] as const;
 type ValueFlag = (typeof VALUE_FLAGS)[number];
 
 /** Which flags each target takes besides `--out`. */
@@ -57,7 +70,7 @@ const TARGET_FLAGS: Readonly<Record<DclTarget, readonly ValueFlag[]>> = {
   "codex-precedence": [],
   "codex-mcp": [],
   "codex-plugin": ["--plugin-dir"],
-  "claude-arm": ["--plugin-dir", "--model"],
+  "claude-arm": ["--plugin-dir", "--model", "--vtc-bin"],
 };
 
 export const parseDclArgs = (argv: readonly string[]): DclArgs => {
@@ -82,6 +95,7 @@ export const parseDclArgs = (argv: readonly string[]): DclArgs => {
   if (out === undefined) throw new Error("--out <dir> is required: where the check writes");
   const pluginDir = values["--plugin-dir"];
   const model = values["--model"];
+  const vtcBin = values["--vtc-bin"];
   const open = values["--open"];
   if (open !== undefined && !/^https:\/\/[^\s]+$/u.test(open)) {
     throw new Error("--open needs an https URL");
@@ -94,5 +108,6 @@ export const parseDclArgs = (argv: readonly string[]): DclArgs => {
     ...(open === undefined ? {} : { open }),
     ...(pluginDir === undefined ? {} : { pluginDir }),
     ...(model === undefined ? {} : { model }),
+    ...(vtcBin === undefined ? {} : { vtcBin }),
   };
 };

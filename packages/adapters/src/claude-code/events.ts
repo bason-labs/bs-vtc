@@ -10,8 +10,10 @@
  *   `ParsedStream.commandShapes` (D-cs), once per block id;
  * - `rate_limit_event`: `rate_limit_info {status: allowed|allowed_warning|rejected, resetsAt?,
  *   rateLimitType?, overageStatus?, unifiedWindows?: {five_hour, seven_day: {utilization,
- *   resetsAt}}}` (recorded 2026-10-14; `utilization` read 0.16 then 0.32, apparently a 0–1
- *   fraction, but its unit is not confirmed against the statusline, so it is not used);
+ *   resetsAt}}}` (recorded 2026-10-14 and 2026-10-15). `utilization` is a 0–1 fraction (H-10,
+ *   spine §5 reading 234): Claude Code 2.1.299's own `/usage`, run seconds after a recorded
+ *   stream, printed the same windows and resets at 14% / 73% where the stream read 0.13 / 0.73
+ *   (`stream-usage-unit.jsonl`); a value outside 0–1 stays unknown;
  * - `system/api_retry`: `attempt`, `retry_delay_ms`, `error_status`, `error` (`rate_limit`,
  *   `overloaded`, `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`,
  *   `billing_error`, …) (Agent SDK and headless docs; no recording yet).
@@ -56,12 +58,19 @@ import {
 
 const HOST = "claude-code";
 
+/** One plan window as `unifiedWindows` reports it. */
+interface UnifiedWindow {
+  readonly resetsAt: string | null;
+  /** `utilization` × 100, or `null` when it is missing or not a 0–1 fraction (H-10). */
+  readonly usedPct: number | null;
+}
+
 interface RateLimitInfo {
   readonly status: "allowed" | "allowed_warning" | "rejected";
   readonly type: string | null;
   readonly resetsAt: string | null;
-  /** `unifiedWindows`: each plan window's reset time, by its label (`five_hour`, `seven_day`). */
-  readonly windows: ReadonlyMap<string, string | null>;
+  /** `unifiedWindows`: each plan window's reading, by its label (`five_hour`, `seven_day`). */
+  readonly windows: ReadonlyMap<string, UnifiedWindow>;
 }
 
 interface ClaudeScan {
@@ -69,8 +78,8 @@ interface ClaudeScan {
   readonly model: string | null;
   /** Latest reading per `rateLimitType` (`null` key = untyped). */
   readonly rateLimits: ReadonlyMap<string | null, RateLimitInfo>;
-  /** Latest reset time per plan window from `unifiedWindows` (`null` = given without one). */
-  readonly unifiedResets: ReadonlyMap<string, string | null>;
+  /** Latest reading per plan window from `unifiedWindows`. */
+  readonly unified: ReadonlyMap<string, UnifiedWindow>;
   readonly rejected: RateLimitInfo | null;
   readonly retry: StreamRetry | null;
   /** The last retry was for a rate limit and nothing ran after it: the host gave up waiting. */
@@ -83,13 +92,31 @@ interface ClaudeScan {
   readonly unrecognized: number;
 }
 
+/**
+ * `utilization` as a percentage (one decimal), only for a number in 0–1: the unit a recording
+ * confirmed (H-10). Anything else is unknown, never a guess. Not exact: in both recorded pairs the
+ * stream read up to one point below Claude Code's own `/usage` taken seconds later (0.13 against
+ * 14% for the session window; the week once matched, once ran one low), so a limit plan must
+ * leave that point of headroom. It is not rounded up: the gap was not constant, and the stream's
+ * event comes before the run's own use.
+ */
+const usedPctOf = (utilization: unknown): number | null =>
+  typeof utilization === "number" && utilization >= 0 && utilization <= 1
+    ? Math.round(utilization * 1000) / 10
+    : null;
+
 /** The plan windows `unifiedWindows` reports (per-model limits come only from rejections). */
-const unifiedWindows = (value: unknown): Map<string, string | null> => {
-  const windows = new Map<string, string | null>();
+const unifiedWindows = (value: unknown): Map<string, UnifiedWindow> => {
+  const windows = new Map<string, UnifiedWindow>();
   if (!isRecord(value)) return windows;
   for (const label of Object.keys(WINDOW_KINDS)) {
     const window = ownEntry(value, label);
-    if (isRecord(window)) windows.set(label, epochToIso(window.resetsAt));
+    if (isRecord(window)) {
+      windows.set(label, {
+        resetsAt: epochToIso(window.resetsAt),
+        usedPct: usedPctOf(window.utilization),
+      });
+    }
   }
   return windows;
 };
@@ -158,7 +185,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
   let sessionId: string | null = null;
   let model: string | null = null;
   const rateLimits = new Map<string | null, RateLimitInfo>();
-  const unifiedResets = new Map<string, string | null>();
+  const unified = new Map<string, UnifiedWindow>();
   let rejected: RateLimitInfo | null = null;
   let retry: StreamRetry | null = null;
   let rateLimitRetryUnrecovered = false;
@@ -192,7 +219,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
         continue;
       }
       rateLimits.set(info.type, info);
-      for (const [label, resetsAt] of info.windows) unifiedResets.set(label, resetsAt);
+      for (const [label, window] of info.windows) unified.set(label, window);
       if (info.status === "rejected") rejected = info;
     } else if (type === "result") {
       result = event;
@@ -211,7 +238,7 @@ const scan = (lines: readonly string[]): ClaudeScan => {
     sessionId,
     model,
     rateLimits,
-    unifiedResets,
+    unified,
     rejected,
     retry,
     rateLimitRetryUnrecovered,
@@ -333,21 +360,21 @@ const outcomeFromResult = (s: ClaudeScan, result: Record<string, unknown>): Host
  * Usage the stream reported (`source: "sdk_event"`), or `null` when it carried none: one entry per
  * plan window named by a typed reading (`rateLimitType`) or by `unifiedWindows`, five-hour first.
  * The reset time is the unified window's when it gives one, else the typed reading's. The use is
- * known only from a rejection (100%): `utilization` has no confirmed unit (spine §7), so it stays
- * unknown rather than a guess.
+ * 100% on a rejection, else the unified window's `utilization` as a percentage (H-10, its unit
+ * confirmed by a recording), else unknown.
  */
 const usageOf = (s: ClaudeScan): UsageSnapshot | null => {
   const windows: UsageWindow[] = [];
   for (const [label, window] of Object.entries(WINDOW_KINDS)) {
     const typed = s.rateLimits.get(label);
-    const unified = s.unifiedResets.get(label);
+    const unified = s.unified.get(label);
     if (typed === undefined && unified === undefined) continue;
     windows.push({
       kind: window.kind,
       label,
       window_minutes: window.minutes,
-      used_pct: typed?.status === "rejected" ? 100 : null,
-      resets_at: unified ?? typed?.resetsAt ?? null,
+      used_pct: typed?.status === "rejected" ? 100 : (unified?.usedPct ?? null),
+      resets_at: unified?.resetsAt ?? typed?.resetsAt ?? null,
     });
   }
   if (windows.length === 0) return null;
