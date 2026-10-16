@@ -27,6 +27,7 @@ import {
   createBwrapSandbox,
   createSandboxExecSandbox,
   detectGateSandbox,
+  GATE_BROWSER_RULES,
   GATE_MACH_SERVICES,
   GATE_READABLE_VTC_HOME,
   GateCommandJail,
@@ -116,6 +117,41 @@ describe("the macOS sandbox-exec profile", () => {
     // DNS and certificate checks only where the network is.
     expect(GATE_MACH_SERVICES.install).toContain("com.apple.dnssd.service");
     expect(verify).not.toContain("com.apple.dnssd.service");
+  });
+
+  it("adds exactly Chromium's start-up rules for a browser command in the verify phase, and nothing else (reading 257)", () => {
+    // Pinned: chrome-headless-shell dies at start-up without each of these (live, macOS 27.0.1).
+    expect(GATE_BROWSER_RULES).toEqual([
+      '(allow mach-register (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))',
+      '(allow mach-lookup (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))',
+      '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+    ]);
+    const browser = { ...spec(), browser: true } as GateJailSpec;
+    const plain = rulesOf(sandboxExecProfile(spec(), same).profile);
+    const withBrowser = rulesOf(sandboxExecProfile(browser, same).profile);
+    expect(withBrowser.filter((r) => !plain.includes(r))).toEqual([...GATE_BROWSER_RULES]);
+    expect(plain.filter((r) => !withBrowser.includes(r))).toEqual([]);
+    // The system services stay the gate's own: the browser reaches no LaunchServices, window
+    // server, pasteboard, TCC or keychain service, and no wholesale mach, IOKit or file write.
+    expect(machNames(sandboxExecProfile(browser, same).profile)).toEqual([
+      ...GATE_MACH_SERVICES.always,
+    ]);
+    expect(withBrowser.join("\n")).not.toMatch(
+      /\(allow (mach-lookup|mach-register|iokit\*?|iokit-open|file-write\*?|network\*?)\)/,
+    );
+    for (const rule of GATE_BROWSER_RULES) {
+      expect(rule).not.toMatch(
+        /file-|network|SecurityServer|securityd|windowserver|pasteboard|tccd|launchservices/,
+      );
+    }
+    // Only for a browser command, and only in the verify phase.
+    const install = rulesOf(
+      sandboxExecProfile({ ...spec({ phase: "install" }), browser: true }, same).profile,
+    );
+    for (const rule of GATE_BROWSER_RULES) {
+      expect(plain).not.toContain(rule);
+      expect(install).not.toContain(rule);
+    }
   });
 
   it("lets processes signal and inspect only their own sandbox", () => {
@@ -909,6 +945,34 @@ describe("a jail: per-run home, per-command temp dirs", () => {
     jail.dispose();
     expect(existsSync(home)).toBe(false);
     expect(existsSync(specs[1]?.home ?? "")).toBe(false);
+  });
+
+  it("marks only a verify-phase browser command as a browser command (reading 257)", async () => {
+    const work = tempDir("vtc-jail-");
+    const checkout = join(work, "checkout");
+    mkdirSync(checkout);
+    const { sandbox, specs } = recording();
+    const jail = new GateCommandJail(sandbox, []);
+    const runs = [
+      { phase: "verify", browser: true },
+      { phase: "install", browser: true },
+      { phase: "verify" },
+    ] as const;
+    for (const [i, extra] of runs.entries()) {
+      const result = await jail.run({
+        ...extra,
+        checkout,
+        argv: [process.execPath, "-e", ""],
+        cwd: checkout,
+        env: sandboxEnvInput(),
+        timeoutMs: 20_000,
+        stdoutPath: join(work, `${String(i)}.out`),
+        stderrPath: join(work, `${String(i)}.err`),
+      });
+      expect(result.code).toBe(0);
+    }
+    expect(specs.map((s) => (s as GateJailSpec).browser)).toEqual([true, undefined, undefined]);
+    jail.dispose();
   });
 
   it("gives the verify phase a fresh home and Cargo home, and keeps only the download caches (reading 252)", async () => {

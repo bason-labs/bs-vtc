@@ -363,7 +363,7 @@ describe("visual runner script", () => {
       });
       // The command went through the sandbox, verify phase, with the app's loopback port only and
       // the extra read root, under a Node whose inspector no signal can open.
-      expect(specs.at(-1)).toMatchObject({ phase: "verify", loopbackPorts: [port] });
+      expect(specs.at(-1)).toMatchObject({ phase: "verify", loopbackPorts: [port], browser: true });
       expect((specs.at(-1) as { loopback?: boolean }).loopback).toBeUndefined();
       expect(argvs.at(-1)?.slice(0, 2)).toEqual([NODE, "--disable-sigusr1"]);
       expect((specs.at(-1) as { allowRead?: string[] }).allowRead).toEqual(

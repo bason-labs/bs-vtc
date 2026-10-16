@@ -66,6 +66,7 @@ export {
   createBwrapSandbox,
   createSandboxExecSandbox,
   detectGateSandbox,
+  GATE_BROWSER_RULES,
   GATE_MACH_SERVICES,
   GATE_READABLE_VTC_HOME,
   GateCommandJail,

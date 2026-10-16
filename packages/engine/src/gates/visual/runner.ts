@@ -285,6 +285,7 @@ export const runSignedScript = async <R extends { readonly files: Record<string,
   try {
     exec = await jail.run({
       phase: "verify",
+      browser: true,
       ...(call.loopbackPort === null ? {} : { loopbackPorts: [call.loopbackPort] }),
       checkout: call.checkout,
       argv: [

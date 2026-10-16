@@ -326,6 +326,12 @@ export interface GateJailSpec extends GateSandboxSpec {
    * 253), so a change after the scripts-free fetch fails the verify gates.
    */
   readonly deps?: string;
+  /**
+   * Verify phase: the command launches the pinned headless Chromium (the visual and evidence
+   * runners, `runSignedScript`). macOS adds {@link GATE_BROWSER_RULES}, without which Chromium
+   * crashes at start-up (spine §5 reading 257); Linux needs nothing more.
+   */
+  readonly browser?: boolean;
 }
 
 /** A wrapped command that runs under {@link REAPER_SCRIPT} (see `exec.ts` `ExecRequest.reaper`). */
@@ -345,12 +351,14 @@ const extrasOf = (
   resolvConf?: string;
   loopbackPorts: readonly number[];
   deps?: string;
+  browser: boolean;
 } => {
   const extra = spec as GateJailSpec;
   return {
     hideRead: extra.hideRead ?? [],
     allowRead: extra.allowRead ?? [],
     loopbackPorts: extra.loopbackPorts ?? [],
+    browser: extra.browser === true,
     ...(extra.deps === undefined ? {} : { deps: extra.deps }),
     ...(extra.reapSentinel === undefined ? {} : { reapSentinel: extra.reapSentinel }),
     ...(extra.resolvConf === undefined ? {} : { resolvConf: extra.resolvConf }),
@@ -457,6 +465,26 @@ export const GATE_MACH_SERVICES = {
   ],
 } as const;
 
+/**
+ * What the pinned chrome-headless-shell needs on macOS beyond the gate profile, added only for a
+ * verify-phase command that launches it ({@link GateJailSpec.browser}; spine §5 reading 257).
+ * Without them it dies before Playwright connects:
+ * - `mach-register` / `mach-lookup` of `org.chromium.Chromium.MachPortRendezvousServer.<pid>`:
+ *   the browser process checks in this bootstrap name (`bootstrap_check_in ... Permission denied
+ *   (1100)` is fatal) and its renderer and GPU children look it up to receive their Mach ports.
+ *   Only that name prefix: no other service is registered or reached.
+ * - `iokit-open` of `RootDomainUserClient` (IOPMrootDomain, power state): the browser's power
+ *   monitor opens it at start-up and crashes (`SEGV_ACCERR`) when it cannot. Chromium's own
+ *   renderer and GPU sandboxes allow this class too. No other IOKit user client (GPU, IOSurface,
+ *   HID, framebuffer) is opened.
+ * No file, network, keychain, LaunchServices, pasteboard or window-server rule is added.
+ */
+export const GATE_BROWSER_RULES: readonly string[] = [
+  '(allow mach-register (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))',
+  '(allow mach-lookup (global-name-prefix "org.chromium.Chromium.MachPortRendezvousServer."))',
+  '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+];
+
 /** The read operations, spelled out: a rule for one operation beats a `file-read*` rule. */
 const READ_OPS = "file-read-data file-read-metadata file-read-xattr";
 /** Hidden: no contents or extended attributes, but names and metadata (so paths still resolve). */
@@ -550,6 +578,7 @@ export const sandboxExecProfile = (
     ...deny.map((key) => `(deny file-read* ${READ_OPS} ${sub(key)})`),
     `(deny file-read* ${READ_OPS} (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))`,
     ...(sentinel === undefined ? [] : [`(deny ${HIDE_OPS} (literal (param "SENTINEL")))`]),
+    ...(spec.phase === "verify" && extra.browser ? GATE_BROWSER_RULES : []),
   ];
   if (spec.phase === "verify" && spec.loopback === true) {
     // D-av: the human said at calibration that the suite needs the loopback (gates.yml
@@ -1007,6 +1036,8 @@ export interface JailedRequest extends ExecRequest {
   readonly loopback?: boolean;
   /** Verify phase: only these loopback ports are reachable ({@link GateJailSpec.loopbackPorts}). */
   readonly loopbackPorts?: readonly number[];
+  /** Verify phase: the command launches the pinned headless Chromium ({@link GateJailSpec.browser}). */
+  readonly browser?: boolean;
   /** Absolute checkout the command may write. */
   readonly checkout: string;
   /**
@@ -1172,7 +1203,7 @@ export class GateCommandJail {
   async run(jailed: JailedRequest): Promise<JailedResult> {
     if (this.broken !== null) throw new Error(this.broken);
     const { home, tempDir, deps, goModCache, cargoHome } = this.dirs(jailed.phase);
-    const { allowRead: extraRead, setup, loopbackPorts, ...rest } = jailed;
+    const { allowRead: extraRead, setup, loopbackPorts, browser, ...rest } = jailed;
     setup?.(tempDir);
     const request = {
       ...rest,
@@ -1193,6 +1224,7 @@ export class GateCommandJail {
       ...(loopbackPorts !== undefined && loopbackPorts.length > 0 && request.phase === "verify"
         ? { loopbackPorts }
         : {}),
+      ...(browser === true && request.phase === "verify" ? { browser: true } : {}),
     };
     const wrapped = this.sandbox.wrap(request.argv, spec);
     const reaper = isReaped(wrapped);
