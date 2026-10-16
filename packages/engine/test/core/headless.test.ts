@@ -7,7 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   CODEX_IN_SESSION_REFUSED_REASON,
   effectivePromptSha,
@@ -32,7 +32,7 @@ import { usageReportView } from "../../src/core/views.js";
 import { MAX_STEP_FAILURES, stopTaskHeadless } from "../../src/core/submit.js";
 import { createPluginCatalog, type CallContext, type PluginCatalog } from "../../src/core/index.js";
 import type { HeadlessEntry, Kernel, RunHandle } from "../../src/core/kernel.js";
-import { writeFile } from "../helpers/repo.js";
+import { cleanupDirs, writeFile } from "../helpers/repo.js";
 import {
   CLAUDE,
   createHarness,
@@ -41,6 +41,9 @@ import {
   type Harness,
   type HeadlessScript,
 } from "../helpers/engine-harness.js";
+
+// the temp repos and VTC homes go after each test
+afterEach(cleanupDirs);
 
 const CODEX: CallContext = { host: "codex" };
 

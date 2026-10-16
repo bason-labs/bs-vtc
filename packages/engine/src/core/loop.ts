@@ -1,9 +1,11 @@
 /**
  * Loop controller (§6.3 step 9, §7.6 rules 8–10; AD-8 rules 1 and 13). Pure: after a failed
  * verification round it decides between another fix round and parking (`stuck` or `cap`); it
- * picks the Engineer's model tier (one tier up, fresh session, after 2 failed rounds).
+ * picks the Engineer's model tier (`escalationSteps`: a tier up, in a fresh session, after every
+ * failed round from a Low start and every 2 from a Mid or Top one; D-cv).
  */
 import {
+  escalationSteps,
   openHighRuleFires,
   type Finding,
   type ModelTier,
@@ -94,15 +96,12 @@ const TIER_DOWN: Readonly<Record<ModelTier, ModelTier>> = { top: "mid", mid: "lo
 export const tierUp = (tier: ModelTier): ModelTier => TIER_UP[tier];
 export const tierDown = (tier: ModelTier): ModelTier => TIER_DOWN[tier];
 
-/** Failed rounds after which the Engineer escalates one model tier (§6.3 step 9). */
-export const ESCALATE_AFTER_FAILED_ROUNDS = 2;
-
 /**
- * The Engineer's tier and session for round `round`: one tier up after every
- * {@link ESCALATE_AFTER_FAILED_ROUNDS} failed rounds, counted from the routed start (D-cm, reading
- * 218(4)): a Low start runs on Mid from round 3 and on Top from round 5, as far as its cap allows.
- * `steps` is the number of tiers up (before the project's clamp). The first escalation starts a
- * fresh session; a later one does when it changes the tier.
+ * The Engineer's tier and session for round `round` (§6.3 step 9; D-cm, D-cv, spine §5 reading
+ * 242): `escalationSteps` tiers up from the routed start after the project's clamp (`baseTier`). A
+ * Low start moves up after every failed round (Low, Mid, Top in rounds 1–3), a Mid or Top start
+ * after every `TIER_ESCALATION.afterFailedRounds`. `steps` is the number of tiers up (before the
+ * clamp). Each step that changes the tier starts a fresh session; the first escalation always does.
  */
 export const engineerDispatch = (
   baseTier: ModelTier,
@@ -113,14 +112,14 @@ export const engineerDispatch = (
   readonly escalated: boolean;
   readonly steps: number;
 } => {
-  const steps = Math.max(0, Math.floor((round - 1) / ESCALATE_AFTER_FAILED_ROUNDS));
+  const steps = escalationSteps(baseTier, round);
   const tierAfter = (n: number): ModelTier => {
     let tier = baseTier;
     for (let i = 0; i < n; i++) tier = tierUp(tier);
     return tier;
   };
   const tier = tierAfter(steps);
-  const boundary = steps > 0 && round === steps * ESCALATE_AFTER_FAILED_ROUNDS + 1;
+  const boundary = steps > (round <= 1 ? 0 : escalationSteps(baseTier, round - 1));
   return {
     tier,
     freshSession: boundary && (steps === 1 || tier !== tierAfter(steps - 1)),

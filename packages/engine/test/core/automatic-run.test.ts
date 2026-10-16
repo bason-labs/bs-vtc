@@ -72,7 +72,7 @@ describe("automatic runs (AD-27 rule 2)", () => {
     await h.release();
   });
 
-  it("never approves a failed DESIGN check: the engine rejects G2 with the check's problems, and the Architect fixes it", async () => {
+  it("never approves a failed DESIGN check: the coverage loop sends the Architect the gaps before G2 (H-13)", async () => {
     const h = createHarness({ project: { merge_level: 2 } });
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
     const { planner, seen } = await drive(h, (n) =>
@@ -81,18 +81,26 @@ describe("automatic runs (AD-27 rule 2)", () => {
     expect(planner).toBeDefined();
     expect(seen.filter((a) => a.type === "approve_gate")).toEqual([]);
     const log = events(h);
-    const rejected = log.filter((e) => e.type === "gate.rejected");
-    expect(rejected.map((e) => [e.actor, e.data.gates])).toEqual([["engine", ["G2"]]]);
-    expect(String(rejected[0]?.data.note)).toMatch(
-      /the DESIGN check failed: REQ-1 is mapped to no component/,
-    );
-    // the Architect ran again with the engine's note
+    // no G2 was shown and rejected: the loop fixed the gap first
+    expect(log.filter((e) => e.type === "gate.rejected")).toEqual([]);
+    expect(
+      log.filter((e) => e.type === "design.coverage_checked").map((e) => e.data.outcome),
+    ).toEqual(["fixing", "complete"]);
+    // the Architect ran again with the gaps in its pack, printed as Dispatch lines
     const architects = spawns(seen).filter((a) => a.role === "architect");
     expect(architects).toHaveLength(2);
-    expect(architects[1]?.prompt).toMatch(
-      /The engine rejected the gate: automatic run: the DESIGN check failed/,
-    );
-    // the G2 the engine approved is the one whose check passed
+    const pack = (n: number) =>
+      readFileSync(join(h.repo, architects[n]?.pack ?? ""), "utf8") +
+      readFileSync(join(h.repo, (architects[n]?.pack ?? "").replace(/\.md$/, ".json")), "utf8");
+    expect(pack(0)).not.toMatch(/coverage_gaps|coverage round/);
+    expect(
+      JSON.parse(
+        readFileSync(join(h.repo, (architects[1]?.pack ?? "").replace(/\.md$/, ".json")), "utf8"),
+      ),
+    ).toMatchObject({
+      coverage_gaps: { round: 1, reqs_without_component: ["REQ-1"] },
+    });
+    expect(pack(1)).toMatch(/coverage round: 1 of 3/);
     const approvals = log.filter((e) => e.type === "gate.approved");
     expect(approvals.map((e) => [e.actor, e.data.gates])).toEqual([
       ["engine", ["G1"]],
@@ -102,22 +110,20 @@ describe("automatic runs (AD-27 rule 2)", () => {
     await h.release();
   });
 
-  it("leaves a DESIGN check that keeps failing for the human after its own bounded rejections", async () => {
+  it("parks a DESIGN check that keeps failing for the human, before G2 (H-13)", async () => {
     const h = createHarness({ project: { merge_level: 2 } });
     await h.engine.startAutomatic(REQUEST, ISSUE, CLAUDE);
     const { planner, seen } = await drive(h, () => UNMAPPED_SPINE);
     expect(planner).toBeUndefined();
     const log = events(h);
-    expect(log.filter((e) => e.type === "gate.rejected").map((e) => e.actor)).toEqual([
-      "engine",
-      "engine",
-    ]);
+    expect(log.filter((e) => e.type === "gate.rejected")).toEqual([]);
     expect(log.filter((e) => e.type === "gate.approved").map((e) => e.data.gates)).toEqual([
       ["G1"],
     ]);
-    const gate = seen.findLast((a) => a.type === "approve_gate");
-    expect(gate).toMatchObject({ type: "approve_gate", gates: ["G2"] });
-    expect(h.engine.status({}).run.phase).toBe("g2");
+    // the same gap after a fix round is stuck: the run asks the human
+    expect(seen.filter((a) => a.type === "approve_gate")).toEqual([]);
+    expect(seen.at(-1)).toMatchObject({ type: "ask_human" });
+    expect(h.engine.status({}).run.phase).toBe("design");
     await h.release();
   });
 

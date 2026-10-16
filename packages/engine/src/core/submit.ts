@@ -6,21 +6,24 @@
  * Engineer's write-scope violation, records the test-integrity hit, §6.3 step 4).
  */
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
   capForRisk,
   checkResultAgainstContract,
   countCommandShapes,
+  effectivePrices,
   escalationFromQuestion,
   HIDDEN_TESTS,
-  priceTokens,
+  priceRun,
   redactSecrets,
   resolveRoleMode,
   type ArtifactRef,
   type CommandShape,
   type Finding,
   type HostFailureOutcome,
+  type HostId,
+  type ModelPrice,
   type Phase,
   type Question,
   type RejectReason,
@@ -33,7 +36,7 @@ import {
   type TokenUsage,
 } from "@vtc/shared";
 import { budgetState, sharesExceeded, taskBudgetFor, usd } from "./budget.js";
-import { drainCommandShapeSpool } from "./command-shapes.js";
+import { agentMatches, drainCommandShapeSpool, inside } from "./command-shapes.js";
 import { DEFAULT_ACCEPTANCE_GLOBS } from "./config.js";
 import { resolves, unresolved } from "./evidence.js";
 import { matchesAny } from "./globs.js";
@@ -152,11 +155,12 @@ const bytesSha = (bytes: Uint8Array): string => createHash("sha256").update(byte
 // ---------------------------------------------------------------- bookkeeping
 
 /**
- * Records the spend of a run (§11): task, feature and run budgets. The cost is the one the host
- * reported, kept also when it names no model or one VTC has no price for (a run on the session's
- * model, D-ae; D-at, spine §5 reading 77): the host computed it, so it does not depend on VTC
- * knowing the model id, and being conservative about budget beats being precise about price.
- * Only a run with no reported cost (`null`) counts 0, and it is flagged unpriced.
+ * Records the spend of a run (§11): task, feature and run budgets. The amount is what the run
+ * counts toward the budgets (H-12): the cost the host reported, kept also when it names no model
+ * or one VTC has no price for (a run on the session's model, D-ae; D-at, spine §5 reading 77), or
+ * the engine's price of its tokens, or, for a model with no known price, its tokens at the host's
+ * price ceiling (`pricedSubmit`): being conservative about budget beats being precise about price.
+ * Only a run with nothing known (`null`) counts 0, and it is flagged unpriced.
  */
 const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number | null): void => {
   if (cost === null || cost === 0) return;
@@ -202,36 +206,66 @@ const recordSpend = (k: Kernel, h: RunHandle, run: RoleRunRecord, cost: number |
 };
 
 /**
- * §11 (spine §5 reading 152): the engine prices a run's tokens itself only when the host reported
- * no cost (Codex reports none): with the model the host named, else the one the dispatch resolved,
- * at the user's price table (`prices`). A model the table does not have stays unpriced (`null`,
- * flagged in the run summary), never $0.
+ * H-12 (spine §5 reading 236): the prices the engine counts a host's runs with, the host adapter's
+ * default table (`HostAdapter.defaultPrices`) with the user's `~/.vtc/config.yaml` `prices` over
+ * it, model by model (`effectivePrices`).
+ */
+export const hostPrices = (
+  k: Pick<Kernel, "deps">,
+  host: HostId,
+): Readonly<Record<string, ModelPrice>> =>
+  effectivePrices(k.deps.adapters[host]?.defaultPrices, k.deps.prices);
+
+/**
+ * §11, H-12 (spine §5 reading 236; replaces reading 152's "a model missing from the price table is
+ * an error"): the engine prices a run's tokens itself only when the host reported no cost (Codex
+ * reports none), with the model the host named, else the one the dispatch resolved, at its host's
+ * effective prices ({@link hostPrices}, `priceRun`). A listed model: `cost_usd` and `budget_usd`
+ * are its price. A model with no known price: `cost_usd` stays `null` (unknown, never $0) and
+ * `budget_usd` counts its tokens at the host's price ceiling (`null` when the host has no known
+ * price at all).
  */
 export const pricedCost = (
   k: Pick<Kernel, "deps">,
-  run: Pick<RoleRunRecord, "model">,
+  run: Pick<RoleRunRecord, "model" | "host">,
   usage: { readonly model?: string | null; readonly tokens: TokenUsage | null },
-): number | null => {
-  if (usage.tokens === null) return null;
-  const price = k.deps.prices?.[usage.model ?? run.model];
-  return price === undefined ? null : priceTokens(usage.tokens, price);
+): { readonly cost_usd: number | null; readonly budget_usd: number | null } => {
+  if (usage.tokens === null) return { cost_usd: null, budget_usd: null };
+  const priced = priceRun(usage.tokens, usage.model ?? run.model, hostPrices(k, run.host));
+  return { cost_usd: priced.cost_usd, budget_usd: priced.budget_usd };
 };
 
-/** The submission with an engine-priced cost where the host reported none ({@link pricedCost}). */
-const pricedSubmit = (k: Kernel, run: RoleRunRecord, input: SubmitInput): SubmitInput => {
+/**
+ * The submission with an engine-priced cost where the host reported none ({@link pricedCost}),
+ * and what the run counts toward the budgets: `cost_usd ?? budget_usd` (H-12; `null` when nothing
+ * is known).
+ */
+const pricedSubmit = (
+  k: Kernel,
+  run: RoleRunRecord,
+  input: SubmitInput,
+): { readonly input: SubmitInput; readonly budgetUsd: number | null } => {
   if (input.kind === "result") {
     const usage = input.usage;
-    if (usage === undefined || usage.cost_usd !== null) return input;
-    const cost = pricedCost(k, run, usage);
-    return cost === null ? input : { ...input, usage: { ...usage, cost_usd: cost } };
+    if (usage === undefined) return { input, budgetUsd: null };
+    if (usage.cost_usd !== null) return { input, budgetUsd: usage.cost_usd };
+    const priced = pricedCost(k, run, usage);
+    return {
+      input: { ...input, usage: { ...usage, cost_usd: priced.cost_usd } },
+      budgetUsd: priced.cost_usd ?? priced.budget_usd,
+    };
   }
   const outcome = input.outcome;
-  if (outcome.kind === "auth" || outcome.cost_usd !== null) return input;
-  const cost = pricedCost(k, run, {
+  if (outcome.kind === "auth") return { input, budgetUsd: null };
+  if (outcome.cost_usd !== null) return { input, budgetUsd: outcome.cost_usd };
+  const priced = pricedCost(k, run, {
     model: outcome.kind === "limit" ? outcome.model : null,
     tokens: outcome.tokens,
   });
-  return cost === null ? input : { ...input, outcome: { ...outcome, cost_usd: cost } };
+  return {
+    input: { ...input, outcome: { ...outcome, cost_usd: priced.cost_usd } },
+    budgetUsd: priced.cost_usd ?? priced.budget_usd,
+  };
 };
 
 /** At 100% of its budget a task finishes the current turn, then parks (§11, §7.6 rule 13). */
@@ -338,7 +372,10 @@ const logRejection = (
   run: RoleRunRecord,
   value: Rejection,
   usage: RunUsage | undefined,
+  budgetUsd: number | null,
+  commandShapes: readonly CommandShape[],
 ): void => {
+  const shapes = countCommandShapes(commandShapes);
   k.emit(h, {
     type: "role.rejected",
     actor: "engine",
@@ -351,9 +388,15 @@ const logRejection = (
           tokens: usage.tokens ?? null,
           cost_usd: usage.cost_usd ?? null,
         }),
-    data: { action_id: run.action_id, reason: value.reason, issues: value.issues },
+    data: {
+      action_id: run.action_id,
+      reason: value.reason,
+      issues: value.issues,
+      // D-cs (reading 247(9)): a rejected run's shell calls count toward the tool signal too
+      ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+    },
   });
-  recordSpend(k, h, run, usage?.cost_usd ?? null);
+  recordSpend(k, h, run, budgetUsd);
 };
 
 const emitSubmitted = (
@@ -367,9 +410,13 @@ const emitSubmitted = (
     readonly artifacts?: readonly ArtifactRef[];
     readonly session?: SessionRef;
     readonly commandShapes?: readonly CommandShape[];
+    /** What the run counts toward the budgets (H-12; `pricedSubmit`). */
+    readonly budgetUsd?: number | null;
   },
 ): void => {
   const shapes = countCommandShapes(extras.commandShapes ?? []);
+  const cost = usage?.cost_usd ?? null;
+  const budget = extras.budgetUsd ?? null;
   k.emit(h, {
     type: "role.submitted",
     actor: "role",
@@ -380,7 +427,7 @@ const emitSubmitted = (
     host: run.host,
     model: usage?.model ?? run.model,
     tokens: usage?.tokens ?? null,
-    cost_usd: usage?.cost_usd ?? null,
+    cost_usd: cost,
     data: {
       action_id: run.action_id,
       exit: result.exit,
@@ -394,6 +441,8 @@ const emitSubmitted = (
       ...(extras.head === undefined ? {} : { head: extras.head }),
       // D-cs (reading 221 (1)): the run's shell calls as shapes, in the local run log only
       ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+      // H-12: an unknown cost counted at the host's price ceiling
+      ...(budget === null || budget === cost ? {} : { budget_usd: budget }),
     },
   });
 };
@@ -424,17 +473,37 @@ const runCommandShapes = (
   worktree: { readonly path: string } | undefined,
   fromStream: readonly CommandShape[] | undefined,
 ): readonly CommandShape[] => {
-  const named = k.deps.adapters[run.host]?.subagentName?.(run.agent);
+  const agentsOf = (r: RoleRunRecord): string[] => {
+    const named = k.deps.adapters[r.host]?.subagentName?.(r.agent);
+    return named === undefined || named === r.agent ? [r.agent] : [r.agent, named];
+  };
   const spooled = drainCommandShapeSpool(
     k.guardDir,
     {
-      agents: named === undefined || named === run.agent ? [run.agent] : [run.agent, named],
+      agents: agentsOf(run),
       cwd: runCwd(k, h, run, worktree),
       since: run.dispatched_at,
+      action: run.action_id,
+      // reading 247(9): a row's action counts only when that action is in flight for the row's
+      // agent and cwd
+      actionFits: (action, agent, cwd) => {
+        const named = h.state.roleRuns.get(action);
+        if (named?.status !== "in_flight" || !agentMatches(agentsOf(named), agent)) return false;
+        const at = runCwd(k, h, named, k.dispatches.get(recordKey(h.state.id, action))?.worktree);
+        return inside(at, cwd) || inside(realOr(at), cwd);
+      },
     },
     k.now(),
   );
   return run.dispatch === "headless" ? (fromStream ?? []) : spooled;
+};
+
+const realOr = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 };
 
 const phaseEscalation = (
@@ -1425,15 +1494,18 @@ const handleFailure = (
   run: RoleRunRecord,
   outcome: HostFailureOutcome,
   worded: FailureWording,
+  budgetUsd: number | null,
+  commandShapes: readonly CommandShape[],
 ): void => {
   if (outcome.kind === "limit") {
     recordLimit(k, h, run, outcome);
-    recordSpend(k, h, run, outcome.cost_usd ?? null);
+    recordSpend(k, h, run, budgetUsd);
     return;
   }
   // D-at (spine §5 reading 77): what the host reports a failed run cost counts too, whatever
   // the model; on the event, so the run's and the advisor budget's spend include it
   const cost = outcome.kind === "auth" ? null : outcome.cost_usd;
+  const shapes = countCommandShapes(commandShapes);
   k.emit(h, {
     type: "role.failed",
     actor: "engine",
@@ -1449,9 +1521,11 @@ const handleFailure = (
           ? outcome.message.slice(0, 2000)
           : reportedFailureMessage(outcome.message),
       retryable: outcome.kind === "error" ? outcome.retryable : false,
+      // D-cs (reading 247(9)): a failed run's shell calls count toward the tool signal too
+      ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
     },
   });
-  recordSpend(k, h, run, cost);
+  recordSpend(k, h, run, budgetUsd);
   if (outcome.kind === "auth") {
     // The user must sign in again; VTC never touches credentials (AD-9).
     k.emit(h, {
@@ -1462,6 +1536,47 @@ const handleFailure = (
     return;
   }
   stepFailed(k, h, run);
+};
+
+/**
+ * The shell-call shapes of a Lead-submitted run the engine rejects before `handleSubmit` (a result
+ * that is no `RoleResult`), counted for its `role.rejected` (D-cs, reading 247(9)); its spool rows
+ * are taken, so no later run claims them.
+ */
+export const takeCommandShapes = (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+): ReturnType<typeof countCommandShapes> =>
+  countCommandShapes(
+    runCommandShapes(
+      k,
+      h,
+      run,
+      k.dispatches.get(recordKey(h.state.id, run.action_id))?.worktree,
+      undefined,
+    ),
+  );
+
+/**
+ * D-cx (spine §5 reading 244): a run whose model the host refused ended before any work, and
+ * `headless.ended` closed it as stopped (`state.ts`, `modelRefused`). Its dispatch record is still
+ * checked like any run's (AD-7 rule 7) and dropped, its worktree removed and its spooled shell
+ * calls taken; no `role.failed` is logged and no fix round counts it, so the step is dispatched
+ * again, on the host default (`modelFallbackFor`).
+ */
+export const closeRefusedRun = async (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  streamShapes?: readonly CommandShape[],
+): Promise<void> => {
+  const writes = checkRun(k, h, run);
+  const record = k.dispatches.get(recordKey(h.state.id, run.action_id));
+  runCommandShapes(k, h, run, record?.worktree, streamShapes);
+  reportFindings(k, h, run, writes);
+  if (record !== undefined && writes.git.length === 0) await removeRoleWorktree(k, record);
+  dropDispatch(k, h.state.id, run.action_id);
 };
 
 /**
@@ -1480,7 +1595,9 @@ export const handleSubmit = async (
   streamShapes?: readonly CommandShape[],
 ): Promise<SubmitOutcome> => {
   const run = h.state.roleRuns.get(submitted.action_id);
-  const input = run === undefined ? submitted : pricedSubmit(k, run, submitted);
+  const priced =
+    run === undefined ? { input: submitted, budgetUsd: null } : pricedSubmit(k, run, submitted);
+  const input = priced.input;
   if (run === undefined) {
     return {
       accepted: false,
@@ -1513,7 +1630,7 @@ export const handleSubmit = async (
     dropDispatch(k, h.state.id, run.action_id);
   };
   if (input.kind === "failure") {
-    handleFailure(k, h, run, input.outcome, worded);
+    handleFailure(k, h, run, input.outcome, worded, priced.budgetUsd, commandShapes);
     await close(false);
     // a limit interrupts every run in flight: theirs are checked now too
     await sweepDispatches(k, h);
@@ -1525,7 +1642,7 @@ export const handleSubmit = async (
       ? reject("write_scope", writes.issues)
       : await evaluate(k, h, run, input.result);
   if (outcome.kind === "reject") {
-    logRejection(k, h, run, outcome.rejection, input.usage);
+    logRejection(k, h, run, outcome.rejection, input.usage, priced.budgetUsd, commandShapes);
     // A rejected result leaves nothing in the task worktree (committed or not), so the next role
     // there is never charged with it (spine §5 reading 86).
     if (rollback !== null) await k.deps.workspace.discard(rollback.worktree, rollback.head);
@@ -1553,6 +1670,7 @@ export const handleSubmit = async (
     ...(outcome.artifacts === undefined ? {} : { artifacts: outcome.artifacts }),
     ...(input.session_ref === undefined ? {} : { session: input.session_ref }),
     commandShapes,
+    budgetUsd: priced.budgetUsd,
   });
   // The host session the run used: later rounds and answers resume it (§6.3 step 8, §6.5).
   const task = run.task === undefined ? undefined : h.state.tasks.get(run.task);
@@ -1568,7 +1686,7 @@ export const handleSubmit = async (
       data: { session_ref: input.session_ref },
     });
   }
-  recordSpend(k, h, run, input.usage?.cost_usd ?? null);
+  recordSpend(k, h, run, priced.budgetUsd);
   await outcome.after();
   checkBudget(k, h, run.task);
   return { accepted: true };

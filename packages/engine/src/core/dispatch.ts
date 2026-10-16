@@ -32,6 +32,7 @@ import {
   type SpawnRoleAction,
   type TaskPackInput,
   type TierReason,
+  type DesignCoverageGaps,
 } from "@vtc/shared";
 import { restoreHostConfig } from "../git/index.js";
 import { budgetState, sharesExceeded } from "./budget.js";
@@ -47,10 +48,17 @@ import {
 } from "./kernel.js";
 import { finalReviewSteps } from "./final-review.js";
 import { designerRedispatchNote, designWorkSince, rerollInputs } from "./g2.js";
+import {
+  changeSpecAnswer,
+  coverageGapsFor,
+  coverageRedoSince,
+  coverageWaitsForArchitect,
+} from "./design-loop.js";
 import { retroSteps } from "./retro.js";
 import type { PromptParts } from "./plugins.js";
 import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch } from "./loop.js";
+import { modelFallbackFor } from "./model-fallback.js";
 import { routeTier, type TierChange, type TierRoute } from "./routing.js";
 import { writeTaskPack } from "./projections.js";
 import {
@@ -141,6 +149,8 @@ export interface StepSpec {
   readonly findings?: readonly Finding[];
   readonly answer?: EscalationAnswer;
   readonly note?: string;
+  /** The G2 coverage loop's gaps this DESIGN re-dispatch fixes (`TaskPack.coverage_gaps`, H-13). */
+  readonly coverageGaps?: DesignCoverageGaps;
   /** Extra pack inputs (an advisor's, `consult`). */
   readonly inputs?: readonly ArtifactRef[];
   /** Engine transition that happens as the step is handed out (e.g. → building). */
@@ -272,20 +282,28 @@ const busyStep = (
  * The tier a step runs on (H-9, D-cm; spine §5 reading 218): {@link routeTier} over the step's
  * task, the role's own tier on `host` and the project's `routing`. A step with no task keeps its
  * role's tier (reason `role`). A Lookback replay trial runs on the tier its recorded dispatch ran
- * on (reading 218 (7)), or the role's own for a dispatch logged before 5.4.0, never re-routed.
+ * on (reading 218 (7)), or the role's own for a dispatch logged before 5.4.0, never re-routed;
+ * a tier replay's trial (D-cn, reading 247(6)) runs on its arm's tier instead (reason `rule`: the
+ * routing-table cell under test), unclamped, so the arm measures the tier it names.
  */
 export const routeStep = (
   k: Kernel,
   h: RunHandle,
-  step: Pick<StepSpec, "role" | "mode" | "task" | "replay">,
+  step: Pick<StepSpec, "role" | "mode" | "task" | "replay"> & {
+    /** The step fills the task's cross-family reviewer slot (D-cu's high-risk raise). */
+    readonly crossFamily?: boolean;
+  },
   host: HostId,
   change?: TierChange,
   steps?: number,
 ): TierRoute => {
   const contract = k.deps.roles.get(step.role);
   const own = contract === undefined ? "mid" : roleTier(contract, host, step.mode);
-  if (step.replay !== undefined)
+  if (step.replay !== undefined) {
+    if (step.replay.armTier !== undefined)
+      return { tier: step.replay.armTier, reason: "rule", clamped: false };
     return step.replay.tier ?? { tier: own, reason: "role", clamped: false };
+  }
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   return routeTier(
     {
@@ -293,6 +311,7 @@ export const routeStep = (
       mode: step.mode,
       task,
       roleTier: own,
+      ...(step.crossFamily === true ? { crossFamily: true } : {}),
       config: k.config(),
       table: k.deps.routingTable,
     },
@@ -483,8 +502,9 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       return steps;
     }
     const round = task.status === "tests_authored" ? 1 : Math.max(1, task.round);
-    // D-cm: the Engineer starts on its routed tier and escalates one tier up from it after every
-    // 2 failed rounds (Low → Mid → Top, reading 218(4)), clamped each time
+    // D-cm, D-cv: the Engineer starts on its routed tier (after the clamp) and escalates from it
+    // by `escalationSteps` (a Low start Low, Mid, Top in rounds 1–3; reading 242), clamped each
+    // time; each tier change starts a fresh session
     const engineerStep = { role: "engineer", task: taskId };
     const start = routeStep(k, h, engineerStep, host);
     const plan = engineerDispatch(start.tier, round);
@@ -583,13 +603,15 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
         )
           continue;
       }
-      // D-cm: every reviewer starts on its routed tier (the cross-family one on its own host) and
-      // drops one tier from it (clamped)
+      // D-cu (reading 241): every reviewer starts on its own role.yaml tier (the cross-family one
+      // on its own host; it and Security verify one tier up on a high-risk task) and drops one
+      // tier from it (clamped)
+      const crossSlot = slot.crossFamily === true && cross !== undefined;
       const route = routeStep(
         k,
         h,
-        filter,
-        slot.crossFamily === true && cross !== undefined ? cross : host,
+        { ...filter, ...(crossSlot ? { crossFamily: true } : {}) },
+        crossSlot ? cross : host,
         drop ? "budget_drop" : undefined,
       );
       const judge =
@@ -632,11 +654,24 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
       const filter = { role, ...(mode === undefined ? {} : { mode }) };
       if (busyStep(h, filter)) return [];
       const since = designWorkSince(h, role, entered);
-      const done = lastSubmitted(state, filter, since);
+      // H-13 (reading 237): a role the coverage loop re-dispatched hands in its work again, the
+      // Designer after the Architect
+      const redo = phase === "design" ? coverageRedoSince(h, role) : 0;
+      const done = lastSubmitted(state, filter, Math.max(since, redo));
       // D-bt (reading 174): too few directions on a new UI design send the Designer back once
       const again =
         phase === "design" && role === "designer" ? designerRedispatchNote(k, h, since) : undefined;
       if (done !== undefined && done.exit === "done" && again === undefined) return [];
+      if (
+        phase === "design" &&
+        coverageWaitsForArchitect(
+          h,
+          role,
+          (seq) => lastSubmitted(state, { role: "architect" }, seq)?.exit === "done",
+        )
+      )
+        return [];
+      const coverageGaps = phase === "design" ? coverageGapsFor(h, role) : undefined;
       const note = [rejectionNote(h, filter), again].filter((n) => n !== undefined).join("\n");
       const decision = [...state.events]
         .reverse()
@@ -656,6 +691,7 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
           ...filter,
           ...(combined === "" ? {} : { note: combined }),
           ...(answer === undefined ? {} : { answer }),
+          ...(coverageGaps === undefined ? {} : { coverageGaps }),
           ...(rerolled === undefined || rerolled.inputs.length === 0
             ? {}
             : { inputs: rerolled.inputs }),
@@ -670,11 +706,18 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
   ];
 };
 
-/** The answer to the latest run-scoped escalation of `phase` given after the role's last dispatch. */
+/**
+ * The answer to the latest run-scoped escalation of `phase` given after the role's last dispatch;
+ * for the BA in SPECIFY also the human's `change_spec` answer to the G2 coverage loop (H-13).
+ */
 const phaseAnswer = (h: RunHandle, phase: Phase, role: string): EscalationAnswer | undefined => {
   const since = [...h.state.roleRuns.values()]
     .filter((r) => r.role === role && r.task === undefined)
     .reduce((max, r) => Math.max(max, r.seq), 0);
+  if (phase === "specify" && role === "ba") {
+    const changed = changeSpecAnswer(h, since);
+    if (changed !== undefined) return changed;
+  }
   const answered = [...h.state.escalations.values()].filter(
     (e) => e.phase === phase && e.answer !== undefined,
   );
@@ -922,6 +965,7 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
     gates: (gates?.gates ?? []).map((g) => ({ id: g.id, layer: g.layer, command: g.command })),
     findings: [...(step.findings ?? [])],
     ...(step.answer === undefined ? {} : { answer: step.answer }),
+    ...(step.coverageGaps === undefined ? {} : { coverage_gaps: step.coverageGaps }),
   };
 };
 
@@ -1210,10 +1254,14 @@ export const dispatchStep = (
   const actionId = nextActionId(h.state);
   const config = k.config();
   const route = stepRoute(k, h, step, host);
-  const model = resolveModel(contract, host, config, {
+  const resolved = resolveModel(contract, host, config, {
     ...(step.mode === undefined ? {} : { mode: step.mode }),
     tier: route.tier,
   });
+  // D-cx (reading 244): a model the host refused runs on the host default, once, logged
+  const fallback = modelFallbackFor(k, h, step, host, resolved.model);
+  const model: ResolvedModel =
+    fallback === undefined ? resolved : { tier: resolved.tier, effort: resolved.effort };
   const task = step.task === undefined ? undefined : h.state.tasks.get(step.task);
   // §5.2a, spine §5 reading 38: an Engineer task runs as its discipline's compiled profile agent
   // when the host's plugin has one; the dispatched role stays `engineer` (the family shares the
@@ -1305,6 +1353,7 @@ export const dispatchStep = (
       tier: route.tier,
       tier_reason: route.reason,
       tier_clamped: route.clamped,
+      ...(fallback === undefined ? {} : { model_fallback: fallback }),
     },
   });
   const capabilities = k.deps.adapters[host]?.capabilities;

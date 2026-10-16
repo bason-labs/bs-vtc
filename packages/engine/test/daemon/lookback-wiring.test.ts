@@ -53,7 +53,9 @@ import {
   lookbackWindow,
   newAgentFact,
   routingConfigFact,
+  routingTrialBudget,
   wireLookback,
+  withRoutingAtRetro,
   type RoutingLookback,
 } from "../../src/daemon/index.js";
 import { liveLookbackConfig, sampleReplayTasks } from "../../src/daemon/replays.js";
@@ -864,12 +866,66 @@ describe("Lookback's new-agent signals reach automation (D-cd)", () => {
   }, 40_000);
 });
 
+describe("the routing step's trial budget (D-cn, reading 247(6))", () => {
+  const replay = (trials: number): LookbackReplay =>
+    ({
+      proposal: "p",
+      role: "spec_verifier",
+      host: "claude-code",
+      trials: Array.from({ length: trials }, () => ({})),
+    }) as unknown as LookbackReplay;
+
+  it("is the RETRO's trial cap less the prompt replays' trials, never below 0", () => {
+    expect(routingTrialBudget(undefined, null, { replays: [] })).toBe(
+      LOOKBACK_LIMITS.maxTrialsPerRetro,
+    );
+    expect(routingTrialBudget(undefined, null, { replays: [replay(6), replay(4)] })).toBe(
+      LOOKBACK_LIMITS.maxTrialsPerRetro - 10,
+    );
+    expect(routingTrialBudget({ max_trials_per_retro: 5 }, null, { replays: [replay(6)] })).toBe(0);
+    // the boosted cap while more than half the weekly window is left
+    expect(routingTrialBudget(undefined, 90, { replays: [] })).toBe(
+      LOOKBACK_LIMITS.maxTrialsPerRetroBoosted,
+    );
+  });
+
+  it("is 0 while a limit holds the replays back", () => {
+    expect(routingTrialBudget(undefined, null, { replays: [], waitKind: "weekly_window" })).toBe(0);
+    expect(routingTrialBudget(undefined, null, { replays: [], waitKind: "budget" })).toBe(0);
+  });
+
+  it("runs the routing step after the replays are planned, and with no trials when planning fails", async () => {
+    const calls: { state: string; planned: string | null }[] = [];
+    const routing = (state: string, planned: string | null): void => {
+      calls.push({ state, planned });
+    };
+    await expect(withRoutingAtRetro(() => Promise.resolve("planned"), routing)("r1")).resolves.toBe(
+      "planned",
+    );
+    const failing = withRoutingAtRetro((): Promise<string> => {
+      throw new Error("replay planning failed");
+    }, routing);
+    await expect(failing("r2")).rejects.toThrow("replay planning failed");
+    expect(calls).toEqual([
+      { state: "r1", planned: "planned" },
+      { state: "r2", planned: null },
+    ]);
+  });
+});
+
 describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => {
   it("calls the routing step through the LookbackRetro seam at RETRO and hands its proposals on as config facts", async () => {
     const h = createHarness({ plugins: switched, project: { merge_level: 1 } });
-    const asked: { history: number; phase: string; vtcHome: string; locked: unknown }[] = [];
+    const asked: {
+      history: number;
+      phase: string;
+      vtcHome: string;
+      locked: unknown;
+      trialBudget: number | undefined;
+    }[] = [];
     const propose: RoutingLookback = (input) => {
       asked.push({
+        trialBudget: input.trialBudget,
         history: input.history.length,
         phase: h.engine.status({}).run.phase,
         vtcHome: input.vtcHome,
@@ -911,6 +967,8 @@ describe("Lookback tunes routing at RETRO (D-cn, spine §5 reading 219)", () => 
     expect(asked).toHaveLength(1);
     expect(asked[0]?.phase).toBe("retro");
     expect(asked[0]?.history).toBeGreaterThan(0);
+    // once the RETRO's prompt replays are planned (none here), with the rest of its trial cap
+    expect(asked[0]?.trialBudget).toBe(LOOKBACK_LIMITS.maxTrialsPerRetro);
     // what Lookback's step needs to read the trusted attributions and the recorded AI tiebreaks
     expect(asked[0]?.vtcHome).toBe(h.home);
     expect(asked[0]?.locked).toEqual(expect.any(String));

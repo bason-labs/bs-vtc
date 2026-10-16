@@ -21,7 +21,10 @@ export const isReviewer = (run: Pick<RoleRunRecord, "role" | "mode">): boolean =
   (run.role === "qa" && run.mode === "judge") ||
   (run.role === "security" && run.mode === "verify");
 
-/** Priced spend of a task's Engineer and reviewer runs (§11 shares within a task). */
+/**
+ * What a task's Engineer and reviewer runs count toward its budget (§11 shares within a task;
+ * `cost_usd ?? budget_usd`, H-12).
+ */
 export const shareSpend = (
   state: RunState,
   task: string,
@@ -29,7 +32,7 @@ export const shareSpend = (
   let engineer = 0;
   let reviewers = 0;
   for (const run of runsOf(state, task)) {
-    const cost = run.costUsd ?? 0;
+    const cost = run.costUsd ?? run.budgetUsd ?? 0;
     if (run.role === "engineer") engineer += cost;
     else if (isReviewer(run)) reviewers += cost;
   }

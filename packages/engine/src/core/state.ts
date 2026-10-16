@@ -8,6 +8,7 @@ import {
   HOST_IDS,
   isEventOfType,
   readEventData,
+  SESSION_DEFAULT_MODEL,
   type Escalation,
   type Feature,
   type Finding,
@@ -16,6 +17,7 @@ import {
   type HostId,
   type IntentContract,
   type MergeLevel,
+  type ModelFallback,
   type ModelTier,
   type RoleExit,
   type Run,
@@ -68,6 +70,19 @@ export const reportedFailureMessage = (message: string): string => {
   ).slice(0, 2000);
 };
 
+/**
+ * Whether a run the host refused its model for ends as a model refusal (D-cx, reading 244): it
+ * passed a model flag, it is not already the fallback (a second refusal is an ordinary error), and
+ * it is no replay trial (a trial measures its tier; off it, it measures nothing).
+ */
+export const modelRefusable = (
+  run: Pick<RoleRunRecord, "model" | "modelFallback" | "replayTrial">,
+): boolean =>
+  run.modelFallback === undefined &&
+  run.replayTrial !== true &&
+  run.model !== SESSION_DEFAULT_MODEL &&
+  run.model !== "unknown";
+
 /** One role run (a `role.dispatched` and what became of it). */
 export interface RoleRunRecord {
   readonly action_id: string;
@@ -99,6 +114,15 @@ export interface RoleRunRecord {
   sessionRef: SessionRef | null;
   tokens: TokenUsage | null;
   costUsd: number | null;
+  /**
+   * What the run counts toward the budgets (H-12, spine §5 reading 236): `cost_usd`, or for a
+   * run whose model has no known price `role.submitted.budget_usd` (its tokens at the host's price
+   * ceiling), or for a task's rejected, failed or limit-hit run the engine's spend that followed
+   * its close ({@link RunState.unpricedCloses}); `null` when nothing is known. Known limit until
+   * the contract carries `budget_usd` on those events too: a task-less run closed so before any
+   * feature exists has no spend event to read and counts 0 in `runBudget`.
+   */
+  budgetUsd: number | null;
   rejection?: { reason: string; issues: string[] };
   /**
    * A failed run the engine or the human stopped, not the role's failure: a resume superseded it
@@ -116,6 +140,20 @@ export interface RoleRunRecord {
    * `killed` after a `run.paused`): engine facts only, so replay sees the same.
    */
   killedByPause?: boolean;
+  /**
+   * The dispatch passes no model flag because the host refused the one it resolved on an earlier
+   * attempt (`role.dispatched.model_fallback`, D-cx; spine §5 reading 244).
+   */
+  readonly modelFallback?: ModelFallback;
+  /** A Lookback replay trial (`role.dispatched.purpose` `lookback_replay`, reading 177). */
+  readonly replayTrial?: boolean;
+  /**
+   * The host refused the run's model before any work (`headless.ended` with cause
+   * `model_refused`, D-cx): the run ends stopped, neither a failure nor a fix round, and the step
+   * is dispatched once more without a model flag. Only a run with a model flag that is not itself
+   * the fallback, and no replay trial (its tier is what it measures), ends this way.
+   */
+  modelRefused?: boolean;
 }
 
 export interface GateReportRecord {
@@ -191,6 +229,14 @@ export interface RunState {
   >;
   /** Last `budget.updated` with scope run, if any. */
   runBudget: { budget_usd: number; spent_usd: number } | null;
+  /**
+   * H-12 (spine §5 reading 236), by task: the last run of the task that a `role.rejected`,
+   * `role.failed` or `limit.hit` closed with no `cost_usd`. Those events carry no `budget_usd`
+   * (the contract has it on `role.submitted` only), so the run's ceiling-priced amount is read
+   * from the engine's task `budget.updated` that `recordSpend` emits right after the close: its
+   * `spent_usd` increase is what the run counted toward the budgets ({@link unpricedSpend}).
+   */
+  readonly unpricedCloses: Map<string, string>;
   lastSeq: number;
   readonly events: VtcEvent[];
 }
@@ -234,6 +280,7 @@ export const emptyRunState = (id: string, startedAt: string): RunState => ({
   pushes: [],
   changeRequests: new Map(),
   runBudget: null,
+  unpricedCloses: new Map(),
   lastSeq: 0,
   events: [],
 });
@@ -248,6 +295,31 @@ const updateTask = (state: RunState, id: string | undefined, patch: (task: Task)
   if (id === undefined) return;
   const task = state.tasks.get(id);
   if (task !== undefined) state.tasks.set(id, patch(task));
+};
+
+/** A task's run closed without a cost or a budget amount ({@link RunState.unpricedCloses}). */
+const noteUnpricedClose = (state: RunState, run: RoleRunRecord): void => {
+  if (run.task === undefined) return;
+  if (run.budgetUsd === null) state.unpricedCloses.set(run.task, run.action_id);
+  else state.unpricedCloses.delete(run.task);
+};
+
+/**
+ * H-12: the engine's task `budget.updated` after an unpriced run closed counts that run's tokens
+ * at its host's price ceiling (`recordSpend`); the increase becomes the run's `budgetUsd`, so the
+ * §11 shares (`shareSpend`) count it as the task budget does. A human's budget raise keeps the
+ * spend and adds nothing.
+ */
+const unpricedSpend = (state: RunState, event: VtcEvent, spentUsd: number): void => {
+  if (event.task === undefined) return;
+  const actionId = state.unpricedCloses.get(event.task);
+  if (actionId === undefined || event.actor !== "engine") return;
+  state.unpricedCloses.delete(event.task);
+  const run = state.roleRuns.get(actionId);
+  const before = state.tasks.get(event.task)?.spent_usd;
+  if (run?.budgetUsd !== null || before === undefined) return;
+  const delta = Math.round((spentUsd - before) * 1e6) / 1e6;
+  if (delta > 0) run.budgetUsd = delta;
 };
 
 const updateFeature = (
@@ -399,12 +471,15 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       agent: data.agent,
       pack: data.pack,
       resume: data.resume,
+      ...(data.model_fallback === undefined ? {} : { modelFallback: data.model_fallback }),
+      ...(data.purpose === "lookback_replay" ? { replayTrial: true } : {}),
       status: "in_flight",
       exit: null,
       verdicts: [],
       sessionRef: null,
       tokens: null,
       costUsd: null,
+      budgetUsd: null,
     });
   } else if (isEventOfType(event, "role.submitted")) {
     const data = readEventData(event);
@@ -418,6 +493,8 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.sessionRef = data.session_ref;
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
+      if (run.task !== undefined) state.unpricedCloses.delete(run.task);
     }
   } else if (isEventOfType(event, "role.rejected")) {
     const data = readEventData(event);
@@ -428,6 +505,8 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.rejection = { reason: data.reason, issues: data.issues };
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd;
+      noteUnpricedClose(state, run);
     }
   } else if (isEventOfType(event, "headless.ended")) {
     const data = readEventData(event);
@@ -443,6 +522,13 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       state.tasks.get(run.task)?.status === "parked"
     )
       run.stoppedOnBudget = true;
+    // D-cx (reading 244): the host refused the run's model; the step runs once more without it
+    if (run?.status === "in_flight" && data.cause === "model_refused" && modelRefusable(run)) {
+      run.status = "failed";
+      run.closedSeq = event.seq;
+      run.stopped = true;
+      run.modelRefused = true;
+    }
   } else if (isEventOfType(event, "role.failed")) {
     const data = readEventData(event);
     const run = state.roleRuns.get(data.action_id);
@@ -450,6 +536,8 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "failed";
       run.closedSeq = event.seq;
       run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd;
+      noteUnpricedClose(state, run);
       if (
         data.message.startsWith(SUPERSEDED_RUN_PREFIX) ||
         run.killedByPause === true ||
@@ -516,6 +604,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
   } else if (isEventOfType(event, "budget.updated")) {
     const data = readEventData(event);
     if (data.scope === "task") {
+      unpricedSpend(state, event, data.spent_usd);
       updateTask(state, event.task, (task) => ({
         ...task,
         budget_usd: data.budget_usd,
@@ -549,7 +638,11 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
         run.status = "interrupted";
         run.closedSeq = event.seq;
         // the cost the host reported before the limit (D-at), on the hit that closed the run
-        if (event.cost_usd !== undefined) run.costUsd = event.cost_usd;
+        if (event.cost_usd !== undefined) {
+          run.costUsd = event.cost_usd;
+          run.budgetUsd = event.cost_usd;
+        }
+        noteUnpricedClose(state, run);
       }
     }
   } else if (isEventOfType(event, "merge.completed")) {
