@@ -10,8 +10,8 @@
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint && eslint eslint.config.js vitest.shared.ts vitest.config.ts .dependency-cruiser.cjs",
-    "test": "turbo run test --concurrency=1",
+    "lint": "turbo run lint && eslint eslint.config.js vitest.shared.ts vitest.tmpdir.ts vitest.config.ts .dependency-cruiser.cjs",
+    "test": "turbo run test",
     "deps:check": "depcruise packages apps --config .dependency-cruiser.cjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

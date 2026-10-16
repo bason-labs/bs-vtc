@@ -17,6 +17,7 @@
       "tsconfig*.json",
       "turbo.json",
       "vitest.shared.ts",
+      "vitest.tmpdir.ts",
       "vitest.config.ts",
       "package.json",
       "pnpm-workspace.yaml",
