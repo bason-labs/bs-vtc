@@ -1391,6 +1391,23 @@ describe("reading 256 (h14-open4): a pnpm self-rebuild is one directory of the s
     ).toEqual([`${REAL}/bin/dep`]);
   });
 
+  it("refuses a committed dependency tree whatever its case (case-insensitive file systems)", () => {
+    expect(
+      committedDependencyFiles([
+        "tools/Node_Modules/.pnpm/dep@1.0.0/Node_Modules/dep/bin/dep",
+        ".Yarn/Unplugged/x/index.js",
+        "py/env/PyVenv.cfg",
+        "py/env/lib/site.py",
+        "src/node_modules.ts",
+      ]),
+    ).toEqual([
+      ".Yarn/Unplugged/x/index.js",
+      "py/env/PyVenv.cfg",
+      "py/env/lib/site.py",
+      "tools/Node_Modules/.pnpm/dep@1.0.0/Node_Modules/dep/bin/dep",
+    ]);
+  });
+
   it("(H) a committed nested tools/node_modules fake of dep@1.0.0 rewriting the real bin is tampering", () => {
     const root = project();
     const fake = tools(root, "dep@1.0.0");
