@@ -4837,6 +4837,24 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       terminal and sends the install token only after a yes, to an engine of contracts 5.13.0 or
       later (`humanEngine(what, since)`). Tests: `contracts-5-13.test.ts`, the cli's
       `commands.test.ts`.
+269.  **A quick fix's DESIGN roles read the BA's spec before it is frozen** (§6.2, §6.3 step 1,
+      AD-14 rule 5). _Lead decision 2026-10-17, pending human review._ A quick fix shows G1 and
+      G2 on one screen, so its spec is frozen only there; DESIGN packs listed only frozen G1
+      and G2 artifacts plus the DISCOVER roles' outputs, so the owner's quick fix sent the
+      Architect and Security's threat model packs with no spec, and both parked asking for one.
+      While a quick fix is in DESIGN with nothing frozen at G1, a task-less step's pack also
+      lists the BA's last submitted artifacts its contract declares (the spec); the worktree
+      already had the file (`ROLE_INPUT_DIRS`). The spec's open questions stay in the escalation
+      queue and are shown at the combined screen, unchanged. Tests: `quick-fix-design.test.ts`.
+270.  **A role may cite its own pack** (§4.2 step 3, AD-8 rule 2). _Lead decision 2026-10-17,
+      pending human review._ A dispatch names its pack by the absolute path in the user's
+      checkout, outside the role's worktree; roles read it there and cited it, and the claim
+      check, which reads the worktree and refuses absolute paths, rejected every first result
+      of the owner's DESIGN roles. `EvidenceContext.packRoot` (the user's checkout) resolves a
+      `file` or `file_line` citation of a path under `.vtc/state/packs/`, absolute under that
+      root or relative, against the pack itself; any other absolute path still fails. The
+      prompt also says to cite files by their path relative to the working directory. Tests:
+      `quick-fix-design.test.ts`.
 
 ## 6. Change process for this spine
 

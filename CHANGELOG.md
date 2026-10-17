@@ -3,6 +3,17 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## v0.2.4 (2026-10-17)
+
+- **A quick fix's design step gets the specification.** A quick fix approves the requirements and
+  the design together on one screen, so its specification is not approved yet while the Architect
+  and Security work. They were sent no specification at all and stopped to ask for one. They now
+  get the Business Analyst's specification; its open questions still wait for you on that screen.
+- **Roles may cite their own instructions file.** Each role cited the task pack it was given, and
+  VTC rejected the result because that file is outside the role's working folder, so every design
+  role ran twice. Such a citation now counts, and roles are told to cite files by their path
+  in the working folder.
+
 ## v0.2.3 (2026-10-17)
 
 - **Advisors work when your Lead is Codex.** Asking the Lead for an advisor (the incident

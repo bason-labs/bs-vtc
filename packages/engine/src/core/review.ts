@@ -20,6 +20,7 @@ export { isReviewer };
 /** Resolves evidence against a commit (or the working tree), the frozen spec and git. */
 export const evidenceContext = (k: Kernel, h: RunHandle, head: string | null): EvidenceContext => ({
   repoRoot: k.deps.repoRoot,
+  packRoot: k.deps.repoRoot,
   git: k.deps.git,
   head,
   specIds: frozenSpecItems(k.deps.repoRoot, h.state).map((i) => i.id),

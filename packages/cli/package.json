@@ -1,6 +1,6 @@
 {
   "name": "@vtc/cli",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "The vtc command: composition root that wires engine, adapters and compiler.",
   "type": "module",

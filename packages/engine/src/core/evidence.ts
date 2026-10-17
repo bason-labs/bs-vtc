@@ -16,7 +16,16 @@ export interface EvidenceContext {
   /** REQ/AC ids of the frozen spec; empty = not known yet (spec refs are then not checked). */
   readonly specIds: readonly string[];
   readonly commitExists: (sha: string) => Promise<boolean>;
+  /**
+   * The user's checkout, where the engine writes task packs (reading 270). A role reads its pack
+   * there by the absolute path its dispatch names, outside its own worktree, and cites it; such a
+   * citation resolves against the pack itself, whichever root the rest of the check uses.
+   */
+  readonly packRoot?: string;
 }
+
+/** Where task packs live (`dispatch-guard.ts`), relative to the user's checkout. */
+const PACKS_DIR = ".vtc/state/packs/";
 
 const FULL_SHA = /^([a-f0-9]{40}|[a-f0-9]{64})$/;
 
@@ -31,7 +40,19 @@ const splitLine = (ref: string): { path: string; line: number; end: number } | n
 const safe = (path: string): boolean =>
   path !== "" && !path.startsWith("/") && !path.includes("\\") && !path.split("/").includes("..");
 
+/** A pack the role cites, by its absolute or checkout-relative path (reading 270). */
+const packText = (ctx: EvidenceContext, path: string): string | undefined => {
+  if (ctx.packRoot === undefined) return undefined;
+  const root = `${ctx.packRoot}/`;
+  const rel = path.startsWith(root) ? path.slice(root.length) : path;
+  if (!rel.startsWith(PACKS_DIR) || !safe(rel)) return undefined;
+  const abs = join(ctx.packRoot, rel);
+  return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+};
+
 const fileText = async (ctx: EvidenceContext, path: string): Promise<string | undefined> => {
+  const pack = packText(ctx, path);
+  if (pack !== undefined) return pack;
   if (!safe(path)) return undefined;
   if (ctx.head !== null && !path.startsWith(".vtc/")) {
     const bytes = await ctx.git.readFileAtCommit(ctx.head, path);
