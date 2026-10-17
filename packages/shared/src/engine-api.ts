@@ -249,6 +249,13 @@ export const StartInputSchema = z.strictObject({
    * the human to describe them or attach the files (spine §5 reading 262). New in 5.12.0.
    */
   attachments: z.array(AttachmentPathSchema).max(ATTACHMENTS.max).optional(),
+  /**
+   * Autopilot for this run (spine §5 reading 271; `ProjectConfig.autopilot`): the engine answers
+   * the questions it may decide with their recommended option and approves G1 and G2, so the
+   * human's one review is the PR. `false` turns it off for this run when the project has it on.
+   * Absent: the project's setting. New in 5.14.0.
+   */
+  autopilot: z.boolean().optional(),
 });
 export type StartInput = z.infer<typeof StartInputSchema>;
 
@@ -657,6 +664,11 @@ export const StatusResultSchema = z.strictObject({
   usage: UsageReportSchema,
   /** Role runs the engine launched itself and that are still running (AD-25). New in 4.5.0. */
   headless_runs: z.array(HeadlessRunSummarySchema).optional(),
+  /**
+   * The run is on autopilot (`run.started.autopilot`): how many questions and gates the engine
+   * decided for the human so far. Absent: not on autopilot. New in 5.14.0.
+   */
+  autopilot: z.strictObject({ decisions: z.int().nonnegative() }).optional(),
 });
 export type StatusResult = z.infer<typeof StatusResultSchema>;
 

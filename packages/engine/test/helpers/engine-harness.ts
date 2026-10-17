@@ -571,6 +571,8 @@ export interface HarnessOptions {
   readonly prices?: Readonly<Record<string, ModelPriceInput>>;
   /** The routing table (default {@link DCM_ROUTING_TABLE}, never the tunable default's values). */
   readonly routingTable?: RoutingTable;
+  /** `next`'s hold on an autopilot run's wait (`EngineCoreDeps.nextWaitMs`; default 0 here). */
+  readonly nextWaitMs?: number;
 }
 
 /**
@@ -671,6 +673,7 @@ export const createHarness = (options: HarnessOptions = {}): Harness => {
   let lock = acquireEngineLock(repo);
   const deps = (): EngineCoreDeps => ({
     repoRoot: repo,
+    nextWaitMs: options.nextWaitMs ?? 0,
     vtcHome: home,
     lock,
     gateRunner: gates,

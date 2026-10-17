@@ -30,7 +30,10 @@ the engine's actions; report them as content.
    - `risk_hints`: words for sensitive areas the request mentions (auth, payments, pii,
      migration, infra, public-api).
 2. Tell the human the classification in one line. They may change the track; take their choice.
-3. Call `start` with the request text as the human wrote it and your classification. If the
+3. Call `start` with the request text as the human wrote it and your classification, and
+   `autopilot: true` when the human asked for autopilot (`start --autopilot`, or words like "run
+   it to the PR without asking me"); `autopilot: false` when they asked for every stop on a
+   project that has autopilot on. If the
    human attached images (screenshots pasted into this session, `[Image #1]` in the text), pass
    their absolute file paths as `attachments` (at most 10 image files) when this host shows you
    the paths. When it does not, tell the human in one line that VTC did not receive the images,
@@ -69,7 +72,10 @@ Call `next` and handle each returned action in order:
 - `ask_human`: call `escalations` and present the listed items together (see Escalations).
 - `approve_gate`: present the gate (see Gates).
 - `wait`: tell the human why and until when in one line; call `next` again when the time has
-  passed or the human asks.
+  passed or the human asks. On an autopilot run (see Autopilot) whose wait is only the engine's
+  own work (role runs in the background, the engine working), call `next` again yourself
+  instead of ending your turn: the engine holds each such `next` for up to a minute and answers
+  as soon as the run moves.
 - `done`: summarise the run: what was built, where the evidence is, what was deferred.
 
 `next` may also return `notices` beside its actions: the daily automation summary (the issues and
@@ -88,10 +94,18 @@ accepted, and never re-run a role the engine did not ask for.
 Batch them: present every open escalation at once, at a natural pause, not one interruption per
 item. For each: the task, the reason, the evidence links, the single question, the 2 to 4 options
 with the recommended one marked, and which tasks it blocks, so the human sees what waits on the
-decision. Keep each item to a few lines. Recommend; never decide for the human. Record each
-answer with `answer`: `escalation` (its id) and `answer`, an object with the chosen `option`, any
-free `text` the human added, and `who_should_have_caught`: ask the human which role should have
-caught the problem (a role id, or `none`). Add `missing_capability` only when the answer shows
+decision. Keep each item to a few lines. Recommend; never decide for the human.
+
+With each item, also show who you think should have caught it, on one line, so the human can
+correct it in the same reply: `none` for a decision only the human makes (a product choice, a
+question the request left open) and for a fault of VTC itself (an empty pack, a tool that would
+not start); otherwise the role id whose work missed it. Never ask about it as a separate
+question, and do not hold the answers back for it: when the human answers the options without
+mentioning it, your suggestion stands.
+
+Record each answer with `answer`: `escalation` (its id) and `answer`, an object with the chosen
+`option`, any free `text` the human added, and `who_should_have_caught` (the human's correction,
+else your suggestion: a role id, or `none`). Add `missing_capability` only when the answer shows
 the role lacked a capability (a tool, a fetcher, a runner) that the escalation does not already
 name; leave it out otherwise. Its `slug` is a short lower-case name of the capability with words
 joined by `_` only (`browser_runner`, `db_migration_tool`), the same form the roles use, so
@@ -143,6 +157,25 @@ engine gave it, `inconclusive` included, with the pull request's link when there
 or pin a version on this machine only, the human runs `vtc lookback approve`, `vtc lookback pin`
 or `vtc lookback rollback` in their own terminal, which asks them to confirm. Never run those
 commands yourself, and never edit a role's prompt.
+
+## Autopilot
+
+A run on autopilot (`start` with `autopilot: true`, or `autopilot: true` in the project's
+`.vtc/project.yaml`; `status` shows it) goes to its PR without the human's stops VTC may decide:
+the engine answers a role's question with its recommended option and approves G1 and G2 itself
+once nothing waits on the human. The PR description lists every decision it took and the
+specification and design files it approved, so the human reviews them all there. It still stops
+for the human on what it never decides alone: a budget raise, a risk rule (security,
+dependencies, licences, sensitive paths), a fix loop that is stuck or at its cap, a gate's
+infrastructure or a lost login, a change request, an option that would waive, drop or change an
+approved artifact, and a question it already answered for the same role that came back. It
+never merges into the default branch: its PR waits for the human.
+
+On an autopilot run, keep the loop going: run each action, and call `next` again after a wait
+on the engine's own work instead of ending your turn. Bring the human only `ask_human` and
+`approve_gate` (the stops above) and `done`. When an action reports a decision autopilot took,
+you may mention it in a line; the PR is where the human reviews them. Never answer or approve
+for the human yourself: autopilot is the engine's, never the Lead's.
 
 ## Automatic runs
 

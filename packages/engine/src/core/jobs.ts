@@ -4,6 +4,7 @@
  * release. Each job does its I/O (git, the Gate Runner) outside the run's lock and applies the
  * outcome inside it, re-checking that the task is still where the job left it.
  */
+import { autopilotPrSection } from "./autopilot.js";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -828,9 +829,11 @@ export const pushFeature = async (
       branch: feature.integration_branch,
       base: await baseBranch(k.deps.repoRoot),
       title: feature.title,
-      body:
+      body: withAutopilot(
         body ??
-        `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
+          `Draft: VTC integration of ${feature.id} (${feature.title}). Ready for review after Final Review.`,
+        autopilotPrSection(h.state),
+      ),
     });
     if (ready) pr = await k.deps.pullRequests.markReady(feature.integration_branch);
   } catch (error) {
@@ -874,6 +877,10 @@ export const pushFeature = async (
     return Promise.resolve();
   });
 };
+
+/** The PR description with an autopilot run's decisions after it (reading 271). */
+const withAutopilot = (body: string, section: string): string =>
+  section === "" ? body : `${body.trimEnd()}\n\n${section}`;
 
 /** One queued task: rebase, full gates on the combined code, merge (§6.7). */
 const mergeOne = async (k: Kernel, h: RunHandle, taskId: string): Promise<void> => {

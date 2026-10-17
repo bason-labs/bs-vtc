@@ -27,6 +27,8 @@ import {
   type ConsultInput,
   type ConsultResult,
   type CancelResult,
+  type Escalation,
+  type EscalationAnswer,
   type EscalationList,
   type FrozenArtifact,
   type GatesConfig,
@@ -141,6 +143,7 @@ import { replayTrialActions } from "./replay.js";
 import { clientSpendRow, recordClientSpend } from "./spend.js";
 import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
 import {
+  AUTOPILOT_NEXT_WAIT_MS,
   EngineError,
   type CallContext,
   type EngineCoreDeps,
@@ -151,6 +154,7 @@ import {
 import { limitWait, maybeAutoResume } from "./limits.js";
 import { ACTIVE_TASK_STATUSES } from "./machines.js";
 import { applyAnswer, setTaskStatus } from "./parking.js";
+import { autopilotChoice } from "./autopilot.js";
 import { writePlanFile, writeRequestFile } from "./projections.js";
 import { copyAttachments, readAttachments, runAttachments } from "./attachments.js";
 import {
@@ -1514,6 +1518,10 @@ export class Engine implements Kernel {
     const config = project.config;
     const gates = committed.config;
     const track = config.track_default ?? input.track;
+    // reading 271: an automatic run already skips the human's gates; autopilot is a human's run
+    const autopilot = automation === null && (input.autopilot ?? config.autopilot ?? false);
+    // neither merges into the default branch on its own: both stop at Level 2 (D-bw, reading 271)
+    const capped = automation !== null || autopilot;
     const id = this.newRunId();
     const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, {
       now: this.deps.now,
@@ -1524,18 +1532,17 @@ export class Engine implements Kernel {
     this.freezeConfig(id, config, gates, committed.sha256);
     if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
     const noRemote =
-      (automation === null ? config.merge_level : Math.min(config.merge_level, 2)) >= 2 &&
+      (capped ? Math.min(config.merge_level, 2) : config.merge_level) >= 2 &&
       (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
     // AD-23: the ledger caps the level; Level 3 needs its preflight (a failure starts at Level 2)
     const level = noRemote
       ? {
-          level:
-            automation === null
-              ? config.merge_level
-              : effectiveMergeLevel(config.merge_level, [], { automatic: true }),
+          level: capped
+            ? effectiveMergeLevel(config.merge_level, [], { automatic: true })
+            : config.merge_level,
           preflight: null,
         }
-      : await startMergeLevel(this, config, automation !== null);
+      : await startMergeLevel(this, config, capped);
     return this.serial(handle, () => {
       const copied = copyAttachments(this.deps.repoRoot, id, attachments);
       this.emit(handle, {
@@ -1552,6 +1559,7 @@ export class Engine implements Kernel {
           origin: this.origin,
           ...(automation === null ? {} : { automation }),
           ...(copied.length === 0 ? {} : { attachments: copied }),
+          ...(autopilot ? { autopilot: true as const } : {}),
         },
       });
       if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
@@ -1665,18 +1673,14 @@ export class Engine implements Kernel {
     this.emit(handle, { type: "gate.requested", actor: "engine", data });
   }
 
-  /** What the Lead should do now (§4.2 step 1). */
-  private async actionsFor(handle: RunHandle, call: CallContext): Promise<LeadAction[]> {
+  /**
+   * The gates awaiting a decision, after G2's stale facts were re-fetched and its directions'
+   * novelty checked once (AD-22 rule 4, §9.1 step 4), as they are shown. Callers hold the lock.
+   */
+  private async preparedGate(
+    handle: RunHandle,
+  ): Promise<{ gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras } | null> {
     const state = handle.state;
-    if (state.run.finished_at !== undefined) {
-      const summary = state.events.findLast((e) => e.type === "run.finished");
-      const path = (summary?.data as { summary?: string } | undefined)?.summary;
-      return [{ type: "done", ...(path === undefined ? {} : { summary: path }) }];
-    }
-    maybeAutoResume(this, handle);
-    this.advance(handle);
-    const held = { noLead: 0 };
-    const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
     let gate = this.awaitingGates(handle);
     if (gate?.gates.includes("G2") === true && this.factRefresher !== null) {
       // before G2 shows, its stale facts are re-fetched once (AD-22 rule 4); a refresh that
@@ -1698,7 +1702,36 @@ export class Engine implements Kernel {
         gate = this.awaitingGates(handle);
       }
     }
-    if (gate !== null && state.automation !== null && this.autoApproveGates(handle, gate)) {
+    return gate;
+  }
+
+  /**
+   * Autopilot with no Lead call (`drive`, reading 271): answers what it may, then approves the
+   * gate awaiting a decision, so the engine moves the run on between the Lead's turns. Returns
+   * whether it decided anything. Callers hold the run's lock.
+   */
+  async autopilotStep(handle: RunHandle): Promise<boolean> {
+    if (!handle.state.autopilot || handle.state.run.finished_at !== undefined) return false;
+    const answered = this.runAutopilot(handle);
+    const gate = await this.preparedGate(handle);
+    return (gate !== null && this.autoApproveGates(handle, gate)) || answered;
+  }
+
+  /** What the Lead should do now (§4.2 step 1). */
+  private async actionsFor(handle: RunHandle, call: CallContext): Promise<LeadAction[]> {
+    const state = handle.state;
+    if (state.run.finished_at !== undefined) {
+      const summary = state.events.findLast((e) => e.type === "run.finished");
+      const path = (summary?.data as { summary?: string } | undefined)?.summary;
+      return [{ type: "done", ...(path === undefined ? {} : { summary: path }) }];
+    }
+    maybeAutoResume(this, handle);
+    this.advance(handle);
+    this.runAutopilot(handle);
+    const held = { noLead: 0 };
+    const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
+    let gate = await this.preparedGate(handle);
+    if (gate !== null && this.autoApproveGates(handle, gate)) {
       // the next phase's roles start now, as after a human's approval
       actions.push(...(await dispatchNow(this, handle, call, held)));
       gate = this.awaitingGates(handle);
@@ -1737,8 +1770,12 @@ export class Engine implements Kernel {
     handle: RunHandle,
     gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
   ): boolean {
-    if (gate.extras.unverified_facts.length > 0) return false;
     const state = handle.state;
+    // reading 271: autopilot approves only once nothing waits on the human (its spec questions
+    // were answered, by autopilot or the human), so the gate freezes what they decided
+    if (state.automation === null && (!state.autopilot || openEscalations(state).length > 0))
+      return false;
+    if (gate.extras.unverified_facts.length > 0) return false;
     const issue = state.automation;
     const exit = gate.extras.design_directions.length > 0 ? "category_standard" : undefined;
     const blocked = g2ApprovalProblem(gate.extras, {
@@ -1757,7 +1794,11 @@ export class Engine implements Kernel {
         frozen: gate.artifacts,
         ...(exit === undefined ? {} : { design_exit: exit }),
         waived_facts: [],
-        note: `automatic run: the issue${issue === null ? "" : ` #${String(issue.issue)}`} is its spec, so no human gate before the final PR review (AD-27 rule 2)`,
+        note:
+          issue === null
+            ? "autopilot: the engine approved this gate for the human, who reviews the spec and the design at the PR (reading 271)"
+            : `automatic run: the issue #${String(issue.issue)} is its spec, so no human gate before the final PR review (AD-27 rule 2)`,
+        ...(issue === null ? { autopilot: true as const } : {}),
       },
     });
     this.phaseTo(handle, handle.state.run.phase === "g1" ? "design" : "plan");
@@ -1808,10 +1849,51 @@ export class Engine implements Kernel {
     // a Lead session (or an in-process caller) drives the run again: the engine stops driving it
     if (call.client === undefined || this.leads.get(state.id) === call.session)
       this.unattended.delete(state.id);
-    return this.serial(handle, async () => {
-      const actions = await this.actionsFor(handle, call);
-      const notices = this.takeRelayed(state.id);
-      return { run: state.id, actions, ...(notices.length === 0 ? {} : { notices }) };
+    const once = (): Promise<NextResult> =>
+      this.serial(handle, async () => {
+        const actions = await this.actionsFor(handle, call);
+        const notices = this.takeRelayed(state.id);
+        return { run: state.id, actions, ...(notices.length === 0 ? {} : { notices }) };
+      });
+    const result = await once();
+    if (!this.holdsWait(handle, result)) return result;
+    // reading 271: an autopilot run waiting only on the engine's own work holds the answer until
+    // the run changes (or the bound passes), so the Lead goes on without the human's "continue"
+    await this.changed(state.id, this.deps.nextWaitMs ?? AUTOPILOT_NEXT_WAIT_MS);
+    return this.handles.has(state.id)
+      ? once()
+      : { run: state.id, actions: this.actionsForFinished(this.stateOf(state.id)) };
+  }
+
+  /** Whether `next` holds this result (reading 271): an autopilot run's lone engine-side wait. */
+  private holdsWait(handle: RunHandle, result: NextResult): boolean {
+    const state = handle.state;
+    const [only] = result.actions;
+    if (!state.autopilot || result.actions.length !== 1 || only?.type !== "wait") return false;
+    if (result.notices !== undefined || only.until !== null || state.run.paused) return false;
+    if ((this.deps.nextWaitMs ?? AUTOPILOT_NEXT_WAIT_MS) <= 0) return false;
+    const ids = [state.id, ...state.tasks.keys(), ...state.features.keys()];
+    return (
+      headlessRunsOf(this, state.id).length > 0 ||
+      [...this.jobs.keys()].some((key) => ids.some((id) => key.endsWith(id)))
+    );
+  }
+
+  /** Resolves on the run's next event, or after `ms`. */
+  private changed(run: string, ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const signal = this.stopper.signal;
+      const done = (): void => {
+        clearTimeout(timer);
+        stop();
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      const stop = this.onEvent((event) => {
+        if (event.run === run) done();
+      });
+      signal.addEventListener("abort", done, { once: true });
     });
   }
 
@@ -1905,45 +1987,91 @@ export class Engine implements Kernel {
           `option ${input.answer.option} is not one of ${escalation.options.map((o) => o.id).join(", ")}`,
         );
       }
-      this.emit(handle, {
-        type: "escalation.answered",
-        actor: "human",
-        ...(escalation.task === undefined ? {} : { task: escalation.task }),
-        ...(escalation.feature === undefined ? {} : { feature: escalation.feature }),
-        data: { escalation: escalation.id, answer: input.answer },
-      });
-      const cr = handle.state.changeRequests.get(escalation.id);
-      const effect = escalation.options.find((o) => o.id === input.answer.option)?.effect;
-      if (cr !== undefined && (effect === "approve_change" || effect === "reject_change")) {
-        const sha = sha256File(join(this.deps.repoRoot, cr.frozen.path));
-        this.emit(handle, {
-          type: "change_request.decided",
-          actor: "human",
-          data: {
-            escalation: escalation.id,
-            decision: effect === "approve_change" ? "approved" : "rejected",
-            frozen: cr.frozen,
-            ...(effect === "approve_change" ? { new_sha256: sha ?? cr.frozen.sha256 } : {}),
-          },
-        });
-      }
-      if (
-        escalation.feature !== undefined &&
-        escalation.task === undefined &&
-        handle.state.features.get(escalation.feature)?.status === "parked"
-      ) {
-        this.resumeFeature(handle, escalation.feature, effect);
-      }
-      applyAnswer(this, handle, escalation, input.answer);
-      // H-13 (reading 237(5)): the coverage loop's `change_spec` goes back to SPECIFY and G1
-      if (
-        handle.state.run.phase === "design" &&
-        isChangeSpecAnswer(handle, escalation.id, input.answer.option)
-      )
-        this.phaseTo(handle, "specify");
+      this.recordAnswer(handle, escalation, input.answer, "human");
       this.advance(handle);
       return { run: handle.state.id, actions: await this.actionsFor(handle, call) };
     });
+  }
+
+  /**
+   * Records an answer and applies it: the human's (`answer`), or autopilot's recommended option
+   * (`runAutopilot`, actor `engine`, reading 271). Callers checked the option and hold the lock.
+   */
+  private recordAnswer(
+    handle: RunHandle,
+    escalation: Escalation,
+    answer: EscalationAnswer,
+    by: "human" | "autopilot",
+  ): void {
+    this.emit(handle, {
+      type: "escalation.answered",
+      actor: by === "human" ? "human" : "engine",
+      ...(escalation.task === undefined ? {} : { task: escalation.task }),
+      ...(escalation.feature === undefined ? {} : { feature: escalation.feature }),
+      data: {
+        escalation: escalation.id,
+        answer,
+        ...(by === "autopilot" ? { autopilot: true as const } : {}),
+      },
+    });
+    const cr = handle.state.changeRequests.get(escalation.id);
+    const effect = escalation.options.find((o) => o.id === answer.option)?.effect;
+    if (cr !== undefined && (effect === "approve_change" || effect === "reject_change")) {
+      const sha = sha256File(join(this.deps.repoRoot, cr.frozen.path));
+      this.emit(handle, {
+        type: "change_request.decided",
+        actor: "human",
+        data: {
+          escalation: escalation.id,
+          decision: effect === "approve_change" ? "approved" : "rejected",
+          frozen: cr.frozen,
+          ...(effect === "approve_change" ? { new_sha256: sha ?? cr.frozen.sha256 } : {}),
+        },
+      });
+    }
+    if (
+      escalation.feature !== undefined &&
+      escalation.task === undefined &&
+      handle.state.features.get(escalation.feature)?.status === "parked"
+    ) {
+      this.resumeFeature(handle, escalation.feature, effect);
+    }
+    applyAnswer(this, handle, escalation, answer);
+    // H-13 (reading 237(5)): the coverage loop's `change_spec` goes back to SPECIFY and G1
+    if (
+      handle.state.run.phase === "design" &&
+      isChangeSpecAnswer(handle, escalation.id, answer.option)
+    )
+      this.phaseTo(handle, "specify");
+  }
+
+  /**
+   * Autopilot (spine §5 reading 271): answers every open escalation it may decide
+   * (`autopilotChoice`) with its recommended option, attributed to no role (an engine choice is
+   * not a human's label), and leaves the rest for the human. Returns whether it answered any.
+   * Callers hold the run's lock.
+   */
+  runAutopilot(handle: RunHandle): boolean {
+    const state = handle.state;
+    if (!state.autopilot || state.run.finished_at !== undefined || state.run.paused) return false;
+    let answered = false;
+    for (const escalation of openEscalations(state)) {
+      const choice = autopilotChoice(state, escalation);
+      if (!("option" in choice)) continue;
+      this.recordAnswer(
+        handle,
+        escalation,
+        {
+          option: choice.option,
+          text: "Autopilot chose the recommended option; the human reviews it at the PR.",
+          who_should_have_caught: "none",
+        },
+        "autopilot",
+      );
+      answered = true;
+    }
+    if (answered) this.advance(handle);
+    return answered;
   }
 
   private resumeFeature(handle: RunHandle, featureId: string, effect: string | undefined): void {

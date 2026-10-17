@@ -3,6 +3,21 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## v0.2.5 (2026-10-17)
+
+- **Autopilot: hand VTC the task, review the PR.** Start a run with `/vtc start --autopilot "…"`
+  (Claude Code: `/vtc:vtc start --autopilot "…"`; Codex: `$vtc start --autopilot "…"`), or put
+  `autopilot: true` in `.vtc/project.yaml` for every run. VTC then answers the roles' questions
+  with their recommended option and approves the specification and design itself, and the
+  Lead keeps going instead of stopping to report that it is waiting. The PR lists every decision
+  VTC took and the files it approved, so you review them all there. It still stops for what it
+  must never decide alone: spending more than the budget, a security or dependency rule, a fix
+  that keeps failing, an expired login, or an answer that would drop or waive work. It never
+  merges into your main branch: the PR waits for you. `vtc status` shows "Autopilot: on" and how
+  many decisions it took.
+- **No more "who should have caught it?" question.** The Lead now suggests the answer next to
+  each question (usually "none"), and you only correct it if you disagree.
+
 ## v0.2.4 (2026-10-17)
 
 - **A quick fix's design step gets the specification.** A quick fix approves the requirements and

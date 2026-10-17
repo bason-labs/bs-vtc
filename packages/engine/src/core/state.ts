@@ -207,6 +207,11 @@ export interface RunState {
    * asked for.
    */
   automation: AutomationRunRef | null;
+  /**
+   * The run is on autopilot (`run.started.autopilot`, spine §5 reading 271): the engine decides
+   * the questions and gates it may (`autopilot.ts`), and the human reviews them at the PR.
+   */
+  autopilot: boolean;
   readonly tasks: Map<string, Task>;
   readonly intents: Map<string, IntentContract>;
   /** The status a task had right before it was parked or interrupted (its checkpoint). */
@@ -266,6 +271,7 @@ export const emptyRunState = (id: string, startedAt: string): RunState => ({
   request: "",
   mergeLevel: 2,
   automation: null,
+  autopilot: false,
   tasks: new Map(),
   intents: new Map(),
   checkpoints: new Map(),
@@ -353,6 +359,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
     state.request = data.request;
     state.mergeLevel = data.merge_level;
     state.automation = data.automation ?? null;
+    state.autopilot = data.autopilot === true;
   } else if (isEventOfType(event, "run.phase_changed")) {
     state.run.phase = readEventData(event).to;
   } else if (isEventOfType(event, "run.paused")) {

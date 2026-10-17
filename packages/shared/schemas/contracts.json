@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.13.0",
+  "contracts_version": "5.14.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -2440,6 +2440,10 @@
                 "minLength": 1,
                 "maxLength": 1024
               }
+            },
+            "autopilot": {
+              "type": "boolean",
+              "const": true
             }
           },
           "required": [
@@ -2683,6 +2687,10 @@
             "note": {
               "type": "string",
               "maxLength": 4000
+            },
+            "autopilot": {
+              "type": "boolean",
+              "const": true
             }
           },
           "required": [
@@ -5991,6 +5999,10 @@
                 "who_should_have_caught"
               ],
               "additionalProperties": false
+            },
+            "autopilot": {
+              "type": "boolean",
+              "const": true
             }
           },
           "required": [
@@ -14188,6 +14200,9 @@
             "new_project"
           ]
         },
+        "autopilot": {
+          "type": "boolean"
+        },
         "merge_level": {
           "default": 2,
           "anyOf": [
@@ -18211,6 +18226,9 @@
             "maxLength": 4096,
             "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])[^\\0]*$"
           }
+        },
+        "autopilot": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -23876,6 +23894,20 @@
             ],
             "additionalProperties": false
           }
+        },
+        "autopilot": {
+          "type": "object",
+          "properties": {
+            "decisions": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "decisions"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

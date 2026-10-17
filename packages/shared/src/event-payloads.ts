@@ -232,6 +232,11 @@ export const EVENT_PAYLOAD_SCHEMAS = {
      * `attachments` inputs. New in 5.12.0.
      */
     attachments: z.array(RelPathSchema).max(ATTACHMENTS.max).optional(),
+    /**
+     * The run is on autopilot (`StartInput.autopilot`, else `ProjectConfig.autopilot`; spine §5
+     * reading 271). Absent: off. New in 5.14.0.
+     */
+    autopilot: z.literal(true).optional(),
   }),
   "run.phase_changed": z.strictObject({ from: PhaseSchema.nullable(), to: PhaseSchema }),
   "run.paused": z.strictObject({ reason: z.string().min(1).max(300) }),
@@ -265,6 +270,8 @@ export const EVENT_PAYLOAD_SCHEMAS = {
     /** The reason given for each waived fact (`ApproveInput.fact_waivers`). New in 4.5.0. */
     fact_waivers: z.array(FactWaiverSchema).optional(),
     note: z.string().max(4000).optional(),
+    /** The engine approved it for an autopilot run (actor `engine`, reading 271). New in 5.14.0. */
+    autopilot: z.literal(true).optional(),
   }),
   /**
    * The engine asked the Lead to show a gate (`approve_gate`): what was shown, so Flow Studio can
@@ -506,6 +513,11 @@ export const EVENT_PAYLOAD_SCHEMAS = {
   "escalation.answered": z.strictObject({
     escalation: EscalationIdSchema,
     answer: EscalationAnswerSchema,
+    /**
+     * The engine chose the escalation's recommended option for an autopilot run (actor `engine`,
+     * spine §5 reading 271); not a human's attribution label. New in 5.14.0.
+     */
+    autopilot: z.literal(true).optional(),
   }),
   /** A change request was opened against a frozen artifact; its escalation decides it (§6.2). */
   "change_request.opened": z

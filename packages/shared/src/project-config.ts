@@ -47,6 +47,15 @@ export const ProjectConfigSchema = z.strictObject({
   client: SlugSchema.optional(),
   /** Overrides the Lead's intake classification when set (§6.2). */
   track_default: TrackSchema.optional(),
+  /**
+   * Autopilot (spine §5 reading 271): every run in this project runs without the human's stops
+   * that VTC may decide itself. The engine answers a role's question with its recommended option
+   * and approves G1 and G2, and the human reviews it all at the run's PR; it still stops for what
+   * it may never decide alone (`autopilotChoice`), and it never merges into the default branch
+   * (merge Level 3 runs at Level 2). Absent: off. `start`'s `autopilot` turns it on for one run.
+   * New in 5.14.0.
+   */
+  autopilot: z.boolean().optional(),
   merge_level: MergeLevelSchema.default(2),
   /** Per-task round caps by risk (§6.3 step 9; 3–5 rounds, D6). */
   caps: z.strictObject({ low: capSchema(3), med: capSchema(4), high: capSchema(5) }).prefault({}),

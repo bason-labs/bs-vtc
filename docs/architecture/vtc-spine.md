@@ -4855,6 +4855,32 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       root or relative, against the pack itself; any other absolute path still fails. The
       prompt also says to cite files by their path relative to the working directory. Tests:
       `quick-fix-design.test.ts`.
+271.  **Autopilot: the human's one review is the PR** (§6.2, §6.5, AD-27 rule 2). _Lead decision
+      2026-10-17 on the owner's request, pending human review._ The owner asked to hand VTC a
+      task or a bug and review only the result; every quick fix stopped for the BA's open
+      questions, for a separate "who should have caught it" question and for the combined
+      G1+G2 screen. Contracts 5.14.0: `autopilot` on `start` and in `.vtc/project.yaml`
+      (absent: off; `start`'s value wins) is recorded on `run.started`. On such a run the
+      engine itself (actor `engine`, `autopilot: true`) (1) answers an open escalation with its
+      recommended option, only for reasons `spec_question`, `blocked` and `spec_conflict` that a
+      role raised (a spec question from any role), only when that option's effect is `clarify`,
+      `hint`, `retry` or `replan`, at most twice per role and scope and 12 times per run, with
+      `who_should_have_caught: none`, which Lookback's human labels skip; (2) approves G1, G2 or
+      the combined screen once no escalation is open, with the rules an automatic run's
+      approval keeps (no unverified fact, the category standard for UI directions). Everything
+      else stays the human's: budgets, risk rules, caps and stuck loops, gate infrastructure and
+      logins, change requests, an option that waives, drops or decides a change. It runs at
+      most at merge Level 2 like an automatic run (D-bw): it never merges into the default
+      branch. The PR description lists every autopilot decision and the files each gate froze;
+      `status` counts them (`StatusResult.autopilot`). `drive` decides them too, so a Codex
+      Lead's headless roles go on between the Lead's turns, and an autopilot run with no live
+      Lead is driven like an automatic run where `headless_allowed`. `next` on an autopilot run
+      whose only action is a wait on the engine's own work (headless runs, engine jobs) holds
+      for up to 45 s (`AUTOPILOT_NEXT_WAIT_MS`, under the Codex MCP tool timeout) and answers on
+      the run's next event, and the Lead skill tells the Lead to call `next` again rather than
+      end its turn. For every run the Lead now proposes the attribution with each escalation
+      instead of asking it as a separate question. Tests: `autopilot.test.ts`,
+      `contracts-5-14.test.ts`.
 
 ## 6. Change process for this spine
 

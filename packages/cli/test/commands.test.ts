@@ -545,6 +545,12 @@ describe("vtc status / pause / resume (AD-19 rule 4)", () => {
     expect(lines.slice(-2)).toEqual(["Usage:", "  unknown"]);
   });
 
+  it("says when the run is on autopilot and how many decisions it took (reading 271)", () => {
+    const lines = formatStatus({ ...statusResult, autopilot: { decisions: 3 } });
+    expect(lines).toContain("Autopilot: on (3 decisions taken for you, listed in the PR)");
+    expect(formatStatus(statusResult).some((l) => l.startsWith("Autopilot"))).toBe(false);
+  });
+
   it("reports engine errors as one readable line", async () => {
     const { ctx, err } = capture("/w", "/h", () =>
       Promise.resolve({

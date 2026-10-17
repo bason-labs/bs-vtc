@@ -54,6 +54,11 @@ export const formatStatus = (status: StatusResult): string[] => {
         `  parked ${p.task}: ${p.reason}${p.risk_rule === undefined ? "" : ` (${p.risk_rule})`}`,
     ),
     ...status.features.map((f) => `Feature ${f.id}: ${f.status}`),
+    ...(status.autopilot === undefined
+      ? []
+      : [
+          `Autopilot: on (${String(status.autopilot.decisions)} decision${status.autopilot.decisions === 1 ? "" : "s"} taken for you, listed in the PR)`,
+        ]),
     `Open escalations: ${String(status.open_escalations)}`,
     budgetLine(status.budget),
     ...usageLines(status.usage),

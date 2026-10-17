@@ -71,17 +71,18 @@ a run starts from the committed `.vtc/project.yaml` and `.vtc/gates.yml`.
 
 Open Claude Code or Codex **in the project folder** and talk to the Lead:
 
-| You want to                    | Claude Code                                    | Codex                       |
-| ------------------------------ | ---------------------------------------------- | --------------------------- |
-| Fix a bug / small change       | `/vtc:vtc start "Fix: autoplay skips song 2"`  | `$vtc start "Fix: ..."`     |
-| Build a feature                | `/vtc:vtc start "Add playlist sharing"`        | `$vtc start "Add ..."`      |
-| Continue after a break         | `/vtc:vtc continue`                            | `$vtc continue`             |
-| See where things are           | `/vtc:vtc status`                              | `$vtc status`               |
-| Answer what is waiting for you | `/vtc:vtc escalations`                         | `$vtc escalations`          |
-| Change something mid-run       | `/vtc:vtc change "Use tabs, not a modal"`      | `$vtc change "..."`         |
-| Ask an advisor                 | `/vtc:vtc advise "Why does /tv keep loading?"` | `$vtc advise "..."`         |
-| Stop / restart everything      | `/vtc:vtc pause`, `/vtc:vtc resume`            | `$vtc pause`, `$vtc resume` |
-| End a run started by mistake   | `/vtc:vtc cancel`                              | `$vtc cancel`               |
+| You want to                    | Claude Code                                    | Codex                          |
+| ------------------------------ | ---------------------------------------------- | ------------------------------ |
+| Fix a bug / small change       | `/vtc:vtc start "Fix: autoplay skips song 2"`  | `$vtc start "Fix: ..."`        |
+| Build a feature                | `/vtc:vtc start "Add playlist sharing"`        | `$vtc start "Add ..."`         |
+| Run it to the PR, no stops     | `/vtc:vtc start --autopilot "Fix: ..."`        | `$vtc start --autopilot "..."` |
+| Continue after a break         | `/vtc:vtc continue`                            | `$vtc continue`                |
+| See where things are           | `/vtc:vtc status`                              | `$vtc status`                  |
+| Answer what is waiting for you | `/vtc:vtc escalations`                         | `$vtc escalations`             |
+| Change something mid-run       | `/vtc:vtc change "Use tabs, not a modal"`      | `$vtc change "..."`            |
+| Ask an advisor                 | `/vtc:vtc advise "Why does /tv keep loading?"` | `$vtc advise "..."`            |
+| Stop / restart everything      | `/vtc:vtc pause`, `/vtc:vtc resume`            | `$vtc pause`, `$vtc resume`    |
+| End a run started by mistake   | `/vtc:vtc cancel`                              | `$vtc cancel`                  |
 
 Claude Code shows plugin commands as `<plugin>:<command>`, so `/vtc` appears as `/vtc:vtc`.
 In Codex, `$vtc` calls the plugin's `vtc` skill (type `$` and pick it from the list). You can
@@ -89,7 +90,10 @@ also just say "use vtc to fix ...".
 
 The Lead classifies your request as a `quick_fix`, a `feature` or a `new_project` and tells you
 which; you can change it. Then it runs the loop and stops for you at G1, G2, and anything that
-needs a decision. Attach screenshots as files and the Lead passes them to the roles that need
+needs a decision. With `--autopilot` (or `autopilot: true` in `.vtc/project.yaml`) it decides
+those itself, takes each question's recommended answer, and lists every decision in the PR for
+you to review; it still stops for budgets, security and dependency rules, a fix that keeps
+failing and an expired login, and never merges into your main branch. Attach screenshots as files and the Lead passes them to the roles that need
 them (kept private in `.vtc/state/`).
 
 From a terminal at any time: `vtc status`, `vtc dashboard`, `vtc pause`, `vtc resume`,
