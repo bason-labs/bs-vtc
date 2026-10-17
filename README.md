@@ -1,13 +1,107 @@
 # VTC (Virtual Tech Company)
 
-VTC runs a small software company on your machine: a Lead you talk to in Claude Code or Codex,
-and a team of role agents (business analyst, architect, designer, engineers, QA, reviewers and
-others) that take an idea through spec, design, build, gates and review to a pull request. A local
-engine decides what runs next, checks every result against frozen contracts and gates, and keeps
-an event log you can watch in the Flow Studio dashboard. VTC uses your own Claude Code and Codex
-logins and your own `gh` login. It never handles an API key or a token, and it never bypasses a
-host's permission prompts.
+**VTC is a small software company that lives on your machine.** You describe what you want in
+Claude Code or Codex. A Lead agent turns it into a run, and a team of role agents builds it:
 
+```
+ you ──► Lead ──► Business Analyst ──► G1: you approve the requirements
+                                            │
+                  Architect + Designer ◄────┘
+                          │
+                          ▼
+                  G2: you approve the design
+                          │
+                  Planner ──► Engineers ──► Gates (typecheck, lint, tests, security, Visual QA)
+                                  ▲               │ fail: fix loop (capped)
+                                  └───────────────┘
+                                          │ pass
+                                  Reviewers ──► Final Review ──► pull request for you
+```
+
+- **Your subscription, your logins.** VTC runs on your own Claude Code or Codex plan and your `gh`
+  login. It never asks for an API key and never skips a permission prompt.
+- **You stay in charge.** You approve the requirements (G1) and the design (G2), and you merge the
+  pull request. Anything stuck stops and asks you.
+- **Checked, not trusted.** A local engine decides what runs next, checks each agent's result
+  against fixed contracts, and runs real gates in a sandbox before anything reaches a PR.
+- **You can watch it.** `vtc dashboard` opens Flow Studio: runs, tasks, gates, costs.
+- **It gets better.** After each run, Lookback scores every role and proposes prompt fixes as pull
+  requests to this repo, for a human to review.
+
+## Quick start
+
+### 1. Install `vtc` (once per machine)
+
+Download the archive for your platform from
+[Releases](https://github.com/bason-labs/bs-vtc/releases), check it, and put `vtc` on your PATH:
+
+```sh
+gh release download v0.2.1 -R bason-labs/bs-vtc -p 'vtc-0.2.1-darwin-arm64.tar.gz' -p SHA256SUMS
+shasum -a 256 -c SHA256SUMS --ignore-missing
+tar -xzf vtc-0.2.1-darwin-arm64.tar.gz && mv vtc ~/.local/bin/
+vtc version
+```
+
+Then install the host plugins and the tools the gates use:
+
+```sh
+vtc install codex                 # the Codex plugin
+vtc install claude-code           # the Claude Code plugin
+vtc doctor --download --install-browser   # pinned scanners and the screenshot browser
+vtc install --auto-resume         # optional: continue runs after a usage limit resets
+```
+
+Restart Claude Code and Codex afterwards.
+
+### 2. Set up a project (once per repo)
+
+```sh
+cd ~/code/my-app
+vtc init                  # creates .vtc/project.yaml
+vtc calibrate             # detects build/test/lint commands; you confirm them
+vtc install claude-code   # writes this repo's Claude session sandbox; you confirm it
+vtc doctor                # should end with "vtc is ready."
+git add .vtc/project.yaml .vtc/gates.yml .gitignore && git commit -m "Set up VTC"
+```
+
+In `.gitignore`, ignore only `.vtc/state/` (VTC's local state), never the whole `.vtc/` folder:
+a run starts from the committed `.vtc/project.yaml` and `.vtc/gates.yml`.
+
+### 3. Kick off work
+
+Open Claude Code or Codex **in the project folder** and talk to the Lead:
+
+| You want to                    | Claude Code                               | Codex                       |
+| ------------------------------ | ----------------------------------------- | --------------------------- |
+| Fix a bug / small change       | `/vtc start "Fix: autoplay skips song 2"` | `$vtc start "Fix: ..."`     |
+| Build a feature                | `/vtc start "Add playlist sharing"`       | `$vtc start "Add ..."`      |
+| Continue after a break         | `/vtc continue`                           | `$vtc continue`             |
+| See where things are           | `/vtc status`                             | `$vtc status`               |
+| Answer what is waiting for you | `/vtc escalations`                        | `$vtc escalations`          |
+| Change something mid-run       | `/vtc change "Use tabs, not a modal"`     | `$vtc change "..."`         |
+| Stop / restart everything      | `/vtc pause`, `/vtc resume`               | `$vtc pause`, `$vtc resume` |
+
+In Codex, `$vtc` calls the plugin's `vtc` skill (type `$` and pick it from the list). You can
+also just say "use vtc to fix ...".
+
+The Lead classifies your request as a `quick_fix`, a `feature` or a `new_project` and tells you
+which; you can change it. Then it runs the loop and stops for you at G1, G2, and anything that
+needs a decision. Attach screenshots as files and the Lead passes them to the roles that need
+them (kept private in `.vtc/state/`).
+
+From a terminal at any time: `vtc status`, `vtc dashboard`, `vtc pause`, `vtc resume`.
+
+### Which host runs the roles?
+
+- **Claude Code Lead:** role agents run as subagents of your Claude Code session.
+- **Codex Lead:** role agents run as headless `codex exec` runs that the engine starts.
+
+Both count against your own plan. Models are picked by task difficulty (small tasks on the
+cheaper tier, risky ones on the top tier); `vtc config` shows the table.
+
+## Learn more
+
+- Changelog: [`CHANGELOG.md`](CHANGELOG.md)
 - Design: [`docs/superpowers/specs/2026-10-12-vtc-system-design.md`](docs/superpowers/specs/2026-10-12-vtc-system-design.md)
 - Architecture (binding): [`docs/architecture/vtc-spine.md`](docs/architecture/vtc-spine.md)
 - Who owns what: [`tooling/ownership.json`](tooling/ownership.json)
