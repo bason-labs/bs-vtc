@@ -1,0 +1,67 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "agentGuidance": false,
+  "globalDependencies": [
+    "tsconfig.base.json",
+    "vitest.shared.ts",
+    "vitest.tmpdir.ts",
+    "eslint.config.js"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "out/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
+    "lint": {
+      "dependsOn": ["^typecheck"]
+    },
+    "test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "@vtc/engine#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/roles/**", "$TURBO_ROOT$/fixtures/**"]
+    },
+    "@vtc/compiler#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/roles/**",
+        "$TURBO_ROOT$/skills/**",
+        "$TURBO_ROOT$/plugins/**"
+      ]
+    },
+    "@vtc/cli#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/roles/**",
+        "$TURBO_ROOT$/skills/**",
+        "$TURBO_ROOT$/plugins/**",
+        "$TURBO_ROOT$/fixtures/**"
+      ]
+    },
+    "@vtc/shared#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/fixtures/**"]
+    },
+    "@vtc/dashboard#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/fixtures/**"]
+    },
+    "@vtc/arch-tests#test": {
+      "dependsOn": ["^typecheck"],
+      "outputs": [],
+      "cache": false
+    }
+  }
+}

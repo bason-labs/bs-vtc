@@ -1,0 +1,117 @@
+{
+  "$comment": "AD-3 rule 4: append-only. Each CONTRACTS_VERSION with the SHA-256 of JSON.stringify(jsonSchemas()). A schema change must add a new, higher version here by hand; vitest -u cannot.",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "schemas_sha256": "87946578ca2cb41c00b4ef0604f111c1fbefce8895571839a80773c44814b19c"
+    },
+    {
+      "version": "3.0.0",
+      "schemas_sha256": "cf602cb5c8afb9cc58adab16bea96443e677d352bc684be4084482bcadbeff7d"
+    },
+    {
+      "version": "4.0.0",
+      "schemas_sha256": "13cbe007b40c9c180015c7b3e2041422462e4703b2ac6227fc3a1b7c88faf57e"
+    },
+    {
+      "version": "4.1.0",
+      "schemas_sha256": "8492e22a4ca3ba2ae09871c0fd6429d82590c2e71172de788655aa37276f887c"
+    },
+    {
+      "version": "4.2.0",
+      "schemas_sha256": "be5271ee802b405368799eb1b22cc26a543d3ff4dd228f7c0335a310380b545f"
+    },
+    {
+      "version": "4.3.0",
+      "schemas_sha256": "ff2051f52668d93bfd69e5c55f3eb4dbf56fbfd8de2ba1843add129a470db3f9"
+    },
+    {
+      "version": "4.4.0",
+      "schemas_sha256": "d0efb7b4b1ecfa51292cab957940f14e8fbe2de69ec83347f490cbe635b5da47"
+    },
+    {
+      "version": "4.5.0",
+      "schemas_sha256": "8e67b7a264f2f1e21212ca469cffb243a7b5b5d6ad6f99b634233436b793624c"
+    },
+    {
+      "version": "4.6.0",
+      "schemas_sha256": "49ddc9b1646dc23f3f709902a6797ef1fe299da5f2f7ab4c2a527bac62617021"
+    },
+    {
+      "version": "4.7.0",
+      "schemas_sha256": "b4048e388a0d39f9e5643c0c20423df54e1129229b831e6a4edc55d566fd09f8"
+    },
+    {
+      "version": "4.8.0",
+      "schemas_sha256": "afb8dbd0449a7505938464face0d6e3abff76f19e65ffd3818e6ac768924b3d0"
+    },
+    {
+      "version": "4.9.0",
+      "schemas_sha256": "6676f4a24dde9080b9c9e4f564ad5b973413754e7fcc588986967dacbf014ee1"
+    },
+    {
+      "version": "4.10.0",
+      "schemas_sha256": "fc121b6dfa45b7be0b8740a16fe4aa36c4ef6e309f5baaabed1e4f51438e7596"
+    },
+    {
+      "version": "4.11.0",
+      "schemas_sha256": "e1382e363851082cd1df17b4f823ad1163fa1422ff41595cc23539fd2cc491ef"
+    },
+    {
+      "version": "4.12.0",
+      "schemas_sha256": "6908368e3eabd2b3abed3fc9de6875264e6b004bd1cf4f7f7e96433b28b75589"
+    },
+    {
+      "version": "5.0.0",
+      "schemas_sha256": "24923987faeb072f0672715925c62112f18a6823237c0551905e97525dd36a16"
+    },
+    {
+      "version": "5.1.0",
+      "schemas_sha256": "0dba4719c3de40cb4b8a32ba13c93d05e039177a95f0c3e7922fc6b06cac57ae"
+    },
+    {
+      "version": "5.2.0",
+      "schemas_sha256": "25502bf86e0f4b1a32b26f7b50bc6b816033f6e9e6a28f7f45b63671346d742c"
+    },
+    {
+      "version": "5.3.0",
+      "schemas_sha256": "31dd94768fd2f99e87a7123d6950f6be887c8eda47d249ba9089264ddb343450"
+    },
+    {
+      "version": "5.4.0",
+      "schemas_sha256": "b234bf9a8cfb1f65a8dcb81fe78fa899553eda468aa192523981932ddfa937a3"
+    },
+    {
+      "version": "5.5.0",
+      "schemas_sha256": "bbb9bae3f8df2b4aace5c131f178f625a7399bf0294294280f8f9af7101ff8b3"
+    },
+    {
+      "version": "5.6.0",
+      "schemas_sha256": "c16a6ca5c0a184501088b3d6be04410ed693a6c77abf50b6d34ecdbce2601a7c"
+    },
+    {
+      "version": "5.7.0",
+      "schemas_sha256": "fcf6118a8f0af42bfabe45e3663eca93de0f346fb06d2c065d0e316a19210527"
+    },
+    {
+      "version": "5.8.0",
+      "schemas_sha256": "3fcbb8280535819796124d3b55ae41e20a55539c2d3c85e2215eacdb9edf62a3"
+    },
+    {
+      "version": "5.9.0",
+      "schemas_sha256": "df38205c1ac2fdfa06c3995bd6dce1c0150c905dd276727f744e72cf47c0862c"
+    },
+    {
+      "version": "5.10.0",
+      "schemas_sha256": "18258312d7e05460c485be6c33a1a1bbf33d32e20c3e7932229132c48c5afca6"
+    },
+    {
+      "version": "5.11.0",
+      "schemas_sha256": "c90c0bd7ee8eee5d51abe83706ea5e30217fac636e026a753c446c219ef11559"
+    },
+    {
+      "version": "5.12.0",
+      "schemas_sha256": "1ebd679ce441b969f5fd1bbb2e4ea234442fbf7a480dbb93849f4bda94bb3679"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   engineering/engineering-codebase-onboarding-engineer.md (base: facts only, read the code
+#     first, entry points and traced paths, files inspected and not inspected)
+#   specialized/specialized-codebase-archaeologist.md (drift passes: one state handled
+#     everywhere, one value representation, duplicates that only look shared)
+# New: the inferred architecture spine, conventions and extracted design tokens as one map.
+id: repo_cartographer
+version: 1.0.0
+kind: core
+mission: >-
+  Map an existing repository as it is, from its code: structure, entry points, traced paths,
+  conventions, an inferred architecture spine and the design tokens already in use.
+inputs: [request, repo_map]
+output: { artifacts: [repo_map], verdicts: [] }
+exits: [done, blocked]
+success_criteria:
+  - id: citations_resolve
+    description: "Every statement cites a file or file_line that exists."
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools:
+  profile: write_scoped
+  write_paths: [".vtc/research/repo-map/**"]
+budget: { context_tokens: 80000 }

@@ -1,0 +1,72 @@
+# Golden run fixture
+
+A small recorded run (`golden-1`, feature track) for building and testing against the engine's
+frozen surfaces without a running engine (AD-5, AD-7, AD-12).
+
+- `events.jsonl`: the run's event log, exactly as the engine writes `.vtc/runs/<run>/events.jsonl`.
+  It covers the replay-only fields too: the request in `run.started` (the feature is named from
+  its first line), the intent contract in `task.created`, `feature.created`,
+  `task.workspace_assigned`, `task.session_updated`, the snapshot commit (`head`) of the built
+  submit, the trace fields of role events, L2 test metrics with their inventory path, the
+  traceability report path, and a feature budget.
+- `api/*.json`: the response of each `ENGINE_HTTP` read route for this log: `health`, `runs`,
+  `status`, `events` (`/api/runs/golden-1/events`), `tasks`, `task-T-1` / `task-T-2`,
+  `task-T-1-diff`, `features`, `artifact-spec` (`?path=.vtc/spec/spec.md`, the spec G1 froze),
+  `escalations`, the three graph zoom levels `graph-project` (`?scope=project`), `graph-task_dag`
+  (`?scope=task_dag`) and `graph-task-T-2` (`?scope=task&task=T-2`, with a `loop_guard`
+  back-edge), and `usage`; `client-spend`; and `automation`, which comes from the
+  `samples/automation-events.jsonl` log below, because this run takes no automatic action.
+- the one recorded dispatch (`a-1`) carries the 5.4.0 routing record (`role.dispatched` `tier`
+  `mid`, `tier_reason` `rule`, `tier_clamped`: the project's `routing.max_tier` held the auth-tagged
+  task's Top start; `RoleRunSummary` in `api/task-T-1.json` repeats it, H-9) and its shell calls
+  as shapes (`role.submitted.command_shapes`, D-cs).
+- `packs/a-1.json`: the `TaskPack` behind the one recorded dispatch (`a-1`), rendered by
+  `renderTaskPack` to `.vtc/state/packs/a-1.md`.
+
+- `samples/`: wave-3 shapes beside the run (contracts 4.10.0), not part of `golden-1`, so the `api/`
+  snapshots do not change:
+  - `wave3-events.jsonl`: a short log (`golden-wave3`) with a G2 `gate.requested` carrying
+    `directions`, `facts`, `design_coverage` and `design_exits`; `headless.preflight` / `started` /
+    `ended` (a replay preflight among them); `merge.preflight`; `feature.checklist`,
+    `feature.auto_merge_enabled` and `feature.auto_merge_disabled`; `final_review.step_finished`;
+    `fact.recorded` (one row with a host-reported `reported_source`, H-3), `fact.verified` and
+    `fact.waived`; `lookback.dispatched`, `proposal_recorded`, `replay_finished` (its `sha256` is
+    that of `replay-p-engineer-1.json`'s bytes), `canary_assigned`, `canary_evaluated`,
+    `rolled_back` and `escaped_defect`; and a `prompt_selection` incident (reading 176);
+  - `replay-p-engineer-1.json`: the `ReplayResult` that event names: an Engineer's replay on a
+    Codex-led headless run, graded by the gates (since contracts 5.0.0 every replay trial is an
+    engine-launched headless run, a Claude arm with its own compiled plugin, and a verdict role
+    such as `spec_verifier` is graded by the verdict grader, spine §5 readings 201 and 202);
+  - `gate-report-visual.json`: a `GateReport` whose `visual` summary names its `toolchain`;
+  - `usage-billing.json`: a `UsageReport` with each host's `billing` (D-bq).
+
+- `samples/` closing-round and round-4 shapes (contracts 5.0.0):
+  - `closing-events.jsonl` (`golden-closing`): a `gate.result` whose visual step names its
+    `toolchain`, one whose visual step was `skipped` with its `skipped_reason`, a G2
+    `gate.requested` whose `design_coverage` names `directions_problem` (D-bt), and a Level-3
+    release park whose escalation offers `finish_level_2` (D-bd);
+  - `usage-billing-provider.json`: a `UsageReport` billed through a cloud `provider` (D-ci) beside
+    an `api_key` host;
+  - `facts.jsonl`: a `.vtc/research/facts.jsonl` row with a host-reported `reported_source` (H-3);
+  - `automation-events.jsonl` (`golden-auto`): an automatic run (`run.started.automation`) and
+    every `upstream.*` and `automation.skipped` event (AD-27, D-ca); since contracts 5.4.0 also
+    its release push to `vtc/auto/<kind>/<fp8>` (`branch.pushed.remote_ref`), a fix PR that
+    merged (its issue closed as `completed`), a draft PR with complete evidence for a D-cs `tool`
+    improvement, and the `privacy`, `paused` and `error` skips the Automation view labels;
+  - the `GET /api/automation` answer for that log (`AutomationReport`, with the project opted out
+    of upstream reports) is `api/automation.json`: the golden run's own log has no automatic
+    action, so the route's snapshot comes from this sample log (spine §5 reading 209(3)).
+
+  `packages/engine/test/core/golden-samples.test.ts` validates each against its contract and
+  replays the log through the engine's loader.
+
+Who uses it:
+
+- **Dashboard (sub-project 6):** serve `api/` from a dev fixture server, or point `next dev` at it,
+  and replay `events.jsonl` as the SSE stream.
+- **Engine core (sub-project 1):** the golden replay test must rebuild exactly these responses from
+  `events.jsonl` (AD-7 Check).
+- **Roles + compiler (sub-project 3):** `packs/` shows what a role receives.
+
+`packages/shared/test/golden-run.test.ts` validates every file against its contract and checks the
+snapshots against the log. Changing a contract means regenerating this fixture in the same change.

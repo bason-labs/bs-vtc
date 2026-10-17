@@ -1,0 +1,2487 @@
+/**
+ * The engine (§4.1, §4.2; AD-4, AD-7, AD-8): owns every run's state, rebuilt from the event logs
+ * on open, and answers the Lead-facing tools. The Lead only ever dispatches what `next` returns;
+ * the engine decides every transition, cap, budget and route (D11).
+ */
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { setGitPreflight, setGitSigning, writeRepoFile } from "../git/index.js";
+import { join } from "node:path";
+import {
+  dotenvValues,
+  eventLogPath,
+  gatesConfigNotCommitted,
+  projectConfigNotCommitted,
+  HOST_IDS,
+  humanChannelRequired,
+  PACK_INPUT_TYPES,
+  parseEventLog,
+  remainingPct,
+  resolveRoleMode,
+  unknownUsage,
+  type ApproveInput,
+  type AnswerInput,
+  type ChangeRequestInput,
+  type ChangeRequestResult,
+  type ConsultInput,
+  type ConsultResult,
+  type EscalationList,
+  type FrozenArtifact,
+  type GatesConfig,
+  GatesConfigSchema,
+  ProjectConfigSchema,
+  type HostBilling,
+  type HostId,
+  type HumanGateId,
+  type LeadAction,
+  type NextResult,
+  type Phase,
+  type ProjectConfig,
+  type ControlResult,
+  type HumanOnlyToolName,
+  type ResumeInput,
+  type RunScopedInput,
+  type SessionSandboxState,
+  type StartInput,
+  type StartResult,
+  type StatusResult,
+  type SubmitInput,
+  type SubmitResult,
+  type RoleMcpToolName,
+  type UnverifiedFactSummary,
+  type UsageSnapshot,
+  type VtcEvent,
+  AutomationRunRefSchema,
+  effectiveMergeLevel,
+  type AutomationRunRef,
+} from "@vtc/shared";
+import {
+  committedGatesConfig,
+  startProjectConfig,
+  ConfigError,
+  GATES_CONFIG_PATH,
+  loadGatesConfig,
+  loadProjectConfig,
+  pipelineConfigHash,
+  PROJECT_CONFIG_PATH,
+  type CommittedGates,
+} from "./config.js";
+import { dispatchGuarded, inSessionRefusal, NO_LEAD_WAIT_REASON, phaseRoles } from "./dispatch.js";
+import { coverageRedoSince, isChangeSpecAnswer, runCoverageCheck } from "./design-loop.js";
+import {
+  checkDirectionsNovelty,
+  designCoverage,
+  designerRedispatchNote,
+  designWorkSince,
+  g2ApprovalProblem,
+  gateExtras,
+  recordChosenDirection,
+  type GateExtras,
+} from "./g2.js";
+import { effectiveVerdict } from "./gate-verdict.js";
+import { headlessRunsOf, killHeadless } from "./headless.js";
+import type { FactRefresher, LookbackRetro, PromptPins, RoleToolHandler } from "./kernel.js";
+import { dispatchNow, drive } from "./route.js";
+import { parkEscalation } from "./escalations.js";
+import {
+  acceptCheckout,
+  checkLeftoverGates,
+  checkLeftoverRecords,
+  dropGates,
+  findLostLogs,
+  FORENSICS_DIR,
+  gitPreflight,
+  loadGitHold,
+  loadHeldRuns,
+  releaseHeldRuns,
+  removeLostLogs,
+  reportUnverifiable,
+  restoreDispatches,
+  restoreGates,
+  restoreLog,
+  saveHeldRuns,
+  sweepDispatches,
+  type DispatchRecord,
+} from "./dispatch-guard.js";
+import { EngineWrites, NEVER_WROTE } from "./engine-writes.js";
+import {
+  appendPrivateFile,
+  automationPausedByHuman,
+  ensurePrivateDir,
+  guardDirFor,
+  readPrivateFile,
+  setAutomationPaused,
+  writePrivateFile,
+} from "./guard.js";
+import { openEventLog, type EventDraft } from "./event-log.js";
+import {
+  downgradeNoRemote,
+  ensureWorkspace,
+  failureDetail,
+  rebaseReopened,
+  setFeatureStatus,
+  startBaseCheck,
+  startMergeQueue,
+  startRoundGates,
+} from "./jobs.js";
+import {
+  disableAutoMerges,
+  finishAtLevel2,
+  finishAtLevel2Pending,
+  pollMergedFeature,
+  recordMergePreflight,
+  startMergeLevel,
+  watchedFeatures,
+} from "./level3.js";
+import { startRelease } from "./release.js";
+import { stepRetro } from "./retro.js";
+import { replayTrialActions } from "./replay.js";
+import { clientSpendRow, recordClientSpend } from "./spend.js";
+import { checkFinalReviewStuck, startFinalReview } from "./final-review.js";
+import {
+  EngineError,
+  type CallContext,
+  type EngineCoreDeps,
+  type HeadlessEntry,
+  type Kernel,
+  type RunHandle,
+} from "./kernel.js";
+import { limitWait, maybeAutoResume } from "./limits.js";
+import { ACTIVE_TASK_STATUSES } from "./machines.js";
+import { applyAnswer, setTaskStatus } from "./parking.js";
+import { writePlanFile, writeRequestFile } from "./projections.js";
+import { copyAttachments, readAttachments, runAttachments } from "./attachments.js";
+import {
+  awaitingReopenRebase,
+  inFlight,
+  lastBuilt,
+  lastSubmitted,
+  nextEscalationId,
+  pendingBaseCheck,
+  phaseEnteredSeq,
+  roundVerdict,
+} from "./queries.js";
+import { loadResult } from "./results.js";
+import { completedReviews, startTriage } from "./review.js";
+import { activeRun } from "./read-model.js";
+import { loadRuns } from "./run-store.js";
+import { schedule } from "./scheduler.js";
+import {
+  applyEvent,
+  emptyRunState,
+  projectRun,
+  SUPERSEDED_RUN_PREFIX,
+  type RunState,
+} from "./state.js";
+import { ArtifactRefSchema } from "@vtc/shared";
+import { checkEngineerShare, handleSubmit, takeCommandShapes } from "./submit.js";
+import { escalationListView, openEscalations, statusView } from "./views.js";
+import { crashIncident } from "./vtc-stack.js";
+
+const sha256File = (path: string): string | undefined =>
+  existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : undefined;
+
+/**
+ * A reset that moved by less than this is the same reset: Codex reports the same window's reset a
+ * second apart from one reading to the next (the owner's first run, spine §5 reading 263).
+ */
+export const USAGE_RESET_SLACK_MS = 15 * 60_000;
+/** While the run is paused or waits for a reset, at most one `usage.updated` per host this often. */
+export const USAGE_IDLE_LOG_MS = 60 * 60_000;
+
+const sameReset = (a: string | null, b: string | null): boolean =>
+  a === b ||
+  (a !== null && b !== null && Math.abs(Date.parse(a) - Date.parse(b)) < USAGE_RESET_SLACK_MS);
+
+/**
+ * A reading worth logging against the last one logged (§6.9, reading 263): another source, other
+ * windows or model limits, a changed whole percentage, or a reset that moved by
+ * {@link USAGE_RESET_SLACK_MS} or more. A window at 0% has not started, so its reset (now plus the
+ * window) slides with the clock and never counts.
+ */
+const significant = (before: UsageSnapshot | undefined, after: UsageSnapshot): boolean => {
+  if (before === undefined) return true;
+  if (before.source !== after.source) return true;
+  if (before.windows.length !== after.windows.length) return true;
+  if (before.model_limits.length !== after.model_limits.length) return true;
+  const pct = (v: number | null): number | null => (v === null ? null : Math.floor(v));
+  const windowChanged = after.windows.some((w, i) => {
+    const b = before.windows[i];
+    if (b === undefined || b.kind !== w.kind || pct(b.used_pct) !== pct(w.used_pct)) return true;
+    return w.used_pct !== 0 && !sameReset(b.resets_at, w.resets_at);
+  });
+  return (
+    windowChanged ||
+    after.model_limits.some((m, i) => {
+      const b = before.model_limits[i];
+      return b === undefined || b.model !== m.model || !sameReset(b.resets_at, m.resets_at);
+    })
+  );
+};
+
+/** Whether a window is used up in one reading and not in the other. */
+const fullChanged = (before: UsageSnapshot | undefined, after: UsageSnapshot): boolean => {
+  const full = (s: UsageSnapshot | undefined): string =>
+    JSON.stringify((s?.windows ?? []).filter((w) => (w.used_pct ?? 0) >= 100).map((w) => w.kind));
+  return full(before) !== full(after);
+};
+
+const WINDOW_ORDER: Readonly<Record<UsageSnapshot["windows"][number]["kind"], number>> = {
+  five_hour: 0,
+  weekly: 1,
+  other: 2,
+};
+
+/** An `sdk_event` reading merged into the stored snapshot (see `Engine.ingestUsage`). */
+export const mergeSdkUsage = (
+  stored: UsageSnapshot | undefined,
+  incoming: UsageSnapshot,
+  receivedAt: Date,
+): UsageSnapshot => {
+  const kinds = new Set(incoming.windows.map((w) => w.kind));
+  const models = new Set(incoming.model_limits.map((m) => m.model));
+  return {
+    host: incoming.host,
+    source: incoming.source,
+    windows: [...(stored?.windows ?? []).filter((w) => !kinds.has(w.kind)), ...incoming.windows]
+      .map((w, i) => ({ w, i }))
+      .sort((a, b) => WINDOW_ORDER[a.w.kind] - WINDOW_ORDER[b.w.kind] || a.i - b.i)
+      .map(({ w }) => w),
+    model_limits: [
+      ...(stored?.model_limits ?? []).filter((m) => !models.has(m.model)),
+      ...incoming.model_limits,
+    ],
+    updated_at: receivedAt.toISOString(),
+  };
+};
+
+export type EventListener = (event: VtcEvent) => void;
+
+/** The config a run started with (AD-4 Prevents, AD-8 rule 5: agents never set caps or budgets). */
+interface FrozenConfig {
+  readonly run: string;
+  readonly project: ProjectConfig;
+  readonly gates: GatesConfig | null;
+  /**
+   * SHA-256 of the committed `gates.yml` bytes the run started with (`gates_config_hash`, spine
+   * §5 reading 46b), or `null` when the start commit had none.
+   */
+  readonly gatesSha: string | null;
+  /** `pipelineConfigHash(project, gates)`. */
+  readonly hash: string;
+}
+
+/** Where a run's frozen config is kept for a restart (checked against `run.started`'s hash). */
+const frozenConfigPath = (run: string): string => `.vtc/state/runs/${run}/config.json`;
+
+/** This install's origin id (spine §5 reading 88), created on first use in its private directory. */
+const installOrigin = (guardDir: string): string => {
+  const path = join(guardDir, "origin");
+  const kept = readPrivateFile(path)?.trim();
+  if (kept !== undefined && /^[0-9a-f-]{8,64}$/.test(kept)) return kept;
+  const fresh = randomUUID();
+  writePrivateFile(path, `${fresh}\n`);
+  return fresh;
+};
+
+/**
+ * The git-tracked `.vtc/` paths a milestone commit takes (AD-7 rule 2): the run logs and their
+ * projections, the plan files and evidence, and the documents roles write there. Never
+ * `.vtc/state/` (gitignored), `project.yaml` or `gates.yml` (the human's, reading 79).
+ */
+export const MILESTONE_PATHS: readonly string[] = [
+  ".vtc/runs",
+  ".vtc/tasks",
+  ".vtc/evidence",
+  ".vtc/spec",
+  ".vtc/architecture",
+  ".vtc/design",
+  ".vtc/research",
+  ".vtc/exports",
+  ".vtc/lookback",
+];
+
+/** The milestone an event marks (spec §6.8), or `null`. */
+const milestoneOf = (event: VtcEvent): string | null => {
+  if (event.type === "gate.approved") {
+    const gates = (event.data as { gates?: readonly string[] }).gates ?? [];
+    return `${gates.join("+")} approved`;
+  }
+  if (event.type === "feature.status_changed") {
+    const to = (event.data as { to?: string }).to;
+    if (to === "ready_to_ship") return `${event.feature ?? "feature"} passed Final Review`;
+    if (to === "shipped") return `${event.feature ?? "feature"} shipped`;
+    return null;
+  }
+  if (event.type === "run.finished") return "run finished";
+  return null;
+};
+
+/** The install that started a run (`run.started.origin`), when it says. */
+const runOrigin = (state: RunState): string | undefined => {
+  const started = state.events.find((e) => e.type === "run.started");
+  const origin = (started?.data as { origin?: unknown } | undefined)?.origin;
+  return typeof origin === "string" ? origin : undefined;
+};
+
+const foreignRunText = (run: string): string =>
+  `run ${run} was started by another clone's engine, so it is open here read-only (its git-shared log keeps one writer); to continue it on this machine instead, run vtc resume --run ${run} --adopt (the other clone must stop working on it)`;
+
+export class Engine implements Kernel {
+  readonly usage = new Map<HostId, UsageSnapshot>();
+  /** The last reading logged per run and host (`usage.updated`) and when (reading 263). */
+  private readonly usageLogged = new Map<
+    `${string}:${HostId}`,
+    { readonly snapshot: UsageSnapshot; readonly at: number }
+  >();
+  /** Who pays per host, from its last sign-in check (D-bq; `recordBilling`). */
+  private readonly billing = new Map<HostId, HostBilling | null>();
+  readonly identicalTree = new Map<string, boolean>();
+  readonly sharedTaskIds = new Set<string>();
+  readonly dispatches = new Map<string, DispatchRecord>();
+  readonly guardDir: string;
+  readonly writes: EngineWrites;
+  /**
+   * What `open` found and could not record in a run's log (a finished run's log cut back to its
+   * verified prefix, a log with nothing verified left): the daemon prints them.
+   */
+  readonly notices: string[] = [];
+  gitHold: Readonly<Record<string, string>> | null = null;
+  readonly gateBaselines = new Map<string, Readonly<Record<string, string>>>();
+  /** Runs `open` could not verify, run → reason (`checkLeftoverRecords`, `findLostLogs`). */
+  private held = new Map<string, string>();
+  private readonly handles = new Map<string, RunHandle>();
+  private readonly finished = new Map<string, RunState>();
+  /**
+   * Unfinished runs another clone's engine started (spine §5 reading 88): replayed for reading,
+   * never appended to, until a human adopts one (`resume` with `adopt`).
+   */
+  private readonly foreign = new Map<string, RunState>();
+  /** This install's id (`run.started.origin`), kept in its private directory. */
+  readonly origin: string;
+  private readonly jobs = new Map<string, Promise<void>>();
+  private readonly chains = new Map<string, Promise<unknown>>();
+  private readonly listeners = new Set<EventListener>();
+  private readonly fileCache = new Map<string, { stamp: number; value: unknown }>();
+  private frozen: FrozenConfig | null = null;
+  /** Modification stamps of the config files when drift was last checked. */
+  private driftStamps = "";
+  /** The Lead's MCP session per run (spine §7: Lead-only tools are refused from role sessions). */
+  private readonly leads = new Map<string, string>();
+  /** A role session's one action (`run/action`): it may submit nothing else. */
+  private readonly bound = new Map<string, string>();
+  /** What each run's Lead session reported about its OS sandbox (D-an; absent = unknown). */
+  private readonly leadSandbox = new Map<string, SessionSandboxState | undefined>();
+  /** The host each run's Lead session declared in its hello (`planDispatch`'s `leadHost`). */
+  private readonly leadHosts = new Map<string, HostId>();
+  readonly unattended = new Set<string>();
+  readonly headless = new Map<string, HeadlessEntry>();
+  private readonly stopper = new AbortController();
+  /** The role-facing research tools' handler (AD-22), set by the composition; `null` = none. */
+  private roleToolHandler: RoleToolHandler | null = null;
+  /** The stale-fact re-fetch before G2 (AD-22 rule 4), set by the composition; `null` = none. */
+  private factRefresher: FactRefresher | null = null;
+  private retroLookback: LookbackRetro | null = null;
+  /** What the wired refresher last returned (`Kernel.factTable`). */
+  private checkedFacts: readonly UnverifiedFactSummary[] | null = null;
+  private pins: PromptPins | null = null;
+  /** The G2 showings whose stale facts were already re-fetched (`run:phase entry seq`). */
+  private readonly factsRefreshed = new Set<string>();
+  /** The G2 showings whose directions' novelty was already checked (`run:phase entry seq`). */
+  private readonly noveltyChecked = new Set<string>();
+
+  private constructor(readonly deps: EngineCoreDeps) {
+    this.guardDir = guardDirFor(deps.vtcHome, deps.repoRoot);
+    ensurePrivateDir(this.guardDir);
+    this.writes = EngineWrites.open(deps.repoRoot, join(this.guardDir, "engine-writes.jsonl"));
+    this.origin = installOrigin(this.guardDir);
+  }
+
+  /**
+   * Opens the engine on a repo: replays every run's log (AD-7 rule 5) and recovers its work. A log
+   * is replayed only as far as the engine's ledger vouches for it (`EngineWrites.verifiedPrefix`):
+   * anything else (an in-place edit, an inserted or appended line, a cut) is moved aside to
+   * {@link FORENSICS_DIR}, the log is cut back to that prefix, and the run pauses saying so, a
+   * finished one included (it is finished only if its verified prefix says so). An unfinished
+   * log this engine never wrote (another clone's, or a planted one) pauses too. A role run in
+   * flight without its dispatch record cannot be verified and pauses its run.
+   *
+   * A log the ledger knows that is gone, holds no event, or nothing it vouches for is lost: it is
+   * said, kept aside, and its run is held. Every record of a run that is not active is checked
+   * before it is dropped (a git change is held); a record whose check finds anything holds its
+   * run too. While a run is held, no run starts, an active run pauses, and the held runs'
+   * records keep holding engine git until the human's `vtc resume`. A gate run the daemon stopped
+   * in the middle of left its git baseline in the guard directory: it holds engine git from the
+   * start of `open`, and is checked before anything runs git (a change is held and reported,
+   * its run paused or held) and dropped (`checkLeftoverGates`).
+   */
+  static open(deps: EngineCoreDeps): Engine {
+    const engine = new Engine(deps);
+    restoreDispatches(engine);
+    // gate runs the daemon stopped in the middle of: their baselines hold engine git from here on
+    const gates = restoreGates(engine);
+    engine.gitHold = loadGitHold(engine);
+    engine.held = loadHeldRuns(engine);
+    const wasHeld = new Map(engine.held);
+    const lost = new Map<string, string>();
+    setGitPreflight(deps.repoRoot, () => {
+      gitPreflight(engine);
+    });
+    setGitSigning(deps.repoRoot, () => {
+      try {
+        return engine.config().git.sign_commits;
+      } catch {
+        return false;
+      }
+    });
+    for (const loaded of loadRuns(deps.repoRoot)) {
+      let state = loaded.state;
+      const rel = eventLogPath(state.id);
+      const verdict = engine.writes.check(rel);
+      let tampered: string | undefined;
+      if (
+        !verdict.ok &&
+        verdict.detail === NEVER_WROTE &&
+        state.run.finished_at === undefined &&
+        runOrigin(state) !== engine.origin
+      ) {
+        // another clone's run (reading 88): read-only here, so the git-shared log keeps one writer
+        engine.foreign.set(state.id, state);
+        engine.notices.push(foreignRunText(state.id));
+        continue;
+      }
+      if (!verdict.ok && verdict.detail === NEVER_WROTE) {
+        engine.writes.accept(rel);
+        if (state.run.finished_at === undefined)
+          tampered = `${rel} was not written by this engine install (another clone's log, or one written by hand); it was replayed as it is`;
+      } else if (!verdict.ok) {
+        const bytes = readFileSync(join(deps.repoRoot, rel));
+        const verified = engine.writes.verifiedPrefix(rel);
+        const prefix = bytes.subarray(0, verified);
+        const kept = `${FORENSICS_DIR}/${state.id}-open-${String(Date.now())}.jsonl`;
+        writeRepoFile(deps.repoRoot, kept, bytes, 0o600);
+        const events = parseEventLog(prefix.toString("utf8")).events.filter(
+          (e) => e.run === state.id,
+        );
+        if (events.length === 0) {
+          // nothing the engine wrote is left: the run cannot be rebuilt, it is lost
+          lost.set(
+            state.id,
+            `${rel} was changed outside the engine (${verdict.detail}); none of it is what the engine wrote, so the run cannot be rebuilt. The changed file (${String(bytes.byteLength)} bytes) is kept at ${kept}`,
+          );
+          continue;
+        }
+        writeRepoFile(deps.repoRoot, rel, prefix);
+        state = projectRun(events);
+        tampered = `${rel} was changed outside the engine (${verdict.detail}); the engine replayed only its first ${String(events.length)} event(s), the ${String(verified)} bytes its ledger vouches for, and cut the log back to them. The changed file (${String(bytes.byteLength)} bytes) is kept at ${kept}`;
+      }
+      for (const [host, snapshot] of state.usage) engine.usage.set(host, snapshot);
+      if (state.run.finished_at !== undefined) {
+        // the verified prefix finished the run: nothing to resume (a cut forged tail is reported)
+        engine.finished.set(state.id, state);
+        if (tampered !== undefined) engine.notices.push(tampered);
+        continue;
+      }
+      const log = openEventLog(deps.repoRoot, state.id, deps.lock, {
+        now: deps.now,
+        secrets: () => engine.secrets(),
+      });
+      const handle: RunHandle = { state, log };
+      engine.handles.set(state.id, handle);
+      if (tampered !== undefined) engine.reportLogOnOpen(handle, tampered);
+      engine.restoreFrozenConfig(handle);
+      reportUnverifiable(engine, handle);
+      const damaged = log.recovered.invalidLines.length > 0 || log.recovered.truncatedTail;
+      const reported = state.events.some(
+        (e) =>
+          e.type === "incident.recorded" &&
+          (e.data as { kind?: string }).kind === "log_corruption" &&
+          JSON.stringify((e.data as { invalid_lines?: number[] }).invalid_lines ?? []) ===
+            JSON.stringify(log.recovered.invalidLines),
+      );
+      if (damaged && !reported) {
+        engine.emit(handle, {
+          type: "incident.recorded",
+          actor: "engine",
+          data: {
+            kind: "log_corruption",
+            detail: log.recovered.truncatedTail
+              ? "the log ended in a torn line (an unclean stop); it was fenced off"
+              : "the log has lines that do not parse",
+            invalid_lines: [...log.recovered.invalidLines],
+          },
+        });
+      }
+    }
+    findLostLogs(
+      engine,
+      new Set([...engine.handles.keys(), ...engine.finished.keys(), ...engine.foreign.keys()]),
+      lost,
+    );
+    for (const [run, reason] of lost) {
+      engine.notices.push(`${reason}; run ${run} is held until vtc resume`);
+      engine.held.set(run, reason);
+    }
+    // A record is dropped only after its check, whatever became of its run.
+    const checkedGates = checkLeftoverGates(
+      engine,
+      gates,
+      engine.handles,
+      engine.held,
+      engine.notices,
+    );
+    checkLeftoverRecords(engine, new Set(engine.handles.keys()), engine.held, engine.notices);
+    for (const [run, reason] of wasHeld)
+      if (!lost.has(run)) engine.notices.push(`run ${run} is held until vtc resume: ${reason}`);
+    saveHeldRuns(engine, engine.held);
+    dropGates(engine, checkedGates);
+    // only once the hold is kept: a crash before this finds the logs lost again
+    removeLostLogs(engine, lost);
+    const fresh = [...engine.held].filter(([run]) => !wasHeld.has(run));
+    if (fresh.length > 0)
+      for (const handle of engine.handles.values()) engine.reportHeld(handle, fresh);
+    for (const handle of engine.handles.values()) engine.advance(handle);
+    return engine;
+  }
+
+  /** Runs `open` could not verify: an active run pauses saying so (see `open`). */
+  private reportHeld(handle: RunHandle, held: readonly (readonly [string, string])[]): void {
+    if (handle.state.run.finished_at !== undefined) return;
+    const runs = held.map(([run]) => run).join(", ");
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: {
+        kind: "checkout_write",
+        detail:
+          `the engine could not verify run(s) ${runs} when it opened: ${held.map(([, reason]) => reason).join("; ")}`.slice(
+            0,
+            2000,
+          ),
+      },
+    });
+    this.emit(handle, {
+      type: "run.paused",
+      actor: "engine",
+      data: {
+        reason:
+          `run(s) ${runs} could not be verified when the engine opened (see the incident); check the repo, then vtc resume`.slice(
+            0,
+            300,
+          ),
+      },
+    });
+  }
+
+  // ------------------------------------------------------------------ kernel
+
+  now(): Date {
+    return this.deps.now();
+  }
+
+  /** Reads a repo file through a cache keyed on its modification time (files may change). */
+  private cached<T>(path: string, load: () => T): T {
+    const abs = join(this.deps.repoRoot, path);
+    const stamp = existsSync(abs) ? statSync(abs).mtimeMs : -1;
+    const hit = this.fileCache.get(path);
+    if (hit !== undefined && hit.stamp === stamp) return hit.value as T;
+    const value = load();
+    this.fileCache.set(path, { stamp, value });
+    return value;
+  }
+
+  /** The active run's frozen config, if a run is active. */
+  private activeFrozen(): FrozenConfig | null {
+    const frozen = this.frozen;
+    if (frozen === null) return null;
+    const handle = this.handles.get(frozen.run);
+    return handle !== undefined && handle.state.run.finished_at === undefined ? frozen : null;
+  }
+
+  private diskProject(): ProjectConfig {
+    try {
+      return this.cached(PROJECT_CONFIG_PATH, () => loadProjectConfig(this.deps.repoRoot));
+    } catch (error) {
+      if (error instanceof ConfigError) throw new EngineError("config", error.message);
+      throw error;
+    }
+  }
+
+  private diskGates(): GatesConfig | null {
+    try {
+      return this.cached(GATES_CONFIG_PATH, () => loadGatesConfig(this.deps.repoRoot));
+    } catch (error) {
+      if (error instanceof ConfigError) throw new EngineError("config", error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * `project.yaml` as the active run started with it: a run's config is frozen at `run.started`
+   * (`pipeline_config_hash`), so an edit mid-run (by anyone, an agent included) never changes
+   * caps, budgets, the merge level or the dispatch mode of a running run. Between runs, the file.
+   */
+  config(): ProjectConfig {
+    return this.activeFrozen()?.project ?? this.diskProject();
+  }
+
+  /**
+   * `gates.yml` as the active run started with it: the file committed at the commit the run
+   * started on, never the working tree (spine §5 reading 46f); `null` without an active run or
+   * when that commit had none. Gate runs check the baseline's committed file against it.
+   */
+  gatesConfig(): GatesConfig | null {
+    return this.activeFrozen()?.gates ?? null;
+  }
+
+  /** The hash of the active run's frozen `gates.yml` bytes, or `null` (`Kernel.gatesConfigHash`). */
+  gatesConfigHash(): string | null {
+    return this.activeFrozen()?.gatesSha ?? null;
+  }
+
+  /** Freezes `project` and `gates` for `run` and keeps a copy for a restart. */
+  private freezeConfig(
+    run: string,
+    project: ProjectConfig,
+    gates: GatesConfig | null,
+    gatesSha: string | null,
+  ): void {
+    this.frozen = { run, project, gates, gatesSha, hash: pipelineConfigHash(project, gates) };
+    this.driftStamps = this.configStamps();
+    try {
+      writeRepoFile(
+        this.deps.repoRoot,
+        frozenConfigPath(run),
+        `${JSON.stringify({ project, gates, gates_sha256: gatesSha })}\n`,
+        0o600,
+      );
+    } catch {
+      // only a restart needs the copy; the run's hash still detects any change
+    }
+  }
+
+  /**
+   * On open: the run's frozen config is the kept copy when it matches the run's hash, else the
+   * files when they match it. When neither does, the run continues with the current files and
+   * pauses, saying so (the change is never applied silently). The hash of the run's `gates.yml`
+   * bytes comes only from the kept copy: one an older engine wrote without it, or no copy, leaves
+   * it unknown, and each gate run then checks the base's committed file against the run's
+   * `pipeline_config_hash` (`baselineGates`), never the working tree's bytes.
+   */
+  private restoreFrozenConfig(handle: RunHandle): void {
+    const run = handle.state.run;
+    if (run.finished_at !== undefined || !handle.state.events.some((e) => e.type === "run.started"))
+      return;
+    try {
+      const kept = JSON.parse(
+        readFileSync(join(this.deps.repoRoot, frozenConfigPath(handle.state.id)), "utf8"),
+      ) as { project?: unknown; gates?: unknown; gates_sha256?: unknown };
+      const project = ProjectConfigSchema.parse(kept.project);
+      const gates = kept.gates === null ? null : GatesConfigSchema.parse(kept.gates);
+      const gatesSha = typeof kept.gates_sha256 === "string" ? kept.gates_sha256 : null;
+      if (pipelineConfigHash(project, gates) === run.pipeline_config_hash) {
+        this.frozen = {
+          run: handle.state.id,
+          project,
+          gates,
+          gatesSha,
+          hash: run.pipeline_config_hash,
+        };
+        this.driftStamps = "";
+        return;
+      }
+    } catch {
+      // no usable copy: fall back to the files
+    }
+    // No usable copy (rare: it lives in the git-ignored state dir): the working tree's files are
+    // the best evidence left; a difference is reported below and the gate runs check the bytes.
+    let project: ProjectConfig;
+    let gates: GatesConfig | null;
+    try {
+      project = this.diskProject();
+      gates = this.diskGates();
+    } catch {
+      return; // the files do not parse: config() reports it until they are fixed
+    }
+    this.freezeConfig(handle.state.id, project, gates, null);
+    const hash = pipelineConfigHash(project, gates);
+    if (hash !== run.pipeline_config_hash) this.reportConfigDrift(handle, hash, "restart");
+  }
+
+  /** Stamps of the config files (changes when either is written). */
+  private configStamps(): string {
+    return [PROJECT_CONFIG_PATH, GATES_CONFIG_PATH]
+      .map((p) => {
+        try {
+          return String(statSync(join(this.deps.repoRoot, p)).mtimeMs);
+        } catch {
+          return "-";
+        }
+      })
+      .join("|");
+  }
+
+  /**
+   * A config change during the active run (spine §5 reading 20): recorded as an incident of kind
+   * `config_changed` (once per change); the run keeps its frozen config and does not pause.
+   */
+  private checkConfigDrift(handle: RunHandle): void {
+    const frozen = this.activeFrozen();
+    if (frozen?.run !== handle.state.id) return;
+    const stamps = this.configStamps();
+    if (stamps === this.driftStamps) return;
+    this.driftStamps = stamps;
+    let hash: string;
+    try {
+      hash = pipelineConfigHash(this.diskProject(), this.diskGates());
+    } catch {
+      hash = "unreadable";
+    }
+    if (hash !== frozen.hash) this.reportConfigDrift(handle, hash, "edit");
+  }
+
+  private reportConfigDrift(handle: RunHandle, hash: string, when: "edit" | "restart"): void {
+    const tag = `config ${hash.slice(0, 12)}`;
+    const reported = handle.state.events.some(
+      (e) =>
+        e.type === "incident.recorded" &&
+        (e.data as { kind?: string; detail?: string }).kind === "config_changed" &&
+        ((e.data as { detail?: string }).detail ?? "").includes(tag),
+    );
+    if (reported) return;
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: {
+        kind: "config_changed",
+        detail: (when === "edit"
+          ? `project.yaml or gates.yml changed during the run (${tag}${hash === "unreadable" ? ", unreadable" : ""}); the run keeps the config it started with (${handle.state.run.pipeline_config_hash.slice(0, 12)}) and the change applies to the next run`
+          : `project.yaml or gates.yml differ from the config this run started with (${tag}) and no copy of it was kept; the run continues with the current files`
+        ).slice(0, 2000),
+        evidence: [
+          { type: "file", ref: PROJECT_CONFIG_PATH },
+          { type: "file", ref: GATES_CONFIG_PATH },
+        ],
+      },
+    });
+  }
+
+  secrets(): readonly string[] {
+    return this.cached(".env", () => {
+      const env = join(this.deps.repoRoot, ".env");
+      return existsSync(env) ? dotenvValues(readFileSync(env, "utf8")) : [];
+    });
+  }
+
+  /**
+   * The milestone commit (spec §6.8, AD-7 rule 2; spine §5 reading 90), in the background after
+   * the event: the git-tracked `.vtc/` paths ({@link MILESTONE_PATHS}) are committed on the
+   * user's checked-out branch, so a teammate's clone and the dashboard's snapshot mode see the
+   * run. A commit that git refuses is an incident (`milestone_commit`) on a live run, a notice on
+   * a finished one; a skip (detached HEAD, a merge in progress, nothing changed) is neither.
+   */
+  private commitMilestone(handle: RunHandle, milestone: string): void {
+    const key = `milestone:${handle.state.id}:${String(handle.state.events.length)}`;
+    const message = `vtc: ${handle.state.id} ${milestone}`;
+    const promise = (async () => {
+      const outcome = await this.deps.workspace
+        .commitMilestone(MILESTONE_PATHS, message)
+        .catch((error: unknown) => ({
+          committed: false,
+          detail: `git refused: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      if (outcome.committed || !/refused|failed|error|hook|fatal/i.test(outcome.detail)) return;
+      const text = `the milestone commit "${message}" did not go through (${outcome.detail}); commit the .vtc/ files yourself`;
+      if (this.handles.get(handle.state.id) === handle && this.deps.lock.isHeld()) {
+        await this.serial(handle, () => {
+          this.emit(handle, {
+            type: "incident.recorded",
+            actor: "engine",
+            data: { kind: "milestone_commit", detail: text.slice(0, 2000) },
+          });
+          return Promise.resolve();
+        });
+      } else this.notices.push(text);
+    })()
+      .catch(() => undefined)
+      .finally(() => this.jobs.delete(key));
+    this.jobs.set(key, promise);
+  }
+
+  /**
+   * A human adopts a run another clone started (spine §5 reading 88): from here on this install
+   * is its one writer. Only a human channel: the cli after a terminal confirmation (install
+   * token), the run's Lead session relaying the human, or in-process (tests).
+   */
+  private adopt(run: string | undefined, call: CallContext): void {
+    if (run === undefined || !this.foreign.has(run))
+      throw new EngineError(
+        "invalid",
+        `adopt names a run another clone started; ${run ?? "no run"} is not one${this.foreign.size > 0 ? ` (those here: ${[...this.foreign.keys()].join(", ")})` : ""}`,
+      );
+    if (call.client === "cli" && call.human !== true)
+      throw new EngineError(
+        "forbidden",
+        "adopting a run is a human decision: run vtc resume --adopt yourself in an interactive terminal",
+      );
+    if (call.client === "bridge") {
+      this.claimLead(run, call);
+      if (call.session === undefined || this.leads.get(run) !== call.session)
+        throw new EngineError(
+          "forbidden",
+          "only the Lead session, relaying the human, adopts a run",
+        );
+    }
+    const state = this.foreign.get(run) as RunState;
+    const rel = eventLogPath(run);
+    this.writes.accept(rel);
+    const log = openEventLog(this.deps.repoRoot, run, this.deps.lock, {
+      now: this.deps.now,
+      secrets: () => this.secrets(),
+    });
+    const handle: RunHandle = { state, log };
+    this.foreign.delete(run);
+    this.handles.set(run, handle);
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "human",
+      data: {
+        kind: "run_adopted",
+        detail: `run ${run} was started by another clone (origin ${runOrigin(state) ?? "unknown"}); a human adopted it on this install (origin ${this.origin}), which writes its log from now on`,
+      },
+    });
+    this.restoreFrozenConfig(handle);
+    reportUnverifiable(this, handle);
+  }
+
+  /** The run's log was not what the engine wrote when the engine opened (see `open`). */
+  private reportLogOnOpen(handle: RunHandle, detail: string): void {
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind: "log_corruption", detail: detail.slice(0, 2000) },
+    });
+    this.emit(handle, {
+      type: "run.paused",
+      actor: "engine",
+      data: {
+        reason:
+          "the run's event log was not what the engine wrote when it opened; only what its ledger vouches for was replayed (see the incident). Check the repo, then vtc resume",
+      },
+    });
+  }
+
+  /**
+   * Cost per client (§14, spine §5 reading 153): a finished run's spend goes to its client scope's
+   * record under the VTC home. A record that cannot be written is a notice: the run's own log
+   * still has every cost.
+   */
+  private recordClientSpend(state: RunState): void {
+    try {
+      const row = clientSpendRow(this.deps.repoRoot, this.config().client, state);
+      if (row !== null) recordClientSpend(this.deps.vtcHome, row);
+    } catch (error) {
+      this.notices.push(
+        `run ${state.id}'s spend was not added to the client's cost record: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  emit(handle: RunHandle, draft: EventDraft): VtcEvent {
+    const event = handle.log.append(draft);
+    const foreign = this.writes.foreign(eventLogPath(handle.state.id));
+    applyEvent(handle.state, event);
+    if (event.type === "run.started")
+      writeRequestFile(this.deps.repoRoot, handle.state, this.secrets());
+    if (event.task !== undefined && handle.state.tasks.has(event.task)) {
+      writePlanFile(this.deps.repoRoot, handle.state, event.task, this.secrets());
+    }
+    if (event.type === "run.finished") {
+      this.handles.delete(handle.state.id);
+      this.finished.set(handle.state.id, handle.state);
+      this.recordClientSpend(handle.state);
+    }
+    const milestone = milestoneOf(event);
+    if (milestone !== null) this.commitMilestone(handle, milestone);
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // a broken listener (an SSE client gone) never breaks the engine
+      }
+    }
+    // Someone else appended to the log since the engine's last append: rewritten at once.
+    if (foreign !== undefined && this.handles.has(handle.state.id))
+      restoreLog(this, handle, foreign);
+    return event;
+  }
+
+  get stopping(): AbortSignal {
+    return this.stopper.signal;
+  }
+
+  spawn(handle: RunHandle, key: string, job: () => Promise<void>): void {
+    if (this.jobs.has(key) || this.stopper.signal.aborted) return;
+    const promise = (async () => {
+      try {
+        await job();
+      } catch (error) {
+        if (!this.deps.lock.isHeld()) return; // another engine took over: this one stops (AD-12)
+        await this.serial(handle, () => {
+          // with the VTC frames of its stack, which locate the defect (reading 216)
+          this.emit(handle, {
+            type: "incident.recorded",
+            actor: "engine",
+            data: crashIncident(key, error),
+          });
+          return Promise.resolve();
+        });
+      } finally {
+        this.jobs.delete(key);
+      }
+      if (
+        this.handles.has(handle.state.id) &&
+        this.deps.lock.isHeld() &&
+        !this.stopper.signal.aborted
+      ) {
+        await this.serial(handle, async () => {
+          this.advance(handle);
+          // a run whose steps the engine runs headless continues without the Lead's next call
+          await drive(this, handle);
+        });
+      }
+    })().catch(() => undefined);
+    this.jobs.set(key, promise);
+  }
+
+  isRunning(key: string): boolean {
+    return this.jobs.has(key);
+  }
+
+  jobRunningFor(id: string): boolean {
+    return [...this.jobs.keys()].some((key) => key.endsWith(`:${id}`));
+  }
+
+  serial<T>(handle: RunHandle, fn: () => Promise<T>): Promise<T> {
+    const previous = this.chains.get(handle.state.id) ?? Promise.resolve();
+    const next = previous.then(fn, fn);
+    this.chains.set(
+      handle.state.id,
+      next.catch(() => undefined),
+    );
+    return next;
+  }
+
+  hostFor(call: CallContext): HostId {
+    if (call.host !== null) return call.host;
+    const preferred = this.config().hosts.preferred;
+    if (preferred !== undefined) return preferred;
+    const installed = HOST_IDS.find((h) => this.deps.adapters[h] !== undefined);
+    return installed ?? (HOST_IDS[0] as HostId);
+  }
+
+  /**
+   * Serve the role-facing tools (`ROLE_MCP_TOOLS`, AD-4 rule 3) with `handler`: the daemon wires
+   * the research module's (AD-22; core never imports it, AD-13 rule 12).
+   */
+  setRoleTools(handler: RoleToolHandler | null): void {
+    this.roleToolHandler = handler;
+  }
+
+  roleTools(): RoleToolHandler | null {
+    return this.roleToolHandler;
+  }
+
+  /**
+   * Re-fetch stale facts with `refresher` once before each G2 shows (AD-22 rule 4): the daemon
+   * wires the research module's (core never imports it, AD-13 rule 12).
+   */
+  setFactRefresher(refresher: FactRefresher | null): void {
+    this.factRefresher = refresher;
+    this.checkedFacts = null;
+  }
+
+  factTable(): readonly UnverifiedFactSummary[] | null {
+    return this.factRefresher === null ? null : this.checkedFacts;
+  }
+
+  /**
+   * The role of the newest in-flight role run that declares `tool` in its contract
+   * (`tools.engine_tools`), with its run; `undefined` when none does. The role-facing tools are
+   * served on the shared socket, so this is how the daemon tells which role called (spine §5
+   * reading 120).
+   */
+  roleCalling(tool: RoleMcpToolName): { readonly run: string; readonly role: string } | undefined {
+    let best: { run: string; role: string; seq: number } | undefined;
+    for (const [run, handle] of this.handles) {
+      for (const record of handle.state.roleRuns.values()) {
+        if (record.status !== "in_flight") continue;
+        const contract = this.deps.roles.get(record.role);
+        if (contract === undefined) continue;
+        const effective = resolveRoleMode(contract, record.mode);
+        if (!effective.ok || !effective.contract.tools.engine_tools.includes(tool)) continue;
+        if (best === undefined || record.seq > best.seq)
+          best = { run, role: record.role, seq: record.seq };
+      }
+    }
+    return best === undefined ? undefined : { run: best.run, role: best.role };
+  }
+
+  /**
+   * Appends an event a wired module emitted (research: `research.fetched`, `fact.recorded`) to
+   * `run`'s log, or to the active run's when `run` is absent; not recorded when that run is not
+   * open (the research module's own files are the record; automation keeps it for the next run).
+   * Returns whether it was recorded.
+   */
+  recordModuleEvent(run: string | undefined, draft: EventDraft): boolean {
+    const id = run ?? this.activeFrozen()?.run;
+    const handle = id === undefined ? undefined : this.handles.get(id);
+    if (handle === undefined || handle.state.run.finished_at !== undefined) return false;
+    this.emit(handle, draft);
+    return true;
+  }
+
+  /**
+   * Select each dispatch's pinned editable section with `pins` (AD-21 rules 1, 2 and 7): the
+   * daemon wires the lookback module's (core never imports it, AD-13 rule 12).
+   */
+  setPromptPins(pins: PromptPins | null): void {
+    this.pins = pins;
+  }
+
+  promptPins(): PromptPins | null {
+    return this.pins;
+  }
+
+  /**
+   * Run the lookback role at RETRO with `lookback` (AD-21 rules 4 and 8, spine §5 reading 154): the
+   * daemon wires the lookback module's (core never imports it, AD-13 rule 12). `null`: RETRO
+   * finishes the run at once.
+   */
+  setLookbackRetro(lookback: LookbackRetro | null): void {
+    this.retroLookback = lookback;
+  }
+
+  lookbackRetro(): LookbackRetro | null {
+    return this.retroLookback;
+  }
+
+  /** The actions that ran `run`'s Lookback replay trials (reading 176; `replay.ts`). */
+  replayTrialActions(run: string): ReadonlySet<string> {
+    return replayTrialActions(this, run);
+  }
+
+  notice(text: string): void {
+    this.notices.push(text);
+  }
+
+  /** Notices for the Lead to relay, per run (`""`: whichever run's Lead asks next). */
+  private readonly relayed = new Map<string, { queue: string[]; seen: Set<string> }>();
+
+  relay(run: string | undefined, text: string): void {
+    const key = run ?? "";
+    const entry = this.relayed.get(key) ?? { queue: [], seen: new Set<string>() };
+    this.relayed.set(key, entry);
+    const value = text.slice(0, 2000);
+    if (value === "" || entry.seen.has(value)) return;
+    entry.seen.add(value);
+    entry.queue.push(value);
+  }
+
+  /** The notices the Lead of `run` relays now (at most 20 a call; the rest wait for the next). */
+  private takeRelayed(run: string): string[] {
+    const out: string[] = [];
+    for (const key of [run, ""]) {
+      const queue = this.relayed.get(key)?.queue;
+      while (queue !== undefined && queue.length > 0 && out.length < 20) {
+        const text = queue.shift();
+        if (text !== undefined) out.push(text);
+      }
+    }
+    return out;
+  }
+
+  leadHostFor(run: string, call: CallContext): HostId | undefined {
+    if (this.leads.has(run)) return this.leadHosts.get(run);
+    return call.client === undefined ? (call.host ?? undefined) : undefined;
+  }
+
+  liveLeadHost(run: string): HostId | undefined {
+    return this.leads.has(run) ? this.leadHosts.get(run) : undefined;
+  }
+
+  diskConfigHash(): string | null {
+    try {
+      return pipelineConfigHash(this.diskProject(), this.diskGates());
+    } catch {
+      return null;
+    }
+  }
+
+  sessionSandboxFor(run: string, call: CallContext): SessionSandboxState | undefined {
+    if (this.leads.has(run)) return this.leadSandbox.get(run);
+    return call.client === undefined ? call.sessionSandbox : undefined;
+  }
+
+  leadless(run: string, call: CallContext): boolean {
+    return !this.leads.has(run) && call.client !== undefined;
+  }
+
+  allStates(): Iterable<RunState> {
+    return [
+      ...this.finished.values(),
+      ...this.foreign.values(),
+      ...[...this.handles.values()].map((h) => h.state),
+    ];
+  }
+
+  /** Every run, oldest first (the read model's source). */
+  states(): RunState[] {
+    return [...this.allStates()].sort(
+      (a, b) => a.run.started_at.localeCompare(b.run.started_at) || a.id.localeCompare(b.id),
+    );
+  }
+
+  onEvent(listener: EventListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** Resolves once no background job is running (tests, clean shutdown). */
+  async settle(): Promise<void> {
+    while (this.jobs.size > 0) await Promise.allSettled([...this.jobs.values()]);
+    await Promise.allSettled([...this.chains.values()]);
+  }
+
+  /**
+   * The daemon's shutdown (AD-25: no orphaned processes): nothing new starts, every
+   * engine-launched run is killed (its step stays in flight, as after a crash, and the next
+   * `vtc resume` supersedes it), the Level-3 waits stop
+   * (a pending auto-merge stays on GitHub; the next start reads the PR again), then the jobs
+   * settle. A launch that was past its last stop check when the shutdown landed kills its own
+   * run (`launchHeadless`); the second sweep after the settle catches anything left.
+   */
+  async shutdown(): Promise<void> {
+    this.stopper.abort();
+    await killHeadless(this);
+    await this.settle();
+    await killHeadless(this);
+  }
+
+  /** True while a run has work or a job runs (the daemon's idle exit waits for this, AD-12 rule 4). */
+  hasWork(): boolean {
+    return (
+      this.jobs.size > 0 ||
+      [...this.handles.values()].some((h) => h.state.run.finished_at === undefined)
+    );
+  }
+
+  /** Background work or role runs in flight: the daemon does not idle out (AD-12 rule 4). */
+  busy(): boolean {
+    return (
+      this.jobs.size > 0 || [...this.handles.values()].some((h) => inFlight(h.state).length > 0)
+    );
+  }
+
+  /**
+   * An incident report (§15): an unclean end found on start (a stale lock, a torn log). Recorded
+   * in the active run's log, so the run summary and the dashboard show it.
+   */
+  recordIncident(kind: "crash" | "kill" | "stale_lock", detail: string): void {
+    const state = activeRun([...this.handles.values()].map((h) => h.state));
+    const handle = state === undefined ? undefined : this.handles.get(state.id);
+    if (handle === undefined) return;
+    this.emit(handle, {
+      type: "incident.recorded",
+      actor: "engine",
+      data: { kind, detail: detail.slice(0, 2000) },
+    });
+  }
+
+  /** The next scheduled auto-resume across runs, if any (the daemon keeps the timer, §6.9). */
+  autoResumeAt(): string | null {
+    const times = [...this.handles.values()]
+      .map((h) => h.state.limit?.autoResumeAt ?? null)
+      .filter((t): t is string => t !== null);
+    return times.sort()[0] ?? null;
+  }
+
+  // ------------------------------------------------------------ transitions
+
+  /** Engine-internal transitions (no Lead involved) until nothing changes; starts jobs. */
+  advance(handle: RunHandle): void {
+    this.checkConfigDrift(handle);
+    for (let i = 0; i < 20; i += 1) {
+      if (handle.state.run.finished_at !== undefined || !this.handles.has(handle.state.id)) return;
+      if (!this.step(handle)) return;
+    }
+  }
+
+  private phaseTo(handle: RunHandle, to: Phase): void {
+    this.emit(handle, {
+      type: "run.phase_changed",
+      actor: "engine",
+      data: { from: handle.state.run.phase, to },
+    });
+  }
+
+  /** One pass of `advance`; true when something changed. */
+  private step(handle: RunHandle): boolean {
+    const state = handle.state;
+    const phase = state.run.phase;
+    const roles = phaseRoles(this, handle, phase);
+    if (["discover", "specify", "design"].includes(phase)) {
+      const entered = phaseEnteredSeq(state, phase) ?? 0;
+      // after a G2 re-roll only the Designer had to run again (§9.1 step 5, reading 151); in the
+      // coverage loop (H-13) the roles it re-dispatched hand in their work again
+      const done = roles.every(({ role, mode }) => {
+        const since = phase === "design" ? designWorkSince(handle, role, entered) : entered;
+        const redo = phase === "design" ? coverageRedoSince(handle, role) : 0;
+        if (
+          lastSubmitted(
+            state,
+            { role, ...(mode === undefined ? {} : { mode }) },
+            Math.max(since, redo),
+          )?.exit !== "done"
+        )
+          return false;
+        // D-bt (reading 174): the Designer goes once more for too few directions
+        return !(
+          phase === "design" &&
+          role === "designer" &&
+          designerRedispatchNote(this, handle, since) !== undefined
+        );
+      });
+      if (!done) return false;
+      if (phase === "discover") this.phaseTo(handle, "specify");
+      else if (phase === "specify")
+        this.phaseTo(handle, state.run.track === "quick_fix" ? "design" : "g1");
+      else {
+        // H-13 (reading 237): G2 shows only once the DESIGN check's coverage is complete
+        const loop = runCoverageCheck(
+          this,
+          handle,
+          () => designCoverage(this, handle),
+          roles.map((r) => r.role),
+        );
+        if (loop === "held") return false;
+        if (loop === "complete") this.phaseTo(handle, "g2");
+      }
+      return true;
+    }
+    // RETRO: the lookback role where Lookback asks for it, then run.finished (retro.ts)
+    if (phase === "retro") return stepRetro(this, handle);
+    if (!["build", "integrate", "final_review", "release"].includes(phase)) return false;
+    let changed = this.scheduleTasks(handle);
+    if (checkEngineerShare(this, handle)) changed = true;
+    for (const task of state.tasks.values()) {
+      const gating = this.isRunning(`gates:${task.id}`);
+      if (
+        task.status === "ready" &&
+        task.worktree === undefined &&
+        !this.isRunning(`ws:${task.id}`)
+      ) {
+        ensureWorkspace(this, handle, task.id);
+      }
+      if (
+        task.status === "fixing" &&
+        awaitingReopenRebase(state, task.id) &&
+        !this.isRunning(`reopen:${task.id}`)
+      ) {
+        // recovery: a task Final Review reopened whose worktree was not moved yet (restart)
+        rebaseReopened(this, handle, task.id);
+      }
+      if (task.status === "ready" && !gating) {
+        // recovery: QA's tests are in but their base-fail check never concluded (restart, retry)
+        const qa = pendingBaseCheck(state, task.id);
+        const tests =
+          qa === undefined
+            ? undefined
+            : loadResult(this.deps.repoRoot, qa.action_id)?.acceptance_tests;
+        if (qa?.head !== undefined && tests !== undefined) {
+          startBaseCheck(this, handle, task.id, qa.head, tests);
+        }
+      }
+      if (task.status === "verifying" && !gating) {
+        const built = lastBuilt(state, task.id);
+        const verdict = roundVerdict(state, task.id);
+        if (built?.head !== undefined && verdict === undefined) {
+          startRoundGates(this, handle, task.id, built.head);
+        } else if (
+          verdict !== undefined &&
+          effectiveVerdict(verdict) === "pass" &&
+          completedReviews(this, handle, task.id) !== null
+        ) {
+          startTriage(this, handle, task.id);
+        }
+      }
+    }
+    if ([...state.tasks.values()].some((t) => t.status === "queued") && !state.run.paused)
+      startMergeQueue(this, handle);
+    checkFinalReviewStuck(this, handle);
+    for (const feature of state.features.values()) {
+      const tasks = feature.tasks
+        .map((id) => state.tasks.get(id))
+        .filter((t) => t !== undefined && t.status !== "dropped");
+      if (tasks.length === 0) {
+        if (feature.tasks.length > 0 && state.run.finished_at === undefined) {
+          this.emit(handle, {
+            type: "run.finished",
+            actor: "engine",
+            data: { outcome: "aborted" },
+          });
+          return false;
+        }
+        continue;
+      }
+      const codeComplete = tasks.every((t) =>
+        ["built", "queued", "merged", "done"].includes(t?.status ?? ""),
+      );
+      const merged = tasks.every((t) => ["merged", "done"].includes(t?.status ?? ""));
+      if (feature.status === "building" && codeComplete) {
+        setFeatureStatus(this, handle, feature.id, "integrating");
+        if (state.run.phase === "build") this.phaseTo(handle, "integrate");
+        changed = true;
+      }
+      const current = state.features.get(feature.id);
+      if (
+        (current?.status === "integrating" || current?.status === "fixing") &&
+        merged &&
+        !state.run.paused
+      ) {
+        setFeatureStatus(this, handle, feature.id, "final_review");
+        if (state.run.phase !== "final_review") this.phaseTo(handle, "final_review");
+        startFinalReview(this, handle, feature.id);
+        changed = true;
+      } else if (
+        current?.status === "final_review" &&
+        !this.isRunning(`final:${feature.id}`) &&
+        !state.run.paused
+      ) {
+        startFinalReview(this, handle, feature.id);
+      }
+      if (
+        finishAtLevel2Pending(state, feature.id) &&
+        !this.isRunning(`release:${feature.id}`) &&
+        !state.run.paused
+      ) {
+        // recovery: the engine stopped while a `finish_level_2` answer was turning auto-merge off
+        finishAtLevel2(this, handle, feature.id);
+      }
+      if (
+        state.features.get(feature.id)?.status === "ready_to_ship" &&
+        !this.isRunning(`release:${feature.id}`) &&
+        !state.run.paused
+      ) {
+        if (state.run.phase !== "release") {
+          this.phaseTo(handle, "release");
+          changed = true;
+        }
+        startRelease(this, handle, feature.id);
+      }
+    }
+    return changed;
+  }
+
+  /** The scheduler (§6.6): waiting tasks start when a slot, scopes and dependencies allow. */
+  private scheduleTasks(handle: RunHandle): boolean {
+    const state = handle.state;
+    if (
+      state.run.phase !== "build" &&
+      state.run.phase !== "integrate" &&
+      state.run.phase !== "final_review"
+    )
+      return false;
+    const config = this.config();
+    const host = this.hostFor({ host: null });
+    const fiveHour = this.usage.get(host)?.windows.find((w) => w.kind === "five_hour");
+    const tasks = [...state.tasks.values()];
+    const decision = schedule({
+      tasks: state.tasks,
+      frozenContracts: new Set(state.contracts.keys()),
+      order: tasks.map((t) => t.id),
+      scopes: new Map(tasks.map((t) => [t.id, t.files_scope])),
+      concurrency: config.concurrency,
+      busySlots: inFlight(state).length + tasks.filter((t) => t.status === "ready").length,
+      remainingPct: fiveHour === undefined ? null : remainingPct(fiveHour),
+      reservePct: config.usage.reserve_pct,
+      paused: state.run.paused || limitWait(this, handle) !== null,
+    });
+    for (const id of decision.waiting) setTaskStatus(this, handle, id, "waiting_dependency");
+    for (const id of decision.start) {
+      setTaskStatus(this, handle, id, "ready");
+      ensureWorkspace(this, handle, id);
+    }
+    return decision.waiting.length > 0 || decision.start.length > 0;
+  }
+
+  // ------------------------------------------------------------------ tools
+
+  private resolve(run: string | undefined): RunHandle {
+    if (run !== undefined) {
+      const handle = this.handles.get(run);
+      if (handle !== undefined) return handle;
+      if (this.finished.has(run)) throw new EngineError("finished", `run ${run} has finished`);
+      if (this.foreign.has(run)) throw new EngineError("conflict", foreignRunText(run));
+      throw new EngineError("no_run", `no run ${run}`);
+    }
+    const state = activeRun([...this.handles.values()].map((h) => h.state));
+    const handle = state === undefined ? undefined : this.handles.get(state.id);
+    if (handle === undefined) throw new EngineError("no_run", "no active run; start one first");
+    return handle;
+  }
+
+  private stateOf(run: string | undefined): RunState {
+    if (run !== undefined && this.finished.has(run)) return this.finished.get(run) as RunState;
+    if (run !== undefined && this.foreign.has(run)) return this.foreign.get(run) as RunState;
+    if (run === undefined && this.handles.size === 0) {
+      const last = this.states().at(-1);
+      if (last !== undefined) return last;
+    }
+    return this.resolve(run).state;
+  }
+
+  async start(input: StartInput, call: CallContext): Promise<StartResult> {
+    return this.startRun(input, call, null);
+  }
+
+  /**
+   * Starts an automatic run from an automatic issue (D-cd, H-7; AD-27 rule 2): a normal run whose
+   * `run.started.automation` names the issue. The issue is its spec, so it skips the human gates
+   * G1 and G2 (the engine records them approved, unless a G2 needs a human's fact waiver); the Spec
+   * Verifier reads the issue; it never runs at merge Level 3 (`effectiveMergeLevel`'s `automatic`,
+   * D-bw); every gate, review and risk rule still applies. The upstream module starts it, through
+   * the daemon.
+   */
+  async startAutomatic(
+    input: StartInput,
+    automation: AutomationRunRef,
+    call: CallContext = { host: null },
+  ): Promise<StartResult> {
+    const started = await this.startRun(input, call, AutomationRunRefSchema.parse(automation));
+    // a daemon-started run has no Lead: the engine drives it now when the project allows
+    // unattended runs (`drive`, reading 212(6)); otherwise the next Lead session's `next` does
+    const handle = this.handles.get(started.run);
+    if (handle !== undefined && this.liveLeadHost(started.run) === undefined) {
+      try {
+        await this.serial(handle, () => drive(this, handle));
+      } catch (error) {
+        // the run started: a failed drive is told, not a failed start (the next job, wake or Lead
+        // call drives it again)
+        this.notice(
+          failureDetail(
+            `automatic run ${started.run} started, but driving it failed: ${error instanceof Error ? error.message : String(error)}`,
+            this.secrets(),
+          ),
+        );
+      }
+    }
+    return started;
+  }
+
+  private async startRun(
+    input: StartInput,
+    call: CallContext,
+    automation: AutomationRunRef | null,
+  ): Promise<StartResult> {
+    // reading 262: the attachments are checked before anything is registered
+    const attachments = readAttachments(input.attachments);
+    // read before the checks: nothing awaits between them and registering the run
+    const { head, gates: committed, project } = await this.startGates();
+    if ([...this.handles.values()].some((h) => h.state.run.finished_at === undefined)) {
+      throw new EngineError(
+        "run_active",
+        "a run is already active in this repo; finish or pause it first",
+      );
+    }
+    if (this.held.size > 0) {
+      throw new EngineError(
+        "conflict",
+        `run(s) ${[...this.held.keys()].join(", ")} could not be verified when the engine opened (${[...this.held.values()].join("; ")}`.slice(
+          0,
+          1500,
+        ) + "); check the repo, then vtc resume",
+      );
+    }
+    // spine §5 reading 78 (D-au): a run verifies only with the gates.yml committed where it starts
+    if (committed === null) throw new EngineError("config", gatesConfigNotCommitted(head));
+    // reading 79: and with the project.yaml committed there, never an uncommitted edit
+    if (project === null || !project.committed)
+      throw new EngineError("config", projectConfigNotCommitted(head));
+    const config = project.config;
+    const gates = committed.config;
+    const track = config.track_default ?? input.track;
+    const id = this.newRunId();
+    const log = openEventLog(this.deps.repoRoot, id, this.deps.lock, {
+      now: this.deps.now,
+      secrets: () => this.secrets(),
+    });
+    const handle: RunHandle = { state: emptyRunState(id, this.now().toISOString()), log };
+    this.handles.set(id, handle);
+    this.freezeConfig(id, config, gates, committed.sha256);
+    if (call.client === "bridge" && call.session !== undefined) this.setLead(id, call, "started");
+    const noRemote =
+      (automation === null ? config.merge_level : Math.min(config.merge_level, 2)) >= 2 &&
+      (await this.deps.workspace.remoteUrl(this.deps.remote).catch(() => null)) === null;
+    // AD-23: the ledger caps the level; Level 3 needs its preflight (a failure starts at Level 2)
+    const level = noRemote
+      ? {
+          level:
+            automation === null
+              ? config.merge_level
+              : effectiveMergeLevel(config.merge_level, [], { automatic: true }),
+          preflight: null,
+        }
+      : await startMergeLevel(this, config, automation !== null);
+    return this.serial(handle, () => {
+      const copied = copyAttachments(this.deps.repoRoot, id, attachments);
+      this.emit(handle, {
+        type: "run.started",
+        actor: "engine",
+        data: {
+          request: input.request,
+          track,
+          repo: input.repo,
+          has_ui: input.has_ui,
+          risk_hints: input.risk_hints,
+          merge_level: level.level,
+          pipeline_config_hash: pipelineConfigHash(config, gates),
+          origin: this.origin,
+          ...(automation === null ? {} : { automation }),
+          ...(copied.length === 0 ? {} : { attachments: copied }),
+        },
+      });
+      if (level.preflight !== null) recordMergePreflight(this, handle, level.preflight);
+      // Level 2+ needs the push remote (spine §5 reading 18).
+      if (noRemote) downgradeNoRemote(this, handle);
+      this.phaseTo(handle, track === "quick_fix" ? "specify" : "discover");
+      this.advance(handle);
+      return Promise.resolve({ run: id, track, phase: handle.state.run.phase });
+    });
+  }
+
+  /**
+   * The `gates.yml` committed at the commit the run starts on (spine §5 reading 46f): `vtc
+   * calibrate` tells the user to commit it. `gates: null` when HEAD has none (or there is no
+   * commit yet, `head` is then `HEAD`): `start` refuses (reading 78, D-au), since the run never
+   * takes up a `gates.yml` committed later (reading 20).
+   */
+  private async startGates(): Promise<{
+    head: string;
+    gates: CommittedGates | null;
+    project: { readonly config: ProjectConfig; readonly committed: boolean } | null;
+  }> {
+    let head: string;
+    try {
+      head = await this.deps.workspace.resolve("HEAD");
+    } catch {
+      return { head: "HEAD", gates: null, project: null };
+    }
+    try {
+      return {
+        head,
+        gates: await committedGatesConfig(this.deps.git, head),
+        project: await startProjectConfig(this.deps.git, this.deps.repoRoot, head),
+      };
+    } catch (error) {
+      if (error instanceof ConfigError) throw new EngineError("config", error.message);
+      throw error;
+    }
+  }
+
+  private newRunId(): string {
+    const stamp = this.now()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\..*$/, "")
+      .replace("T", "-");
+    let id = `r${stamp}`;
+    for (
+      let n = 2;
+      this.handles.has(id) ||
+      this.finished.has(id) ||
+      this.foreign.has(id) ||
+      this.held.has(id) ||
+      this.writes.has(eventLogPath(id)) ||
+      existsSync(join(this.deps.repoRoot, ".vtc/runs", id));
+      n += 1
+    ) {
+      id = `r${stamp}-${String(n)}`;
+    }
+    return id;
+  }
+
+  /** The gates awaiting the human in this phase, with what to show (§6.2, §8.6). */
+  private awaitingGates(
+    handle: RunHandle,
+  ): { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras } | null {
+    const state = handle.state;
+    const phase = state.run.phase;
+    if (phase !== "g1" && phase !== "g2") return null;
+    const gates: HumanGateId[] =
+      phase === "g1" ? ["G1"] : state.run.track === "quick_fix" ? ["G1", "G2"] : ["G2"];
+    const roles: { role: string; mode?: string }[] = [
+      ...(gates.includes("G1") ? [{ role: "ba" }] : []),
+      ...(gates.includes("G2")
+        ? [{ role: "architect" }, { role: "designer" }, { role: "security", mode: "design" }]
+        : []),
+    ];
+    const paths = new Set<string>();
+    for (const { role, mode } of roles) {
+      const run = lastSubmitted(state, { role, ...(mode === undefined ? {} : { mode }) });
+      const submitted = state.events.find(
+        (e) =>
+          e.type === "role.submitted" &&
+          (e.data as { action_id?: string }).action_id === run?.action_id,
+      );
+      for (const a of (submitted?.data as { artifacts?: { path: string }[] } | undefined)
+        ?.artifacts ?? [])
+        paths.add(a.path);
+    }
+    const artifacts = [...paths].flatMap((path) => {
+      const sha256 = sha256File(join(this.deps.repoRoot, path));
+      return sha256 === undefined ? [] : [{ path, sha256 }];
+    });
+    if (artifacts.length === 0) return null;
+    return { gates, artifacts, extras: gateExtras(this, handle, gates, artifacts) };
+  }
+
+  /**
+   * `gate.requested` (§5 reading 109): what the gate shows, logged when it first shows and again
+   * whenever what it shows changes, so Flow Studio shows the same directions and facts.
+   */
+  private recordGateRequest(
+    handle: RunHandle,
+    gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
+  ): void {
+    const data = { gates: gate.gates, artifacts: gate.artifacts, ...gate.extras };
+    const state = handle.state;
+    const entered = phaseEnteredSeq(state, state.run.phase) ?? 0;
+    const last = state.events.findLast((e) => e.type === "gate.requested" && e.seq > entered);
+    if (last !== undefined && JSON.stringify(last.data) === JSON.stringify(data)) return;
+    this.emit(handle, { type: "gate.requested", actor: "engine", data });
+  }
+
+  /** What the Lead should do now (§4.2 step 1). */
+  private async actionsFor(handle: RunHandle, call: CallContext): Promise<LeadAction[]> {
+    const state = handle.state;
+    if (state.run.finished_at !== undefined) {
+      const summary = state.events.findLast((e) => e.type === "run.finished");
+      const path = (summary?.data as { summary?: string } | undefined)?.summary;
+      return [{ type: "done", ...(path === undefined ? {} : { summary: path }) }];
+    }
+    maybeAutoResume(this, handle);
+    this.advance(handle);
+    const held = { noLead: 0 };
+    const actions: LeadAction[] = await dispatchNow(this, handle, call, held);
+    let gate = this.awaitingGates(handle);
+    if (gate?.gates.includes("G2") === true && this.factRefresher !== null) {
+      // before G2 shows, its stale facts are re-fetched once (AD-22 rule 4); a refresh that
+      // fails leaves them stale, and G2 lists them for a waiver
+      const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
+      if (!this.factsRefreshed.has(key)) {
+        this.factsRefreshed.add(key);
+        const checked = await this.factRefresher(this.deps.repoRoot).catch(() => null);
+        if (checked !== null) this.checkedFacts = checked;
+        gate = this.awaitingGates(handle);
+      }
+    }
+    if (gate?.gates.includes("G2") === true && this.deps.gateRunner.checkNovelty !== undefined) {
+      // before G2 shows, each direction's novelty is checked once (§9.1 step 4, reading 127)
+      const key = `${state.id}:${String(phaseEnteredSeq(state, state.run.phase) ?? 0)}`;
+      if (!this.noveltyChecked.has(key)) {
+        this.noveltyChecked.add(key);
+        await checkDirectionsNovelty(this, handle);
+        gate = this.awaitingGates(handle);
+      }
+    }
+    if (gate !== null && state.automation !== null && this.autoApproveGates(handle, gate)) {
+      // the next phase's roles start now, as after a human's approval
+      actions.push(...(await dispatchNow(this, handle, call, held)));
+      gate = this.awaitingGates(handle);
+    }
+    if (gate !== null) {
+      this.recordGateRequest(handle, gate);
+      actions.push({
+        type: "approve_gate",
+        gates: gate.gates,
+        artifacts: gate.artifacts,
+        ...gate.extras,
+      });
+    }
+    const open = openEscalations(state);
+    if (open.length > 0) actions.push({ type: "ask_human", escalations: open.map((e) => e.id) });
+    if (actions.length === 0)
+      actions.push(
+        held.noLead > 0
+          ? { type: "wait", reason: NO_LEAD_WAIT_REASON, until: null }
+          : this.waitAction(handle),
+      );
+    return actions;
+  }
+
+  /**
+   * An automatic run's G1 and G2 (AD-27 rule 2; D-cd, H-7): its issue is the spec, so the engine
+   * records the gate approved with what it froze, the run moves on, and the human's one step is the
+   * final PR review. A G2 that lists unverified facts needs a human's waiver with a reason (AD-22
+   * rule 4), so it stays for the human; with UI the category standard is taken (no human picks a
+   * direction). Every other G2 rule still holds (reading 198): a failed DESIGN check is never
+   * approved. Its coverage gaps are the coverage loop's (H-13, reading 237: the Architect fixes
+   * them before G2 shows, or the run parks for the human); anything else that blocks the approval
+   * leaves G2 for the human. Returns whether it decided the gate. Callers hold the run's lock.
+   */
+  private autoApproveGates(
+    handle: RunHandle,
+    gate: { gates: HumanGateId[]; artifacts: FrozenArtifact[]; extras: GateExtras },
+  ): boolean {
+    if (gate.extras.unverified_facts.length > 0) return false;
+    const state = handle.state;
+    const issue = state.automation;
+    const exit = gate.extras.design_directions.length > 0 ? "category_standard" : undefined;
+    const blocked = g2ApprovalProblem(gate.extras, {
+      fact_waivers: [],
+      ...(exit === undefined ? {} : { design_exit: exit }),
+    });
+    // H-13 (reading 237): the coverage loop closed every coverage gap before G2 showed, and it
+    // parks for the human when it cannot; a G2 that still fails is left for the human too
+    if (blocked !== null) return false;
+    this.recordGateRequest(handle, gate);
+    this.emit(handle, {
+      type: "gate.approved",
+      actor: "engine",
+      data: {
+        gates: gate.gates,
+        frozen: gate.artifacts,
+        ...(exit === undefined ? {} : { design_exit: exit }),
+        waived_facts: [],
+        note: `automatic run: the issue${issue === null ? "" : ` #${String(issue.issue)}`} is its spec, so no human gate before the final PR review (AD-27 rule 2)`,
+      },
+    });
+    this.phaseTo(handle, handle.state.run.phase === "g1" ? "design" : "plan");
+    this.advance(handle);
+    return true;
+  }
+
+  private waitAction(handle: RunHandle): LeadAction {
+    const state = handle.state;
+    if (state.run.paused)
+      return { type: "wait", reason: "the run is paused (vtc resume to continue)", until: null };
+    const limit = limitWait(this, handle);
+    if (limit !== null)
+      return {
+        type: "wait",
+        reason: "a usage limit was hit; the engine resumes after the reset",
+        until: limit,
+      };
+    const flying = inFlight(state).length;
+    if (flying > 0)
+      return {
+        type: "wait",
+        reason: `${String(flying)} role run(s) in flight; submit their results`,
+        until: null,
+      };
+    const jobs = [...this.jobs.keys()].filter(
+      (k) =>
+        k.endsWith(state.id) ||
+        [...state.tasks.keys(), ...state.features.keys()].some((id) => k.endsWith(`:${id}`)),
+    );
+    if (jobs.length > 0)
+      return { type: "wait", reason: `the engine is working (${jobs.join(", ")})`, until: null };
+    const parked = [...state.tasks.values()].filter((t) => t.status === "parked").length;
+    if (parked > 0)
+      return {
+        type: "wait",
+        reason: `${String(parked)} task(s) parked; answer their escalations`,
+        until: null,
+      };
+    return { type: "wait", reason: "nothing to dispatch right now", until: null };
+  }
+
+  async next(input: RunScopedInput, call: CallContext): Promise<NextResult> {
+    const state = this.stateOf(input.run);
+    const handle = this.handles.get(state.id);
+    if (handle === undefined) return { run: state.id, actions: this.actionsForFinished(state) };
+    this.claimLead(state.id, call);
+    // a Lead session (or an in-process caller) drives the run again: the engine stops driving it
+    if (call.client === undefined || this.leads.get(state.id) === call.session)
+      this.unattended.delete(state.id);
+    return this.serial(handle, async () => {
+      const actions = await this.actionsFor(handle, call);
+      const notices = this.takeRelayed(state.id);
+      return { run: state.id, actions, ...(notices.length === 0 ? {} : { notices }) };
+    });
+  }
+
+  private actionsForFinished(state: RunState): LeadAction[] {
+    const finished = state.events.findLast((e) => e.type === "run.finished");
+    const path = (finished?.data as { summary?: string } | undefined)?.summary;
+    return [{ type: "done", ...(path === undefined ? {} : { summary: path }) }];
+  }
+
+  async submit(input: SubmitInput, call: CallContext): Promise<SubmitResult> {
+    const handle = this.resolve(input.run);
+    this.assertOwnSubmit(handle.state.id, input.action_id, call);
+    return this.serial(handle, async () => {
+      const outcome = await handleSubmit(this, handle, input);
+      this.advance(handle);
+      const actions = await this.actionsFor(handle, call);
+      return outcome.accepted
+        ? { run: handle.state.id, accepted: true, actions }
+        : { run: handle.state.id, accepted: false, rejection: outcome.rejection, actions };
+    });
+  }
+
+  /**
+   * A `submit` whose input failed the schema (AD-4 Check): logged as `role.rejected` `schema`
+   * when it names an open action, so the step is re-dispatched; `null` when it names none.
+   */
+  async rejectMalformedSubmit(
+    runId: string | undefined,
+    actionId: string,
+    issues: readonly string[],
+    call: CallContext,
+  ): Promise<SubmitResult | null> {
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(runId);
+    } catch {
+      return null;
+    }
+    const run = handle.state.roleRuns.get(actionId);
+    if (run?.status !== "in_flight") return null;
+    return this.serial(handle, async () => {
+      const rejection = {
+        reason: "schema" as const,
+        issues: issues.slice(0, 20).map((i) => i.slice(0, 500)),
+      };
+      const shapes = takeCommandShapes(this, handle, run);
+      this.emit(handle, {
+        type: "role.rejected",
+        actor: "engine",
+        role: run.role,
+        ...(run.task === undefined ? {} : { task: run.task }),
+        data: {
+          action_id: actionId,
+          ...rejection,
+          ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+        },
+      });
+      return {
+        run: handle.state.id,
+        accepted: false as const,
+        rejection,
+        actions: await this.actionsFor(handle, call),
+      };
+    });
+  }
+
+  status(input: RunScopedInput): StatusResult {
+    const state = this.stateOf(input.run);
+    const view = statusView(state, this.usage);
+    // engine-launched runs in flight (AD-25); absent when there are none
+    const headless = headlessRunsOf(this, state.id);
+    return headless.length === 0 ? view : { ...view, headless_runs: headless };
+  }
+
+  escalations(input: RunScopedInput): EscalationList {
+    return escalationListView(this.stateOf(input.run));
+  }
+
+  async answer(input: AnswerInput, call: CallContext): Promise<NextResult> {
+    const handle = this.resolve(input.run);
+    this.assertHumanChannel(handle.state.id, call, "answer");
+    return this.serial(handle, async () => {
+      const escalation = handle.state.escalations.get(input.escalation);
+      if (escalation === undefined)
+        throw new EngineError("invalid", `no escalation ${input.escalation}`);
+      if (escalation.answer !== undefined)
+        throw new EngineError("conflict", `${input.escalation} is already answered`);
+      if (!escalation.options.some((o) => o.id === input.answer.option)) {
+        throw new EngineError(
+          "invalid",
+          `option ${input.answer.option} is not one of ${escalation.options.map((o) => o.id).join(", ")}`,
+        );
+      }
+      this.emit(handle, {
+        type: "escalation.answered",
+        actor: "human",
+        ...(escalation.task === undefined ? {} : { task: escalation.task }),
+        ...(escalation.feature === undefined ? {} : { feature: escalation.feature }),
+        data: { escalation: escalation.id, answer: input.answer },
+      });
+      const cr = handle.state.changeRequests.get(escalation.id);
+      const effect = escalation.options.find((o) => o.id === input.answer.option)?.effect;
+      if (cr !== undefined && (effect === "approve_change" || effect === "reject_change")) {
+        const sha = sha256File(join(this.deps.repoRoot, cr.frozen.path));
+        this.emit(handle, {
+          type: "change_request.decided",
+          actor: "human",
+          data: {
+            escalation: escalation.id,
+            decision: effect === "approve_change" ? "approved" : "rejected",
+            frozen: cr.frozen,
+            ...(effect === "approve_change" ? { new_sha256: sha ?? cr.frozen.sha256 } : {}),
+          },
+        });
+      }
+      if (
+        escalation.feature !== undefined &&
+        escalation.task === undefined &&
+        handle.state.features.get(escalation.feature)?.status === "parked"
+      ) {
+        this.resumeFeature(handle, escalation.feature, effect);
+      }
+      applyAnswer(this, handle, escalation, input.answer);
+      // H-13 (reading 237(5)): the coverage loop's `change_spec` goes back to SPECIFY and G1
+      if (
+        handle.state.run.phase === "design" &&
+        isChangeSpecAnswer(handle, escalation.id, input.answer.option)
+      )
+        this.phaseTo(handle, "specify");
+      this.advance(handle);
+      return { run: handle.state.id, actions: await this.actionsFor(handle, call) };
+    });
+  }
+
+  private resumeFeature(handle: RunHandle, featureId: string, effect: string | undefined): void {
+    if (effect === "drop") {
+      this.emit(handle, { type: "run.finished", actor: "engine", data: { outcome: "aborted" } });
+      return;
+    }
+    // D-bd (reading 158): a Level-3 park finished at Level 2 ends the run with the PR left open
+    if (effect === "finish_level_2") {
+      finishAtLevel2(this, handle, featureId);
+      return;
+    }
+    const before = handle.state.events.findLast(
+      (e) =>
+        e.feature === featureId &&
+        e.type === "feature.status_changed" &&
+        (e.data as { to?: string }).to === "parked",
+    );
+    const from = (before?.data as { from?: string } | undefined)?.from;
+    setFeatureStatus(
+      this,
+      handle,
+      featureId,
+      // a Level-3 release that parked retries the release (AD-23)
+      from === "ready_to_ship"
+        ? "ready_to_ship"
+        : from === "fixing" || from === "final_review"
+          ? "final_review"
+          : "integrating",
+    );
+  }
+
+  async approve(input: ApproveInput, call: CallContext): Promise<NextResult> {
+    const handle = this.resolve(input.run);
+    this.assertHumanChannel(handle.state.id, call, "approve");
+    return this.serial(handle, async () => {
+      const awaiting = this.awaitingGates(handle);
+      if (awaiting === null)
+        throw new EngineError(
+          "conflict",
+          `no gate is awaiting approval (phase ${handle.state.run.phase})`,
+        );
+      const want = [...awaiting.gates].sort().join(",");
+      if ([...input.gates].sort().join(",") !== want)
+        throw new EngineError("invalid", `the gates awaiting a decision are ${want}`);
+      const shown = new Map(awaiting.artifacts.map((a) => [a.path, a.sha256]));
+      const problems = input.frozen.flatMap((f) =>
+        shown.get(f.path) === f.sha256
+          ? []
+          : [`${f.path} is not shown at ${f.sha256.slice(0, 12)} (it changed or was not shown)`],
+      );
+      for (const path of shown.keys())
+        if (!input.frozen.some((f) => f.path === path)) problems.push(`${path} must be frozen too`);
+      if (problems.length > 0) throw new EngineError("conflict", problems.join("; "));
+      const back: Phase = handle.state.run.phase === "g1" ? "specify" : "design";
+      if (input.decision === "approve") {
+        // AD-22 rule 4, reading 110: every unverified fact waived with a reason; one direction
+        const blocked = g2ApprovalProblem(awaiting.extras, input);
+        if (blocked !== null) throw new EngineError("invalid", blocked);
+        // §9.1 step 6: the chosen direction enters the design library before anything is
+        // recorded, so an approval either does both or neither
+        if (input.design_direction !== undefined) {
+          try {
+            await recordChosenDirection(this, handle, input.design_direction);
+          } catch (error) {
+            throw new EngineError(
+              "conflict",
+              `the chosen direction could not be recorded in the design library: ${error instanceof Error ? error.message : String(error)}; fix it, then approve again`,
+            );
+          }
+        }
+        for (const waiver of input.fact_waivers ?? [])
+          this.emit(handle, { type: "fact.waived", actor: "human", data: waiver });
+        this.emit(handle, {
+          type: "gate.approved",
+          actor: "human",
+          data: {
+            gates: input.gates,
+            frozen: input.frozen,
+            ...(input.design_direction === undefined
+              ? {}
+              : { design_direction: input.design_direction }),
+            ...(input.design_exit === "category_standard"
+              ? { design_exit: "category_standard" as const }
+              : {}),
+            waived_facts: input.waived_facts,
+            ...(input.fact_waivers === undefined ? {} : { fact_waivers: input.fact_waivers }),
+            ...(input.note === undefined ? {} : { note: input.note }),
+          },
+        });
+        this.phaseTo(handle, handle.state.run.phase === "g1" ? "design" : "plan");
+      } else {
+        // §9.1 step 5, reading 151: a re-roll sends only the Designer back (`rerollSince`)
+        const reroll = input.design_exit === "re_roll";
+        if (reroll && awaiting.extras.design_directions.length === 0)
+          throw new EngineError(
+            "invalid",
+            "no design directions are on offer, so there is nothing to re-roll: reject G2 with a note instead",
+          );
+        this.emit(handle, {
+          type: "gate.rejected",
+          actor: "human",
+          data: {
+            gates: input.gates,
+            ...(input.note === undefined ? {} : { note: input.note }),
+            ...(reroll ? { design_exit: "re_roll" as const } : {}),
+          },
+        });
+        this.phaseTo(
+          handle,
+          reroll ? "design" : handle.state.run.track === "quick_fix" ? "specify" : back,
+        );
+      }
+      this.advance(handle);
+      return { run: handle.state.id, actions: await this.actionsFor(handle, call) };
+    });
+  }
+
+  async changeRequest(
+    input: ChangeRequestInput,
+    call: CallContext = { host: null },
+  ): Promise<ChangeRequestResult> {
+    const handle = this.resolve(input.run);
+    this.assertHumanChannel(handle.state.id, call, "change_request");
+    const attachments = readAttachments(input.attachments);
+    return this.serial(handle, () => {
+      const state = handle.state;
+      let frozen: FrozenArtifact | undefined;
+      if (input.artifact === "interface_contract") {
+        const contract = input.task === undefined ? undefined : state.contracts.get(input.task);
+        frozen =
+          contract === undefined ? undefined : { path: contract.path, sha256: contract.sha256 };
+      } else {
+        const prefix = {
+          spec: ".vtc/spec/",
+          architecture: ".vtc/architecture/",
+          design: ".vtc/design/",
+        }[input.artifact];
+        frozen = [...state.run.gates.G1.frozen, ...state.run.gates.G2.frozen].find((f) =>
+          f.path.startsWith(prefix),
+        );
+      }
+      if (frozen === undefined)
+        throw new EngineError("conflict", `no frozen ${input.artifact} to change`);
+      const id = nextEscalationId(state);
+      const escalation = parkEscalation({
+        id,
+        run: state.id,
+        ...(input.task === undefined ? { phase: state.run.phase } : { task: input.task }),
+        reason: "change_request",
+        detail: input.detail,
+        evidence: [{ type: "file", ref: frozen.path }],
+        blocks: [],
+        now: this.now(),
+      });
+      this.emit(handle, {
+        type: "escalation.opened",
+        actor: "engine",
+        ...(input.task === undefined ? {} : { task: input.task }),
+        data: {
+          escalation: {
+            ...escalation,
+            question: `Approve this change request? ${input.summary}`.slice(0, 1000),
+          },
+        },
+      });
+      const copied = copyAttachments(
+        this.deps.repoRoot,
+        state.id,
+        attachments,
+        runAttachments(state).length,
+      );
+      this.emit(handle, {
+        type: "change_request.opened",
+        actor: "human",
+        data: {
+          escalation: id,
+          artifact: input.artifact,
+          frozen,
+          ...(input.task === undefined ? {} : { task: input.task }),
+          summary: input.summary,
+          ...(copied.length === 0 ? {} : { attachments: copied }),
+        },
+      });
+      return Promise.resolve({ run: state.id, escalation: id });
+    });
+  }
+
+  // ------------------------------------------------------------ sessions
+
+  /**
+   * The run's Lead session: the bridge session that started the run, or else the first bridge
+   * session to drive it (a Lead whose bridge reconnected, or after a restart) that is not bound
+   * to a role action. A `submit` never claims it, and a cli connection never does.
+   *
+   * Defence in depth only: `client` is what the connecting process declares, so a same-uid
+   * process can declare itself a bridge. What bounds that is the spine §7 Accepted residuals row
+   * "Plugin-only in-session roles" (§5 reading 71): role shells in the Lead session cannot reach
+   * the sockets or the install token, and the human-only tools need a human channel
+   * ({@link assertHumanChannel}). Each claim is logged in the engine's private directory
+   * (`leads.jsonl`) for the human.
+   */
+  private claimLead(run: string, call: CallContext): void {
+    if (call.client !== "bridge" || call.session === undefined) return;
+    if (this.leads.has(run) || this.bound.has(call.session)) return;
+    this.setLead(run, call, "claimed");
+  }
+
+  private setLead(run: string, call: CallContext, how: "started" | "claimed"): void {
+    if (call.session === undefined) return;
+    this.leads.set(run, call.session);
+    this.leadSandbox.set(run, call.sessionSandbox);
+    if (call.host !== null) this.leadHosts.set(run, call.host);
+    else this.leadHosts.delete(run);
+    try {
+      appendPrivateFile(
+        join(this.guardDir, "leads.jsonl"),
+        `${JSON.stringify({ ts: this.now().toISOString(), run, session: call.session, host: call.host, how, session_sandbox: call.sessionSandbox ?? "unknown" })}\n`,
+      );
+    } catch {
+      // the log is for the human; the claim stands without it
+    }
+  }
+
+  /**
+   * The human-only tools (`HUMAN_ONLY_TOOLS`: `approve`, `answer`, `change_request`) need a human
+   * channel (D-an, spine §5 reading 71): the run's Lead session, which relays the human's words in
+   * the Lead chat, or a cli connection whose install token matched (sent only after a TTY
+   * confirmation). A bare `{client: "cli"}` hello is never proof of a human, and any other bridge
+   * session is a role session (spine §7: until the Codex per-agent MCP isolation spike passes).
+   * An in-process caller (no `client`: the composition, tests) opened no socket and is trusted.
+   * The rest is the §7 Accepted residuals row "Plugin-only in-session roles".
+   */
+  private assertHumanChannel(run: string, call: CallContext, tool: HumanOnlyToolName): void {
+    if (call.client === undefined) return;
+    if (call.client === "cli") {
+      if (call.human === true) return;
+      throw new EngineError("forbidden", humanChannelRequired(tool));
+    }
+    this.claimLead(run, call);
+    if (call.session === undefined || this.leads.get(run) !== call.session)
+      throw new EngineError(
+        "forbidden",
+        `${tool} is the Lead's tool; a role session may only submit its own result (${humanChannelRequired(tool)})`,
+      );
+  }
+
+  /** A role session may submit one action only: the first it submits (spine §7). */
+  private assertOwnSubmit(run: string, actionId: string, call: CallContext): void {
+    if (call.client !== "bridge" || call.session === undefined) return;
+    if (this.leads.get(run) === call.session) return;
+    const key = `${run}/${actionId}`;
+    const own = this.bound.get(call.session);
+    if (own === undefined) this.bound.set(call.session, key);
+    else if (own !== key)
+      throw new EngineError(
+        "forbidden",
+        `a role session may only submit its own result (${own.split("/").at(-1) ?? own}), not ${actionId}`,
+      );
+  }
+
+  /** A connection closed: it is no longer any run's Lead, nor bound to an action. */
+  sessionClosed(session: string): void {
+    for (const [run, lead] of [...this.leads])
+      if (lead === session) {
+        this.leads.delete(run);
+        this.leadSandbox.delete(run);
+        this.leadHosts.delete(run);
+      }
+    this.bound.delete(session);
+  }
+
+  // ------------------------------------------------------------- advisors
+
+  /**
+   * The run's advisor spend so far: every closed advisor run at what it counts toward the budgets
+   * (`cost_usd`, else for a model with no known price its tokens at the host's price ceiling;
+   * H-12, readings 236 and 249), so an unpriced advisor never spends $0.
+   */
+  private advisorSpend(state: RunState): number {
+    let sum = 0;
+    for (const run of state.roleRuns.values())
+      if (run.status !== "in_flight" && this.deps.roles.get(run.role)?.kind === "advisor")
+        sum += run.costUsd ?? run.budgetUsd ?? 0;
+    return sum;
+  }
+
+  /**
+   * `consult` (§5.4; spine §5 reading 25): the human asked the Lead for an advisor. The engine
+   * checks the role is an advisor and the run's advisor budget (`budgets.advisor_usd`) is not
+   * spent, writes the pack (the question and the inputs), records the dispatch like any role's
+   * (prompt SHA, model, its own worktree, the dispatch guard) and returns the one `spawn_role`.
+   * The Lead submits the advisor's result with `submit`, outside the phase flow.
+   */
+  async consult(input: ConsultInput, call: CallContext): Promise<ConsultResult> {
+    const handle = this.resolve(input.run);
+    return this.serial(handle, async () => {
+      const state = handle.state;
+      const contract = this.deps.roles.get(input.advisor);
+      if (contract?.kind !== "advisor")
+        throw new EngineError("invalid", `${input.advisor} is not an advisor role`);
+      if (state.run.paused)
+        throw new EngineError("conflict", "the run is paused (vtc resume to continue)");
+      const budget = this.config().budgets.advisor_usd;
+      const spent = this.advisorSpend(state);
+      if (spent >= budget)
+        throw new EngineError(
+          "conflict",
+          `the run's advisor budget is spent ($${spent.toFixed(2)} of $${budget.toFixed(2)}, budgets.advisor_usd)`,
+        );
+      const host = this.hostFor(call);
+      // D-an (spine §5 readings 71 and 79): an advisor runs in-session only where it is confined
+      const refusal = inSessionRefusal(this, handle, { role: input.advisor }, host, call);
+      if (refusal !== null)
+        throw new EngineError(
+          "conflict",
+          this.leadless(state.id, call)
+            ? `${input.advisor} cannot run in-session yet: ${NO_LEAD_WAIT_REASON}`
+            : `${input.advisor} cannot run in-session: ${refusal.replace(/then answer this escalation to retry$/, "then ask again")}`,
+        );
+      const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
+      const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;
+      writeRepoFile(
+        this.deps.repoRoot,
+        path,
+        `# Question for ${input.advisor}\n\n${input.question}\n`,
+      );
+      const action = await dispatchGuarded(
+        this,
+        handle,
+        {
+          key: `consult:${input.advisor}`,
+          role: input.advisor,
+          note: `The human asks: ${input.question}`.slice(0, 4000),
+          inputs: [
+            ArtifactRefSchema.parse({ type: PACK_INPUT_TYPES.advisorQuestion, path }),
+            ...input.inputs.map((i) => ArtifactRefSchema.parse(i)),
+          ],
+        },
+        host,
+      );
+      if (action === null)
+        throw new EngineError("conflict", "the advisor's worktree could not be prepared");
+      return { run: state.id, action };
+    });
+  }
+
+  async pause(input: RunScopedInput): Promise<ControlResult> {
+    // the kill switch stops automation for the whole repo, run or no run, until vtc resume
+    // (spec §15; AD-27 rule 7): the daemon's automation reads it (`automationPausedByHuman`)
+    setAutomationPaused(this.guardDir, this.now().toISOString());
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(input.run);
+    } catch (error) {
+      // no run to pause: the kill switch alone, said so (contracts 5.4.0, reading 212(15))
+      if (error instanceof EngineError && error.code === "no_run" && input.run === undefined)
+        return { run: null, automation_paused: automationPausedByHuman(this.guardDir) };
+      throw error;
+    }
+    const result = await this.serial(handle, () => {
+      if (!handle.state.run.paused) {
+        this.emit(handle, {
+          type: "run.paused",
+          actor: "human",
+          data: { reason: "vtc pause (kill switch)" },
+        });
+      }
+      this.unattended.delete(handle.state.id);
+      return Promise.resolve({
+        run: handle.state.id,
+        paused: true,
+        phase: handle.state.run.phase,
+        automation_paused: automationPausedByHuman(this.guardDir),
+      });
+    });
+    // the kill switch (§15, AD-25 rule 4; AD-23 rule 6): engine-launched runs stop, no orphans,
+    // and every pending auto-merge VTC enabled is turned off
+    await killHeadless(this, handle.state.id);
+    await disableAutoMerges(this, handle);
+    return result;
+  }
+
+  /**
+   * One poll of every Level-3 merge still in its post-merge watch (AD-23 rule 4), finished runs
+   * included: the daemon calls it at start and on a timer. A finished run's log gets the watch's
+   * events (they belong to its feature); a downgrade goes to the git-tracked ledger.
+   */
+  async watchMerged(): Promise<void> {
+    if (this.deps.remoteMerge === undefined) return;
+    const runs: RunHandle[] = [...this.handles.values()];
+    for (const state of this.finished.values()) {
+      if (watchedFeatures(this, state).length === 0) continue;
+      runs.push({
+        state,
+        log: openEventLog(this.deps.repoRoot, state.id, this.deps.lock, {
+          now: this.deps.now,
+          secrets: () => this.secrets(),
+        }),
+      });
+    }
+    for (const handle of runs) {
+      for (const feature of watchedFeatures(this, handle.state))
+        await pollMergedFeature(this, handle, feature);
+    }
+  }
+
+  /**
+   * Resumes a paused or interrupted run (AD-4): role runs still marked in flight belong to a
+   * session that is gone, so they are closed and their steps re-dispatched. Their dispatch
+   * records are checked first; anything found keeps the run paused with the reason. Otherwise
+   * the human's resume takes the repo as it is (`acceptCheckout`): the run's log is rewritten
+   * from the engine's own events, any other file the engine wrote is taken as it now is.
+   */
+  async resume(input: ResumeInput, call: CallContext = { host: null }): Promise<ControlResult> {
+    if (input.adopt === true) this.adopt(input.run, call);
+    // the human's resume lifts the repo-level automation kill switch `pause` set (an open run
+    // that stays paused still holds automation)
+    setAutomationPaused(this.guardDir, null);
+    const automationPaused = (): boolean => automationPausedByHuman(this.guardDir);
+    if (this.held.size > 0) {
+      const active = activeRun([...this.handles.values()].map((h) => h.state));
+      const run = input.run ?? (active === undefined ? [...this.held.keys()][0] : undefined);
+      if (run !== undefined && this.held.has(run)) {
+        // a held run that is not active (lost, or finished): the human takes the repo as it is
+        await releaseHeldRuns(this, this.held);
+        const phase: Phase = this.finished.get(run)?.run.phase ?? "intake";
+        return { run, paused: false, phase, automation_paused: automationPaused() };
+      }
+    }
+    let handle: RunHandle;
+    try {
+      handle = this.resolve(input.run);
+    } catch (error) {
+      // no run to resume: the kill switch alone, said so (contracts 5.4.0, reading 212(15))
+      if (error instanceof EngineError && error.code === "no_run" && input.run === undefined)
+        return { run: null, automation_paused: automationPaused() };
+      throw error;
+    }
+    return this.serial(handle, async () => {
+      const state = handle.state;
+      for (const run of inFlight(state)) {
+        this.emit(handle, {
+          type: "role.failed",
+          actor: "engine",
+          role: run.role,
+          ...(run.task === undefined ? {} : { task: run.task }),
+          data: {
+            action_id: run.action_id,
+            kind: "error",
+            message: `${SUPERSEDED_RUN_PREFIX} the run was resumed`,
+            retryable: true,
+          },
+        });
+      }
+      // The superseded runs are checked first: what they wrote is said before anything is taken.
+      const found = await sweepDispatches(this, handle);
+      if (found.issues.length === 0 && state.run.paused) {
+        acceptCheckout(this);
+        if (this.held.size > 0) await releaseHeldRuns(this, this.held);
+        this.emit(handle, { type: "run.resumed", actor: "human", data: { auto: false } });
+      }
+      maybeAutoResume(this, handle);
+      this.advance(handle);
+      return {
+        run: state.id,
+        paused: state.run.paused,
+        phase: state.run.phase,
+        automation_paused: automationPaused(),
+      };
+    });
+  }
+
+  /**
+   * Stores a usage reading (§6.9): statusline ingest, the adapter's `watchUsage` (Codex
+   * app-server), and the usage of an engine-launched run's stream. A stream's `sdk_event`
+   * snapshot (`parseEvents` is pure, so it carries `updated_at: null` and only the windows the
+   * stream reported) is merged into the host's stored snapshot by window kind (and model limits
+   * by model) and stamped with the receive time, so the statusline's other windows survive
+   * (spine §5 reading 67).
+   */
+  ingestUsage(incoming: UsageSnapshot): void {
+    const before = this.usage.get(incoming.host);
+    const merged =
+      incoming.source === "sdk_event" ? mergeSdkUsage(before, incoming, this.now()) : incoming;
+    // who pays comes from the sign-in check, never from a usage reading (D-bq)
+    const billing = this.billing.get(merged.host);
+    const snapshot = billing === undefined ? merged : { ...merged, billing };
+    this.usage.set(snapshot.host, snapshot);
+    const state = activeRun([...this.handles.values()].map((h) => h.state));
+    const handle = state === undefined ? undefined : this.handles.get(state.id);
+    if (handle === undefined) return;
+    // reading 263: compared with the last reading logged, not the last one received, and while
+    // nothing runs (paused, or waiting for a reset) at most hourly unless a window fills or frees
+    const key = `${handle.state.id}:${snapshot.host}` as const;
+    const logged = this.usageLogged.get(key);
+    if (!significant(logged?.snapshot, snapshot)) return;
+    const idle = handle.state.run.paused || limitWait(this, handle) !== null;
+    const now = this.now().getTime();
+    if (
+      idle &&
+      logged !== undefined &&
+      now - logged.at < USAGE_IDLE_LOG_MS &&
+      !fullChanged(logged.snapshot, snapshot)
+    )
+      return;
+    this.usageLogged.set(key, { snapshot, at: now });
+    void this.serial(handle, () => {
+      this.emit(handle, { type: "usage.updated", actor: "engine", data: { snapshot } });
+      return Promise.resolve();
+    });
+  }
+
+  recordBilling(host: HostId, billing: HostBilling | null): void {
+    this.billing.set(host, billing);
+    const stored = this.usage.get(host);
+    if (stored !== undefined && (stored.billing ?? null) === billing) return;
+    this.usage.set(host, { ...(stored ?? unknownUsage(host)), billing });
+  }
+
+  /** The auto-resume timer fired (`vtc engine --daemon --wake`, AD-12 rule 4). */
+  async wake(): Promise<void> {
+    for (const handle of [...this.handles.values()]) {
+      await this.serial(handle, async () => {
+        // §6.9 step 6: with no live Lead the engine resumes the run itself, only with
+        // `headless_allowed` (`drive` asks planDispatch for `auto_resume`)
+        if (maybeAutoResume(this, handle) && !this.leads.has(handle.state.id))
+          this.unattended.add(handle.state.id);
+        this.advance(handle);
+        await drive(this, handle);
+      });
+    }
+  }
+
+  /** Active (non-terminal, non-waiting) tasks: the daemon stays up for them. */
+  activeTasks(): number {
+    return [...this.handles.values()].reduce(
+      (n, h) =>
+        n +
+        [...h.state.tasks.values()].filter((t) => ACTIVE_TASK_STATUSES.includes(t.status)).length,
+      0,
+    );
+  }
+}

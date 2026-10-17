@@ -1,0 +1,23 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   specialized/specialized-codebase-archaeologist.md (base: drift passes over one area: duplicate
+#     responsibilities checked for shared purpose first, reversed fallbacks, state assumed to exist
+#     across handlers, values used in another representation, doc versus code; "I can't confirm the
+#     intent" said rather than guessed; its git commands, registry upkeep and severity labels were
+#     removed)
+#   engineering/engineering-codebase-onboarding-engineer.md (code before everything, a one-line
+#     statement then a walkthrough then the detail, exact names, files inspected and not inspected)
+id: advisor_legacy_explainer
+version: 1.0.0
+kind: advisor
+mission: >-
+  Explain how an unfamiliar or legacy part of the codebase works, where it disagrees with itself,
+  and where a change to it would have to land, so the human can decide how to change it.
+inputs: [advisor_question, request, repo_map]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 80000 }

@@ -1,0 +1,151 @@
+{
+  "id": "task-t-2",
+  "scope": "task",
+  "nodes": [
+    {
+      "id": "qa-author",
+      "kind": "role",
+      "label": "QA author",
+      "ports_in": [],
+      "ports_out": ["acceptance_tests"],
+      "reason_added": "every task (§6.3 step 2)",
+      "state": "passed",
+      "role": "qa",
+      "task": "T-2"
+    },
+    {
+      "id": "engineer",
+      "kind": "role",
+      "label": "Engineer (backend)",
+      "ports_in": ["acceptance_tests"],
+      "ports_out": ["diff"],
+      "reason_added": "discipline backend (§5.2a)",
+      "state": "passed",
+      "role": "engineer",
+      "task": "T-2"
+    },
+    {
+      "id": "write-scope",
+      "kind": "gate",
+      "label": "Write scope (L5)",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "every submit (§6.3 step 4)",
+      "state": "passed",
+      "task": "T-2"
+    },
+    {
+      "id": "gates",
+      "kind": "gate",
+      "label": "Gates L0-L5",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "every round (§6.3 step 5)",
+      "state": "passed",
+      "task": "T-2"
+    },
+    {
+      "id": "risk-router",
+      "kind": "router",
+      "label": "Risk router",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "every round (§6.3 step 6)",
+      "state": "passed",
+      "task": "T-2"
+    },
+    {
+      "id": "spec-verifier",
+      "kind": "role",
+      "label": "Spec-Verifier REQ-2.AC-1",
+      "ports_in": [],
+      "ports_out": ["verdict"],
+      "reason_added": "one call per AC (§7.4)",
+      "state": "passed",
+      "role": "spec_verifier",
+      "task": "T-2"
+    },
+    {
+      "id": "triage",
+      "kind": "router",
+      "label": "Triage",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "every round (§6.3 step 8)",
+      "state": "passed",
+      "task": "T-2"
+    },
+    {
+      "id": "loop-guard",
+      "kind": "loop_guard",
+      "label": "Round cap",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "risk med: cap 4 (§6.3 step 9)",
+      "state": "parked",
+      "task": "T-2",
+      "round": 4,
+      "cap": 4,
+      "park_reason": "cap"
+    },
+    {
+      "id": "park",
+      "kind": "park",
+      "label": "Parked: cap",
+      "ports_in": [],
+      "ports_out": [],
+      "reason_added": "cap reached (§7.6 rule 10)",
+      "state": "parked",
+      "task": "T-2",
+      "park_reason": "cap"
+    }
+  ],
+  "edges": [
+    {
+      "id": "qa-author-engineer",
+      "from": "qa-author",
+      "to": "engineer"
+    },
+    {
+      "id": "engineer-write-scope",
+      "from": "engineer",
+      "to": "write-scope"
+    },
+    {
+      "id": "write-scope-gates",
+      "from": "write-scope",
+      "to": "gates"
+    },
+    {
+      "id": "gates-risk-router",
+      "from": "gates",
+      "to": "risk-router"
+    },
+    {
+      "id": "risk-router-spec-verifier",
+      "from": "risk-router",
+      "to": "spec-verifier"
+    },
+    {
+      "id": "spec-verifier-triage",
+      "from": "spec-verifier",
+      "to": "triage"
+    },
+    {
+      "id": "triage-loop-guard",
+      "from": "triage",
+      "to": "loop-guard"
+    },
+    {
+      "id": "loop-guard-engineer",
+      "from": "loop-guard",
+      "to": "engineer",
+      "artifact": "findings"
+    },
+    {
+      "id": "loop-guard-park",
+      "from": "loop-guard",
+      "to": "park"
+    }
+  ]
+}

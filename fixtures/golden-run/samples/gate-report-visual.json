@@ -1,0 +1,64 @@
+{
+  "run": "golden-wave3",
+  "task": "T-1",
+  "reason": "round",
+  "scope": "affected",
+  "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "results": [
+    {
+      "gate_id": "typecheck",
+      "layer": "L0",
+      "phase": "verify",
+      "status": "pass",
+      "blocking": true,
+      "new_violations": 0,
+      "baseline_violations": 0,
+      "evidence": [],
+      "duration_ms": 3900
+    },
+    {
+      "gate_id": "tests",
+      "layer": "L2",
+      "phase": "verify",
+      "status": "pass",
+      "blocking": true,
+      "new_violations": 0,
+      "baseline_violations": 0,
+      "tests": {
+        "executed": 48,
+        "skipped": 0,
+        "failed": 0,
+        "inventory": ".vtc/evidence/T-1/round-1/tests.json",
+        "line_coverage_pct": 84.2,
+        "diff_coverage_pct": 96.5
+      },
+      "report": {
+        "format": "junit",
+        "path": ".vtc/evidence/T-1/round-1/junit.xml"
+      },
+      "evidence": [],
+      "duration_ms": 12100
+    }
+  ],
+  "verdict": "pass",
+  "started_at": "2026-10-13T09:18:00.000Z",
+  "finished_at": "2026-10-13T09:19:00.000Z",
+  "traceability": ".vtc/evidence/T-1/traceability.json",
+  "visual": {
+    "status": "pass",
+    "report": ".vtc/evidence/T-1/gates/20261013T091900Z-round-bbbbbbbbbbbb/visual/report.json",
+    "toolchain": "project",
+    "counts": {
+      "renders": 6,
+      "unreached": 0,
+      "axe_violations": 0,
+      "axe_incomplete": 1,
+      "style_mismatches": 0,
+      "diffs_over_budget": 0,
+      "token_lint": 0,
+      "detector": 0
+    },
+    "findings": []
+  }
+}

@@ -1,0 +1,38 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   testing/testing-test-automation-engineer.md (base: deterministic test rules, flake triage)
+#   testing/testing-api-tester.md (negative-path patterns and honest evidence caveats)
+#   testing/testing-evidence-collector.md ("zero is valid", "not tested is not a defect")
+#   engineering/engineering-code-reviewer.md (blocker checklist, as the judge's lens)
+#   engineering/engineering-llm-post-training-engineer.md ("exit 0 is not a pass")
+# New: REQ tags on every test, assertion provenance, scenario cards, spec questions, judge mode.
+id: qa
+version: 1.1.0
+kind: core
+mission: >-
+  Own the task's acceptance tests: in author mode write them from the acceptance criteria before
+  the Engineer starts; in judge mode check that the tests that passed actually prove the criteria.
+inputs: [task, spec, repo_map_slice, interface_contract]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, spec_conflict]
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: read_only }
+budget: { context_tokens: 50000 }
+modes:
+  author:
+    inputs: [task, spec, repo_map_slice, interface_contract, design_md]
+    output: { artifacts: [acceptance_test, hidden_acceptance_test, scenario_card], verdicts: [] }
+    exits: [done, blocked, spec_conflict]
+    tools: { profile: write_scoped, write_paths: [".vtc/state/hidden-staging/**"] }
+  judge:
+    inputs: [task, spec, diff, acceptance_test, gate_report, traceability_report]
+    output: { artifacts: [], verdicts: [pass, fail, unknown] }
+    exits: [done, blocked]
+    tools: { profile: read_only }
+success_criteria:
+  - id: base_fail_check
+    description: "Author mode: every new visible acceptance test fails on the base commit."
+  - id: req_tags
+    description: "Author mode: every acceptance test name carries the REQ or AC id it proves."

@@ -1,0 +1,249 @@
+# Written by vtc calibrate (spec §7.1). Gate commands run only after a human confirmed them
+# in vtc calibrate; editing this file never widens the per-machine allowlist (§15).
+version: 1
+baseline:
+  revision: 4f1c2a9e8b7d6c5f4e3d2c1b0a9f8e7d6c5b4a39
+  calibrated_at: 2026-10-13T08:00:00.000Z
+  confirmed: true
+  flaky_tests: []
+sources:
+  - agents_md
+  - task_runner
+  - ci
+tests:
+  acceptance_globs:
+    - tests/acceptance/**
+  protected_configs:
+    - "**/eslint.config.*"
+    - "**/.eslintrc*"
+    - "**/biome.json"
+    - "**/biome.jsonc"
+    - "**/vitest.config.*"
+    - "**/vitest.workspace.*"
+    - "**/vite.config.*"
+    - "**/jest.config.*"
+    - "**/.mocharc*"
+    - "**/.nycrc*"
+    - "**/.c8rc*"
+    - "**/playwright.config.*"
+    - "**/tsconfig*.json"
+    - "**/pytest.ini"
+    - "**/conftest.py"
+    - "**/tox.ini"
+    - "**/tox.toml"
+    - "**/hatch.toml"
+    - "**/setup.cfg"
+    - "**/.flake8"
+    - "**/ruff.toml"
+    - "**/.ruff.toml"
+    - "**/mypy.ini"
+    - "**/.mypy.ini"
+    - "**/pyrightconfig.json"
+    - "**/.pylintrc"
+    - "**/pylintrc"
+    - "**/.coveragerc"
+    - "**/.golangci.y*ml"
+    - "**/.dependency-cruiser.*"
+    - "**/babel.config.*"
+    - "**/.babelrc*"
+    - "**/.swcrc"
+    - "**/.pytest.ini"
+    - "**/.cargo/config"
+    - "**/.cargo/config.toml"
+    - "**/go.work"
+    - "**/go.work.sum"
+    - "**/.gitleaks.toml"
+    - "**/.gitleaksignore"
+    - "**/osv-scanner.toml"
+    - "**/.osv-scanner.toml"
+    - "**/.semgrepignore"
+    - "**/.opengrepignore"
+    - "**/.semgrep.yml"
+    - "**/.semgrep.yaml"
+    - "**/.semgrep/**"
+    - "**/.checkov.yaml"
+    - "**/.checkov.yml"
+    - "**/Makefile"
+    - "**/makefile"
+    - "**/GNUmakefile"
+    - "**/*.mk"
+    - "**/justfile"
+    - "**/Justfile"
+    - "**/.justfile"
+    - "**/*.just"
+    - "**/Taskfile.y*ml"
+    - "**/taskfile.y*ml"
+    - "**/Taskfile.dist.y*ml"
+    - "**/taskfile.dist.y*ml"
+    - "**/noxfile.py"
+    - "**/.npmrc"
+    - "**/.yarnrc"
+    - "**/.yarnrc.yml"
+    - "**/.yarn/releases/**"
+    - "**/.yarn/plugins/**"
+    - "**/.pnpmfile.*"
+    - "**/bunfig.toml"
+    - "**/.bunfig.toml"
+    - "**/.env.yarn"
+    - "**/.env"
+    - "**/.env.local"
+    - "**/.env.test*"
+    - "**/.env.development*"
+    - "**/.env.production*"
+    - "**/.claude/**"
+    - "**/.mcp.json"
+    - "**/.codex/**"
+    - .githooks/**
+    - .husky/**
+    - .vtc/gates.yml
+gates:
+  - id: install
+    layer: L0
+    command:
+      - pnpm
+      - install
+      - --frozen-lockfile
+    phase: install
+    timeout_s: 1200
+    blocking: true
+  - id: build
+    layer: L0
+    command:
+      - pnpm
+      - run
+      - build
+    phase: verify
+    timeout_s: 900
+    blocking: true
+  - id: typecheck
+    layer: L0
+    command:
+      - pnpm
+      - typecheck
+    phase: verify
+    timeout_s: 900
+    blocking: true
+  - id: lint
+    layer: L1
+    command:
+      - pnpm
+      - exec
+      - eslint
+      - .
+      - --format
+      - json
+      - --output-file
+      - .vtc/state/gates/eslint.json
+    phase: verify
+    timeout_s: 900
+    report:
+      format: json
+      path: .vtc/state/gates/eslint.json
+    blocking: true
+  - id: test
+    layer: L2
+    command:
+      - pnpm
+      - exec
+      - vitest
+      - run
+      - --reporter=default
+      - --reporter=junit
+      - --outputFile.junit=.vtc/state/gates/junit.xml
+    phase: verify
+    timeout_s: 900
+    report:
+      format: junit
+      path: .vtc/state/gates/junit.xml
+    blocking: true
+  - id: arch
+    layer: L6
+    command:
+      - pnpm
+      - run
+      - deps:check
+    phase: verify
+    timeout_s: 900
+    blocking: true
+  - id: secrets
+    layer: L4
+    command:
+      - gitleaks
+      - git
+      - .
+      - --log-opts={base}..{head}
+      - --report-format
+      - json
+      - --report-path
+      - .vtc/state/gates/gitleaks.json
+      - --exit-code
+      - "0"
+      - --no-banner
+    phase: verify
+    timeout_s: 900
+    report:
+      format: json
+      path: .vtc/state/gates/gitleaks.json
+    blocking: true
+  - id: sast
+    layer: L4
+    command:
+      - opengrep
+      - scan
+      - --config
+      - "{rules}/opengrep"
+      - --sarif
+      - --output
+      - .vtc/state/gates/opengrep.sarif
+      - .
+    phase: verify
+    timeout_s: 900
+    report:
+      format: sarif
+      path: .vtc/state/gates/opengrep.sarif
+    blocking: true
+  - id: dependencies
+    layer: L4
+    command:
+      - osv-scanner
+      - scan
+      - source
+      - --offline
+      - --format
+      - json
+      - --output
+      - .vtc/state/gates/osv.json
+      - -r
+      - .
+    phase: verify
+    timeout_s: 900
+    report:
+      format: json
+      path: .vtc/state/gates/osv.json
+    blocking: true
+  - id: iac
+    layer: L4
+    command:
+      - checkov
+      - -d
+      - .
+      - --quiet
+      - -o
+      - sarif
+      - --output-file-path
+      - .vtc/state/gates/checkov
+    phase: verify
+    timeout_s: 900
+    report:
+      format: sarif
+      path: .vtc/state/gates/checkov/results_sarif.sarif
+    blocking: true
+    when_changed:
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - "**/Dockerfile"
+      - "**/*.dockerfile"
+      - "**/docker-compose*.y*ml"
+      - "**/k8s/**"
+      - "**/helm/**"
+      - "**/cloudformation/**"

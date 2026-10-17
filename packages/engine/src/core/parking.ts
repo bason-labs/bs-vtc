@@ -1,0 +1,254 @@
+/**
+ * Parking and escalation (§6.5; D5): a park stops only its own task and blocks only its transitive
+ * dependents; the human's answer resumes the task from its checkpoint (same worktree and session,
+ * plus the answer as new input), or waives, raises the budget, or drops it.
+ */
+import {
+  escalationFromQuestion,
+  readEventData,
+  type Escalation,
+  type EscalationAnswer,
+  type Evidence,
+  type ParkReason,
+  type Question,
+  type RiskRuleReasonRule,
+  type TaskStatus,
+} from "@vtc/shared";
+import { raisedBudget, usd } from "./budget.js";
+import { parkEscalation } from "./escalations.js";
+import { EngineError, type Kernel, type RunHandle } from "./kernel.js";
+import { assertTaskTransition } from "./machines.js";
+import { lastBuilt, nextEscalationId, taskFindings } from "./queries.js";
+import { transitiveDependents } from "./scheduler.js";
+
+export interface StatusOptions {
+  readonly round?: number;
+  readonly parkReason?: ParkReason;
+  readonly riskRule?: RiskRuleReasonRule;
+}
+
+/** The one way a task changes state: validated against the §6.4 machine, then logged. */
+export const setTaskStatus = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  to: TaskStatus,
+  options: StatusOptions = {},
+): void => {
+  const task = h.state.tasks.get(taskId);
+  if (task === undefined) throw new EngineError("invalid", `no task ${taskId}`);
+  assertTaskTransition(taskId, task.status, to);
+  k.emit(h, {
+    type: "task.status_changed",
+    actor: "engine",
+    task: taskId,
+    data: {
+      from: task.status,
+      to,
+      round: options.round ?? task.round,
+      cap: task.cap,
+      ...(options.parkReason === undefined ? {} : { park_reason: options.parkReason }),
+      ...(options.riskRule === undefined ? {} : { risk_rule: options.riskRule }),
+    },
+  });
+};
+
+export interface ParkInput {
+  readonly reason: ParkReason;
+  readonly riskRule?: RiskRuleReasonRule;
+  readonly detail: string;
+  readonly evidence: readonly Evidence[];
+  /** `cap` / `stuck`: the role that stopped making progress (the hint goes to it). */
+  readonly stuckRole?: string;
+  /** A role's own question (Engineer `blocked`, QA `spec_question`) becomes the escalation. */
+  readonly question?: Question;
+  readonly raisedBy?: string;
+}
+
+/** Opens an escalation for a task (parking it unless the reason is a non-blocking question). */
+export const openTaskEscalation = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  input: ParkInput,
+): Escalation => {
+  const id = nextEscalationId(h.state);
+  const blocks =
+    input.reason === "spec_question"
+      ? []
+      : [taskId, ...transitiveDependents(taskId, h.state.tasks.values())];
+  const escalation =
+    input.question === undefined
+      ? parkEscalation({
+          id,
+          run: h.state.id,
+          task: taskId,
+          reason: input.reason,
+          ...(input.riskRule === undefined ? {} : { riskRule: input.riskRule }),
+          detail: input.detail,
+          evidence: input.evidence,
+          blocks,
+          now: k.now(),
+          ...(input.raisedBy === undefined ? {} : { raisedBy: input.raisedBy }),
+          ...(input.stuckRole === undefined ? {} : { stuckRole: input.stuckRole }),
+        })
+      : escalationFromQuestion(input.question, {
+          id,
+          run: h.state.id,
+          task: taskId,
+          reason: input.reason,
+          created_at: k.now().toISOString(),
+          blocks,
+          ...(input.raisedBy === undefined ? {} : { raised_by: input.raisedBy }),
+        });
+  k.emit(h, { type: "escalation.opened", actor: "engine", task: taskId, data: { escalation } });
+  return escalation;
+};
+
+/** Parks a task with an escalation (§6.5). No-op when it is already parked or finished. */
+export const parkTask = (k: Kernel, h: RunHandle, taskId: string, input: ParkInput): void => {
+  const task = h.state.tasks.get(taskId);
+  if (task === undefined || ["parked", "dropped", "done", "merged"].includes(task.status)) return;
+  setTaskStatus(k, h, taskId, "parked", {
+    parkReason: input.reason,
+    ...(input.reason === "risk_rule" && input.riskRule !== undefined
+      ? { riskRule: input.riskRule }
+      : {}),
+  });
+  openTaskEscalation(k, h, taskId, input);
+};
+
+/** Drops a task and everything that depends on it (the escalation listed them in `blocks`). */
+export const dropTask = (k: Kernel, h: RunHandle, taskId: string): void => {
+  for (const id of [taskId, ...transitiveDependents(taskId, h.state.tasks.values())]) {
+    const task = h.state.tasks.get(id);
+    if (task !== undefined && !["dropped", "done", "merged"].includes(task.status)) {
+      setTaskStatus(k, h, id, "dropped");
+    }
+  }
+};
+
+/** Where a parked task resumes, by why it parked and what the human chose. */
+const resumeTarget = (
+  h: RunHandle,
+  taskId: string,
+  reason: ParkReason,
+  effect: string,
+): TaskStatus => {
+  const checkpoint = h.state.checkpoints.get(taskId) ?? "fixing";
+  if (reason === "cap" || reason === "stuck") {
+    if (effect === "waive") {
+      const open = taskFindings(h.state, taskId).filter((f) => f.status === "open");
+      if (open.length > 0) return "fixing";
+      // Nothing left open: the last built head goes to the merge queue; a task that never built
+      // (e.g. stuck in QA's base check) retries from its checkpoint.
+      return lastBuilt(h.state, taskId)?.head === undefined ? checkpoint : "built";
+    }
+    // A hint goes to the role that got stuck: a task parked before QA's tests were accepted
+    // (QA author failed, or its tests never failed on the base) resumes at `ready`, so QA author
+    // runs again with the hint; the Engineer gets it only once tests exist.
+    return checkpoint === "ready" ? "ready" : "fixing";
+  }
+  if (reason === "risk_rule" && effect === "hint") return "fixing";
+  // A question or conflict found while verifying: the Engineer continues with the answer.
+  if (
+    checkpoint === "verifying" &&
+    ["spec_conflict", "blocked", "spec_question"].includes(reason)
+  ) {
+    return "fixing";
+  }
+  return checkpoint;
+};
+
+/** Waives every open finding of a task, each with an expiring human waiver (§6.5). */
+const waiveFindings = (
+  k: Kernel,
+  h: RunHandle,
+  taskId: string,
+  reason: string,
+  expiresAt: string,
+): void => {
+  for (const finding of taskFindings(h.state, taskId)) {
+    if (finding.status !== "open") continue;
+    k.emit(h, {
+      type: "finding.status_changed",
+      actor: "human",
+      task: taskId,
+      data: {
+        fingerprint: finding.fingerprint,
+        from: "open",
+        to: "waived",
+        waiver: { by: "human", reason, expires_at: expiresAt },
+      },
+    });
+  }
+};
+
+const originalBudget = (h: RunHandle, taskId: string): number => {
+  const created = h.state.events.find((e) => e.type === "task.created" && e.task === taskId);
+  if (created?.type !== "task.created") return h.state.tasks.get(taskId)?.budget_usd ?? 0;
+  return readEventData(created as typeof created & { type: "task.created" }).task.budget_usd;
+};
+
+/**
+ * Applies the human's answer (§6.5 typical answers) after `escalation.answered` was recorded:
+ * waive, hint, retry, clarify, raise the budget (≤ 2×), drop, re-plan (drops the task; the
+ * re-plan itself is a front-half step), or decide a change request.
+ */
+export const applyAnswer = (
+  k: Kernel,
+  h: RunHandle,
+  escalation: Escalation,
+  answer: EscalationAnswer,
+): void => {
+  const option = escalation.options.find((o) => o.id === answer.option);
+  if (option === undefined)
+    throw new EngineError("invalid", `option ${answer.option} is not offered`);
+  const taskId = escalation.task;
+  const task = taskId === undefined ? undefined : h.state.tasks.get(taskId);
+  if (
+    option.effect === "reject_change" &&
+    escalation.reason === "change_request" &&
+    escalation.raised_by === "architect" &&
+    taskId !== undefined
+  ) {
+    // the Architect's ADR for a task triaged `changes` was rejected: the task must not build on
+    // it (§8.4; AD-8 rule 1). It parks; answering the park triages it again with the answer.
+    parkTask(k, h, taskId, {
+      reason: "blocked",
+      detail:
+        `you rejected the architecture change ${taskId} needs (${escalation.id}), so it does not start on it. Clarify how ${taskId} should proceed (the Architect triages it again with your answer), or drop it`.slice(
+          0,
+          2000,
+        ),
+      evidence: escalation.evidence,
+    });
+    return;
+  }
+  if (option.effect === "approve_change" || option.effect === "reject_change") return;
+  if (taskId === undefined || task === undefined) return;
+  if (option.effect === "drop" || option.effect === "replan") {
+    dropTask(k, h, taskId);
+    return;
+  }
+  if (option.effect === "raise_budget" && option.budget_factor !== undefined) {
+    const budget = usd(
+      raisedBudget(originalBudget(h, taskId), task.budget_usd, option.budget_factor),
+    );
+    k.emit(h, {
+      type: "budget.updated",
+      actor: "human",
+      task: taskId,
+      data: { scope: "task", budget_usd: budget, spent_usd: task.spent_usd },
+    });
+  }
+  if (option.effect === "waive" && option.waiver_expires_at !== undefined) {
+    waiveFindings(k, h, taskId, answer.text ?? option.label, option.waiver_expires_at);
+  }
+  if (task.status !== "parked") return;
+  if (escalation.reason === "spec_question") return;
+  const target = resumeTarget(h, taskId, escalation.reason, option.effect);
+  setTaskStatus(k, h, taskId, target);
+  // All clear (§6.3 step 10): a built task always continues into the merge queue.
+  if (target === "built") setTaskStatus(k, h, taskId, "queued");
+};

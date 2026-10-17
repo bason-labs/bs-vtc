@@ -1,0 +1,134 @@
+import { describe, expect, it } from "vitest";
+import {
+  AutoKindSchema,
+  AutomationReportSchema,
+  AutomationSkipReasonSchema,
+  EvidencePartialReasonSchema,
+  type AutomationReport,
+} from "@vtc/shared";
+import {
+  AUTO_KIND_LABELS,
+  automationView,
+  PARTIAL_EVIDENCE_REASONS,
+  SKIP_REASONS,
+} from "@/lib/automation";
+import { readFixture } from "../fixtures";
+
+/** Engine core's golden `GET /api/automation`: a draft with complete evidence, a merged PR and
+ * the error, paused, privacy and rate-limit skips. */
+const report = (): AutomationReport => AutomationReportSchema.parse(readFixture("automation"));
+
+describe("automationView (D-ca, AD-27 rule 7)", () => {
+  it("says what is on, where upstream reports go and how evidence is hosted", () => {
+    const view = automationView(report());
+    expect(view.switches).toEqual([
+      { id: "issues", label: "Issues", on: true },
+      { id: "prs", label: "Pull requests", on: true },
+      { id: "upstream", label: "Reports to bason-labs/bs-vtc", on: false },
+    ]);
+    expect(view.off).toBe(false);
+    expect(view.hosting).toBe("committed to the orphan vtc-evidence branch");
+    expect(view.notes).toEqual(report().notes);
+  });
+
+  it("is off, with its notes, when neither issues nor PRs are on", () => {
+    const view = automationView({
+      ...report(),
+      issues: false,
+      prs: false,
+      notes: ["this project has no GitHub remote"],
+    });
+    expect(view.off).toBe(true);
+    expect(view.notes).toEqual(["this project has no GitHub remote"]);
+  });
+
+  it("lists items newest first with their issue, PR, state and evidence", () => {
+    const { items } = automationView(report());
+    expect(items.map((i) => i.last)).toEqual([...items.map((i) => i.last)].sort().reverse());
+    const ci = items.find((i) => i.kind === "Post-merge CI failure")!;
+    expect(ci.target).toBe("This project · acme/invoices");
+    expect(ci.issue).toMatchObject({
+      label: "Issue #12",
+      href: "https://github.com/acme/invoices/issues/12",
+      state: { label: "closed" },
+    });
+    expect(ci.pr).toMatchObject({
+      label: "PR #13",
+      href: "https://github.com/acme/invoices/pull/13",
+      state: { label: "merged" },
+      evidence: { label: "evidence complete", tone: "ok" },
+    });
+    const draft = items.find((i) => i.pr?.state.label === "draft")!;
+    expect(draft.target).toBe("VTC · bason-labs/bs-vtc");
+    expect(draft.pr?.evidence).toMatchObject({ label: "evidence complete", tone: "ok" });
+    const lookback = items.find((i) => i.kind === "Lookback prompt change")!;
+    expect(lookback.target).toBe("VTC · bason-labs/bs-vtc");
+    expect(lookback.issue).toBeNull();
+    expect(lookback.pr?.evidence).toMatchObject({ label: "evidence partial", tone: "warn" });
+    const merged = items.find((i) => i.pr?.state.label === "merged");
+    expect(merged?.pr?.state.tone).toBe("ok");
+    const issueOnly = items.find((i) => i.pr === null);
+    expect(issueOnly?.issue?.state.label).toBe("closed");
+  });
+
+  it("says why a PR's evidence is partial when the engine knows (AutomationItem.pr.partial_reason)", () => {
+    const base = report();
+    const withPr = base.items.find((i) => i.pr !== null)!;
+    const view = (pr: Partial<NonNullable<typeof withPr.pr>>) =>
+      automationView({ ...base, items: [{ ...withPr, pr: { ...withPr.pr!, ...pr } }] }).items[0]
+        ?.pr;
+    const partial = view({ evidence: "partial", partial_reason: "base_build_failed" });
+    expect(partial?.evidence).toMatchObject({ label: "evidence partial", tone: "warn" });
+    expect(partial?.partialReason).toBe(PARTIAL_EVIDENCE_REASONS.base_build_failed);
+    expect(view({ evidence: "partial", partial_reason: undefined })?.partialReason).toBeNull();
+    expect(view({ evidence: "complete", partial_reason: undefined })?.partialReason).toBeNull();
+  });
+
+  it("never links anything but http(s)", () => {
+    const base = report();
+    const [first] = base.items;
+    const view = automationView({
+      ...base,
+      items: [{ ...first!, issue: { number: 7, url: "javascript:alert(1)", state: "open" } }],
+    });
+    expect(view.items[0]?.issue?.href).toBeNull();
+  });
+
+  it("lists the latest skips newest first, each with its reason", () => {
+    const { skipped } = automationView(report());
+    expect(skipped.map((s) => s.at)).toEqual([...skipped.map((s) => s.at)].sort().reverse());
+    expect(skipped[0]).toMatchObject({ reason: SKIP_REASONS.error });
+    expect(skipped.map((s) => s.reason)).toEqual(
+      expect.arrayContaining([SKIP_REASONS.paused, SKIP_REASONS.privacy, SKIP_REASONS.rate_limit]),
+    );
+    expect(skipped.every((s) => s.detail.length > 0)).toBe(true);
+  });
+
+  it("names every kind, skip reason and partial-evidence reason", () => {
+    for (const k of AutoKindSchema.options) expect(AUTO_KIND_LABELS[k]).not.toBe("");
+    for (const r of AutomationSkipReasonSchema.options) expect(SKIP_REASONS[r]).not.toBe("");
+    for (const r of EvidencePartialReasonSchema.options)
+      expect(PARTIAL_EVIDENCE_REASONS[r]).not.toBe("");
+  });
+
+  it("says an action failed with an error, with the redacted detail (contracts 5.4.0)", () => {
+    const { skipped } = automationView({
+      ...report(),
+      skipped: [
+        {
+          at: "2026-10-15T08:00:00.000Z",
+          reason: "error",
+          kind: "ci_failure",
+          detail: "gh pr create: HTTP 502",
+        },
+      ],
+    });
+    expect(skipped).toEqual([
+      expect.objectContaining({
+        reason: "it failed with an error (the detail says which)",
+        kind: "Post-merge CI failure",
+        detail: "gh pr create: HTTP 502",
+      }),
+    ]);
+  });
+});

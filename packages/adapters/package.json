@@ -1,0 +1,32 @@
+{
+  "name": "@vtc/adapters",
+  "version": "0.0.0",
+  "private": true,
+  "description": "VTC host adapters (Claude Code, Codex) implementing the HostAdapter interface from @vtc/shared.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "@vtc/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "live:check": "bun --conditions=@vtc/source scripts/live-check.ts",
+    "live:dcl": "bun --conditions=@vtc/source scripts/dcl-check.ts",
+    "live:h15": "bun --conditions=@vtc/source scripts/h15-check.ts"
+  },
+  "dependencies": {
+    "@vtc/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "5.0.4"
+  }
+}

@@ -1,0 +1,1192 @@
+/**
+ * The Automation read model (`GET /api/automation`, `AutomationReport`; D-ca, AD-27 rule 7): what
+ * automation is set to for this project and why not (`automationFor` and its notes), the issues
+ * and PRs VTC opened, from the `upstream.*` events of every run of the repo, and the latest
+ * `automation.skipped`. A pure projection of the logs, so a snapshot (`vtc dashboard`) serves it
+ * the same way.
+ */
+import {
+  AutomationReportSchema,
+  CAPABILITY_SIGNAL_MIN,
+  COMMAND_SHAPE_OTHER,
+  COMMAND_SHAPE_PATH,
+  COMMAND_SHAPE_SUBCOMMAND_PROGRAMS,
+  CommandShapeCountSchema,
+  commandShapeKey,
+  DEFAULT_UPSTREAM_REPO,
+  MissingCapabilitySchema,
+  TOOL_SIGNAL_MIN_TASKS,
+  EVENT_PAYLOAD_SCHEMAS,
+  EVIDENCE_HOSTING_DEFAULT,
+  LOOKBACK_LIMITS,
+  type AutoKind,
+  type AutomationContext,
+  type AutomationDeps,
+  type AutomationItem,
+  type AutomationReport,
+  type AutomationRunRef,
+  type AutomationSettings,
+  type AutoTargetKind,
+  type CommandShape,
+  type GateReport,
+  type HostId,
+  type ParkReason,
+  type Scorecard,
+  type ScorecardMetricId,
+  type StartInput,
+  type VtcEvent,
+} from "@vtc/shared";
+import type { z } from "zod";
+import type { EventDraft } from "./event-log.js";
+import { PARSE_FAILURE_PREFIX, PROJECT_GATES_PARK_PREFIX, type RunState } from "./state.js";
+import { featureHasUi } from "./ui.js";
+
+/** Upper bounds of the report (`AutomationReportSchema`). */
+const MAX_ITEMS = 500;
+const MAX_SKIPPED = 200;
+const MAX_NOTES = 20;
+
+/** The note when no automation wiring is present (`EngineDeps.automation` absent, D-bz). */
+export const AUTOMATION_OFF_NOTE =
+  "automatic issues and PRs are off: this engine was started without automation (run VTC through the vtc cli with gh logged in)";
+
+/** The note of a committed snapshot (`vtc dashboard`): its settings are not known there. */
+export const AUTOMATION_SNAPSHOT_NOTE =
+  "a snapshot shows the automatic issues and PRs its committed run logs record; the project's automation settings are not known in a snapshot";
+
+type Payload<T extends keyof typeof EVENT_PAYLOAD_SCHEMAS> = z.infer<
+  (typeof EVENT_PAYLOAD_SCHEMAS)[T]
+>;
+
+const parse = <T extends keyof typeof EVENT_PAYLOAD_SCHEMAS>(
+  type: T,
+  event: VtcEvent,
+): Payload<T> | null => {
+  const parsed = EVENT_PAYLOAD_SCHEMAS[type].safeParse(event.data);
+  return parsed.success ? (parsed.data as Payload<T>) : null;
+};
+
+const itemKey = (v: { target: { repo: string }; kind: string; fingerprint: string }): string =>
+  `${v.target.repo} ${v.kind} ${v.fingerprint}`;
+
+/**
+ * Pure: the `AutomationReport` of a repo from its runs' events (any order; applied by time) and
+ * the resolved settings (`null`: no automation wiring, everything off with a note).
+ */
+export const automationReportView = (
+  events: readonly VtcEvent[],
+  settings: AutomationSettings | null,
+  offNote: string = AUTOMATION_OFF_NOTE,
+): AutomationReport => {
+  const items = new Map<string, AutomationItem>();
+  const skipped: AutomationReport["skipped"][number][] = [];
+  const ordered = [...events].sort((a, b) =>
+    a.ts === b.ts ? a.seq - b.seq : a.ts < b.ts ? -1 : 1,
+  );
+  const touch = (
+    v: { target: AutomationItem["target"]; kind: AutomationItem["kind"]; fingerprint: string },
+    at: string,
+    change: (item: AutomationItem) => AutomationItem,
+  ): void => {
+    const key = itemKey(v);
+    const item = items.get(key) ?? {
+      target: v.target,
+      kind: v.kind,
+      fingerprint: v.fingerprint,
+      issue: null,
+      pr: null,
+      first_at: at,
+      last_at: at,
+    };
+    items.set(key, { ...change(item), last_at: at });
+  };
+  for (const event of ordered) {
+    switch (event.type) {
+      case "upstream.issue_opened": {
+        const v = parse("upstream.issue_opened", event);
+        if (v !== null)
+          touch(v, event.ts, (item) => ({
+            ...item,
+            issue: { number: v.number, url: v.url, state: "open" },
+          }));
+        break;
+      }
+      case "upstream.issue_updated": {
+        const v = parse("upstream.issue_updated", event);
+        if (v !== null)
+          touch(v, event.ts, (item) => ({
+            ...item,
+            issue: { number: v.number, url: v.url, state: "open" },
+          }));
+        break;
+      }
+      case "upstream.issue_closed": {
+        const v = parse("upstream.issue_closed", event);
+        if (v !== null)
+          touch(v, event.ts, (item) => ({
+            ...item,
+            issue: { number: v.number, url: v.url, state: "closed" },
+            // closed as `completed`: its fix PR merged. The event contract defines `completed`
+            // so (`UPSTREAM_EVENT_PAYLOAD_SCHEMAS["upstream.issue_closed"]`), and the upstream
+            // module may emit it for nothing else; the contract has no merge event of its own
+            ...(v.reason === "completed" && item.pr !== null && item.pr.state !== "closed"
+              ? { pr: { ...item.pr, state: "merged" as const } }
+              : {}),
+          }));
+        break;
+      }
+      case "upstream.pr_opened": {
+        const v = parse("upstream.pr_opened", event);
+        if (v !== null)
+          touch(v, event.ts, (item) => ({
+            ...item,
+            // VTC opens every automatic PR as a draft (D-bw)
+            pr: {
+              number: v.number,
+              url: v.url,
+              state: "draft",
+              evidence: v.evidence,
+              ...(v.partial_reason === undefined ? {} : { partial_reason: v.partial_reason }),
+            },
+          }));
+        break;
+      }
+      case "upstream.pr_closed": {
+        const v = parse("upstream.pr_closed", event);
+        if (v !== null)
+          touch(v, event.ts, (item) => ({
+            ...item,
+            pr: {
+              number: v.number,
+              url: v.url,
+              state: "closed",
+              evidence: item.pr?.evidence ?? "partial",
+              ...(item.pr?.partial_reason === undefined
+                ? {}
+                : { partial_reason: item.pr.partial_reason }),
+            },
+          }));
+        break;
+      }
+      case "automation.skipped": {
+        const v = parse("automation.skipped", event);
+        if (v !== null)
+          skipped.push({
+            at: event.ts,
+            reason: v.reason,
+            ...(v.kind === undefined ? {} : { kind: v.kind }),
+            detail: v.detail,
+          });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  const latest = <T extends { readonly at?: string; readonly last_at?: string }>(
+    list: readonly T[],
+  ): T[] =>
+    [...list].sort((a, b) => {
+      const x = a.last_at ?? a.at ?? "";
+      const y = b.last_at ?? b.at ?? "";
+      return x === y ? 0 : x < y ? 1 : -1;
+    });
+  return AutomationReportSchema.parse({
+    issues: settings?.issues ?? false,
+    prs: settings?.prs ?? false,
+    upstream: settings?.upstream ?? false,
+    upstream_repo: settings?.upstreamRepo ?? DEFAULT_UPSTREAM_REPO,
+    evidence_hosting: settings?.evidenceHosting ?? EVIDENCE_HOSTING_DEFAULT,
+    notes: (settings === null ? [offNote] : settings.notes)
+      .slice(0, MAX_NOTES)
+      .map((n) => n.slice(0, 300)),
+    items: latest([...items.values()]).slice(0, MAX_ITEMS),
+    skipped: latest(skipped).slice(0, MAX_SKIPPED),
+  });
+};
+
+// ------------------------------------------------------------------ triggers
+
+/**
+ * The metric of a `cost` fact: a scorecard metric, or `cost_per_task` (the mean reported cost per
+ * task Lookback's drift compares, D-cr), which is no scorecard metric. Engine core's own type.
+ */
+export type CostFactMetric = ScorecardMetricId | "cost_per_task";
+
+/**
+ * One engine fact that may raise an automatic issue or PR (D-bv; AD-27): the daemon reads it from
+ * the run's events and hands it to the upstream module, which owns the fingerprint, dedupe, caps,
+ * the privacy projection (`UpstreamReport` for an upstream target) and what to raise. A fact holds
+ * what the engine knows; for an `upstream` target the upstream module sends only the allowlisted
+ * projection of it (D-by), never `detail`, `task`, `feature` or paths.
+ */
+export interface AutomationFact {
+  readonly target: AutoTargetKind;
+  readonly kind: AutoKind;
+  /** The run whose log holds the triggering event. */
+  readonly run: string;
+  /** The triggering event's type and time. */
+  readonly source: string;
+  readonly at: string;
+  /** The error class of a VTC defect (`incident.gate_infra`, `adapter.parse_failure`, …). */
+  readonly errorClass?: string;
+  /**
+   * A crash's VTC stack frames, root-relative (`incident.recorded.stack`, `vtcStackFrames`): the
+   * upstream module keeps the top VTC frames, which locate the defect (D-bv (2)).
+   */
+  readonly stack?: string;
+  readonly role?: string;
+  readonly mode?: string;
+  readonly host?: HostId;
+  readonly model?: string;
+  readonly promptSha?: string;
+  readonly task?: string;
+  readonly feature?: string;
+  /** The engine's own text about it (project details; never sent upstream as is). */
+  readonly detail: string;
+  /**
+   * A project problem's stable identity, which the upstream module fingerprints (D-bx dedupe): the
+   * same problem seen again names the same `ruleId`. Project facts only.
+   */
+  readonly ruleId?: string;
+  /** A project issue's title (project details allowed; it stays in the project's repo). */
+  readonly title?: string;
+  /** The project-relative path a project problem cites, when it has one. */
+  readonly path?: string;
+  /**
+   * A cost regression (`kind` `cost`): the metric that worsened, a scorecard metric or Lookback's
+   * `cost_per_task` (a drift, D-cr; spine §5 reading 233).
+   */
+  readonly metric?: CostFactMetric;
+  /** A cost regression: the metric under the baseline version and under the current one. */
+  readonly baseline?: number;
+  readonly current?: number;
+  /** A cost regression: the baseline version's effective prompt SHA (`promptSha` is the current). */
+  readonly baselinePromptSha?: string;
+  /** A Lookback proposal and its replay result (`lookback.replay_finished`). */
+  readonly proposal?: string;
+  readonly replayPath?: string;
+  /**
+   * The SHA-256 of the replay result's bytes as the engine wrote them (`lookback.replay_finished`
+   * `sha256`): the result file is role-writable, so the Lookback PR is built only from bytes
+   * that still hash to it (spine §5 reading 128).
+   */
+  readonly replaySha256?: string;
+  readonly mergeCommit?: string;
+  /**
+   * A security fact (`kind` `security`): the advisory id and the package (name only, never the
+   * lockfile or a path) an osv-scanner finding names (D-bv (4)). The daemon hands it on only when
+   * the project is VTC's own repo: another project's dependencies are not VTC's.
+   */
+  readonly advisory?: { readonly id: string; readonly package: string };
+  /**
+   * A D-cd improvement (`kind` `new_agent`, `tool`, `config`, `capability`): what it is about, in
+   * VTC's vocabulary (a role id, a tool or setting name). The upstream module fingerprints it and
+   * never sends it unless it is VTC's own (`newAgentReportFields`).
+   */
+  readonly subject?: string;
+  /** A D-cd improvement's numbers (failures, escalations). */
+  readonly metrics?: Readonly<Record<string, number>>;
+}
+
+/** `name@version` of an osv-scanner finding's symbol → the package name (scope kept). */
+const advisoryPackage = (symbol: string | undefined): string | undefined => {
+  if (symbol === undefined) return undefined;
+  const at = symbol.lastIndexOf("@");
+  const name = at > 0 ? symbol.slice(0, at) : symbol;
+  return /^(@[a-z0-9._-]+\/)?[a-z0-9._-]{1,214}$/.test(name) ? name : undefined;
+};
+
+/**
+ * Park reasons that wait on the human by design, so VTC raises no issue for them. `blocked` is one:
+ * a role's `exit: blocked` with a question for the human, or the engine refusing an in-session
+ * dispatch on the local setup (the Lead session's sandbox off, Codex in session), which answering
+ * retries; neither is a problem in the app VTC builds (reading 190, D-bx).
+ */
+const HUMAN_PARKS: ReadonlySet<ParkReason> = new Set([
+  "risk_rule",
+  "budget",
+  "change_request",
+  "spec_question",
+  "blocked",
+]);
+
+/** An issue title, cut to fit. */
+const clip = (text: string): string => (text.length > 200 ? `${text.slice(0, 199)}…` : text);
+
+/** A finding's stable identity (its engine fingerprint), the path it cites and its title. */
+const findingIdentity = (finding: {
+  readonly fingerprint: string;
+  readonly category: string;
+  readonly title: string;
+  readonly location: { readonly path?: string | undefined };
+}): Pick<AutomationFact, "ruleId" | "title" | "path"> => ({
+  ruleId: `finding/${finding.fingerprint}`,
+  title: clip(`${finding.category} finding: ${finding.title}`),
+  ...(finding.location.path === undefined ? {} : { path: finding.location.path }),
+});
+
+/**
+ * Pure (D-bv): the automation facts one event of `state` raises. VTC side: an incident
+ * (`gate_infra`, `crash`), a task or feature `gate_infra` park (worktree, merge queue, gate
+ * sandbox or environment, browser pin: VTC's own infrastructure, reading 190 (2)), an adapter
+ * parse failure, a stuck loop and a replay verdict `improve`; project side: a parked task VTC
+ * cannot resolve, a `gate_infra` park on the project's committed `gates.yml`
+ * ({@link PROJECT_GATES_PARK_PREFIX}), a red post-merge CI run, a revert or a Lookback escaped
+ * defect, an out-of-scope finding, and the Final Review leftovers a finished run left open.
+ * A cost regression comes from Lookback's scorecards, not an event ({@link costRegressionFacts}).
+ */
+export const automationFacts = (state: RunState, event: VtcEvent): AutomationFact[] => {
+  const base = { run: state.id, source: event.type, at: event.ts };
+  const roleOf = (actionId: string | undefined): Partial<AutomationFact> => {
+    const run = actionId === undefined ? undefined : state.roleRuns.get(actionId);
+    return run === undefined
+      ? {}
+      : {
+          role: run.role,
+          ...(run.mode === undefined ? {} : { mode: run.mode }),
+          host: run.host,
+          model: run.model,
+          promptSha: run.prompt_sha,
+        };
+  };
+  switch (event.type) {
+    case "incident.recorded": {
+      const v = parse("incident.recorded", event);
+      if (v === null || (v.kind !== "gate_infra" && v.kind !== "crash")) return [];
+      return [
+        {
+          ...base,
+          target: "upstream",
+          kind: "defect",
+          errorClass: `incident.${v.kind}`,
+          ...(v.stack === undefined ? {} : { stack: v.stack }),
+          detail: v.detail,
+        },
+      ];
+    }
+    case "role.failed": {
+      const v = parse("role.failed", event);
+      // only the engine opens a message with the prefix (`reportedFailureMessage`, AD-8)
+      if (v === null || !v.message.startsWith(PARSE_FAILURE_PREFIX)) return [];
+      return [
+        {
+          ...base,
+          ...roleOf(v.action_id),
+          target: "upstream",
+          kind: "defect",
+          errorClass: "adapter.parse_failure",
+          ...(event.task === undefined ? {} : { task: event.task }),
+          detail: v.message,
+        },
+      ];
+    }
+    case "task.status_changed": {
+      const v = parse("task.status_changed", event);
+      if (
+        v?.to !== "parked" ||
+        v.park_reason === undefined ||
+        HUMAN_PARKS.has(v.park_reason) ||
+        // decided by its escalation, which carries the engine's detail (below)
+        v.park_reason === "gate_infra"
+      )
+        return [];
+      const task = event.task ?? "";
+      const known = state.tasks.get(task);
+      const feature = known?.feature;
+      const project: AutomationFact = {
+        ...base,
+        target: "project",
+        kind: "parked",
+        task,
+        ...(feature === undefined ? {} : { feature }),
+        // a task id repeats across runs: the run names the problem
+        ruleId: `parked/${v.park_reason}/${state.id}/${task}`,
+        title: clip(
+          `Task ${task} parked (${v.park_reason})${known === undefined ? "" : `: ${known.title}`}`,
+        ),
+        detail: `task ${task} parked (${v.park_reason}) after round ${String(v.round)}`,
+      };
+      if (v.park_reason !== "stuck") return [project];
+      // a stuck loop is VTC's own defect too, attributed to the role that kept failing
+      const last = [...state.roleRuns.values()]
+        .filter((r) => r.task === task && (r.status === "failed" || r.status === "rejected"))
+        .at(-1);
+      return [
+        project,
+        {
+          ...base,
+          ...roleOf(last?.action_id),
+          target: "upstream",
+          kind: "defect",
+          errorClass: "engine.stuck_loop",
+          task,
+          detail: `a role failed or was rejected repeatedly on task ${task}`,
+        },
+      ];
+    }
+    case "escalation.opened": {
+      // a task or feature `gate_infra` park: VTC's own defect unless the project's gates.yml is
+      // the cause; only the engine opens a `gate_infra` escalation, and it writes its detail
+      const v = parse("escalation.opened", event);
+      const esc = v?.escalation;
+      if (esc?.reason !== "gate_infra") return [];
+      const detail = esc.detail ?? "";
+      const feature =
+        esc.feature ?? (esc.task === undefined ? undefined : state.tasks.get(esc.task)?.feature);
+      const scope = {
+        ...(esc.task === undefined ? {} : { task: esc.task }),
+        ...(feature === undefined ? {} : { feature }),
+      };
+      if (!detail.startsWith(PROJECT_GATES_PARK_PREFIX))
+        return [
+          {
+            ...base,
+            target: "upstream",
+            kind: "defect",
+            errorClass: "incident.gate_infra",
+            ...scope,
+            detail,
+          },
+        ];
+      const subject = esc.task === undefined ? `Feature ${esc.feature ?? ""}` : `Task ${esc.task}`;
+      return [
+        {
+          ...base,
+          target: "project",
+          kind: "parked",
+          ...scope,
+          // the project's gates.yml is one problem per run
+          ruleId: `parked/gates_config/${state.id}`,
+          title: clip(`${subject} parked: the committed gates.yml is missing or not the run's`),
+          detail,
+        },
+      ];
+    }
+    case "lookback.replay_finished": {
+      const v = parse("lookback.replay_finished", event);
+      if (v?.verdict !== "improve") return [];
+      return [
+        {
+          ...base,
+          target: "upstream",
+          kind: "lookback",
+          proposal: v.proposal,
+          replayPath: v.path,
+          ...(v.sha256 === undefined ? {} : { replaySha256: v.sha256 }),
+          detail: `the replay of proposal ${v.proposal} says improve`,
+        },
+      ];
+    }
+    case "feature.post_merge_ci": {
+      const v = parse("feature.post_merge_ci", event);
+      if (v?.status !== "red") return [];
+      return [
+        {
+          ...base,
+          target: "project",
+          kind: "ci_failure",
+          ...(event.feature === undefined ? {} : { feature: event.feature }),
+          mergeCommit: v.merge_commit,
+          ruleId: `post_merge_ci/${v.merge_commit}`,
+          title: `Required checks red after merge ${v.merge_commit.slice(0, 12)}`,
+          detail: `the required checks on the base are red after merge ${v.merge_commit.slice(0, 12)}`,
+        },
+      ];
+    }
+    case "feature.reverted": {
+      const v = parse("feature.reverted", event);
+      if (v === null) return [];
+      return [
+        {
+          ...base,
+          target: "project",
+          kind: "escaped_defect",
+          ...(event.feature === undefined ? {} : { feature: event.feature }),
+          mergeCommit: v.merge_commit,
+          // a revert and Lookback's escaped defect of one merge are one problem
+          ruleId: `escaped_defect/${v.merge_commit}`,
+          title: `Escaped defect in merge ${v.merge_commit.slice(0, 12)}`,
+          detail: v.detail,
+        },
+      ];
+    }
+    case "lookback.escaped_defect": {
+      const v = parse("lookback.escaped_defect", event);
+      if (v === null) return [];
+      return [
+        {
+          ...base,
+          target: "project",
+          kind: "escaped_defect",
+          ...(event.feature === undefined ? {} : { feature: event.feature }),
+          mergeCommit: v.merge_commit,
+          // a revert and Lookback's escaped defect of one merge are one problem
+          ruleId: `escaped_defect/${v.merge_commit}`,
+          title: `Escaped defect in merge ${v.merge_commit.slice(0, 12)}`,
+          detail: `an escaped defect (${v.kind}) of merge ${v.merge_commit.slice(0, 12)}${v.tasks.length === 0 ? "" : ` in ${v.tasks.join(", ")}`}`,
+        },
+      ];
+    }
+    case "finding.recorded": {
+      const v = parse("finding.recorded", event);
+      if (v === null) return [];
+      // D-bv (4): an advisory in the project's dependencies; on VTC's own repo (the bs-vtc
+      // checkout, "VTC builds VTC") those are VTC's dependencies, which the daemon decides
+      const pkg =
+        v.finding.source_name === "osv-scanner" && v.finding.category === "supply_chain"
+          ? advisoryPackage(v.finding.location.symbol)
+          : undefined;
+      const security: AutomationFact[] =
+        pkg === undefined || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(v.finding.rule_id)
+          ? []
+          : [
+              {
+                ...base,
+                target: "upstream",
+                kind: "security",
+                advisory: { id: v.finding.rule_id, package: pkg },
+                detail: `the dependency gate found ${v.finding.rule_id} in ${pkg}`,
+              },
+            ];
+      if (v.finding.route !== "out_of_scope") return security;
+      return [
+        ...security,
+        {
+          ...base,
+          target: "project",
+          kind: "finding",
+          ...(v.finding.task === undefined ? {} : { task: v.finding.task }),
+          ...(v.finding.feature === undefined ? {} : { feature: v.finding.feature }),
+          ...findingIdentity(v.finding),
+          detail: `${v.finding.category} finding outside its task's scope: ${v.finding.title}`,
+        },
+      ];
+    }
+    case "run.finished":
+      // Final Review leftovers: the feature findings the finished run left open or deferred;
+      // and VTC's own config signals (budgets, caps) the run's parks show
+      return [
+        ...configSignalFacts(state, base),
+        ...[...state.findings.values()]
+          .map((r) => r.finding)
+          .filter(
+            (f) =>
+              f.feature !== undefined &&
+              f.task === undefined &&
+              (f.status === "open" || f.status === "deferred"),
+          )
+          .map((f) => ({
+            ...base,
+            target: "project" as const,
+            kind: "final_review" as const,
+            ...(f.feature === undefined ? {} : { feature: f.feature }),
+            ...findingIdentity(f),
+            detail: `a Final Review finding left ${f.status}: ${f.title}`,
+          })),
+      ];
+    default:
+      return [];
+  }
+};
+
+/** A config signal needs this many distinct tasks of a run (as §13's tool promotion counts). */
+export const CONFIG_SIGNAL_MIN_TASKS = 3;
+
+/**
+ * Pure (D-cd "workflow and config improvements"; spine §5 reading 216): VTC's own defaults the
+ * finished run's parks put in question. Three or more tasks of one size parked on their budget
+ * (`budget.task_<size>`: the §11 initial budgets), or three or more tasks parked on their fix-round
+ * cap (`caps.fix_rounds`). The subject and the metric names are VTC's vocabulary and the values
+ * counts, so the upstream report carries nothing of the project.
+ */
+export const configSignalFacts = (
+  state: RunState,
+  base: Pick<AutomationFact, "run" | "source" | "at">,
+): AutomationFact[] => {
+  const parked = new Map<string, Set<string>>();
+  for (const event of state.events) {
+    if (event.type !== "task.status_changed" || event.task === undefined) continue;
+    const data = event.data as { to?: unknown; park_reason?: unknown };
+    if (data.to !== "parked" || (data.park_reason !== "budget" && data.park_reason !== "cap"))
+      continue;
+    const set = parked.get(data.park_reason) ?? new Set<string>();
+    set.add(event.task);
+    parked.set(data.park_reason, set);
+  }
+  const sizeOf = (task: string): string | undefined => state.tasks.get(task)?.size;
+  const out: AutomationFact[] = [];
+  for (const size of ["S", "M", "L"] as const) {
+    const tasks = [...(parked.get("budget") ?? [])].filter((t) => sizeOf(t) === size);
+    if (tasks.length < CONFIG_SIGNAL_MIN_TASKS) continue;
+    const s = size.toLowerCase();
+    out.push({
+      ...base,
+      target: "upstream",
+      kind: "config",
+      subject: `budget.task_${s}`,
+      metrics: {
+        [`budget.${s}.parked_tasks`]: tasks.length,
+        [`budget.${s}.tasks`]: [...state.tasks.keys()].filter((t) => sizeOf(t) === size).length,
+      },
+      detail: `${String(tasks.length)} ${size} tasks parked on their budget in one run`,
+    });
+  }
+  const capped = parked.get("cap")?.size ?? 0;
+  if (capped >= CONFIG_SIGNAL_MIN_TASKS)
+    out.push({
+      ...base,
+      target: "upstream",
+      kind: "config",
+      subject: "caps.fix_rounds",
+      metrics: { "caps.parked_tasks": capped, "caps.tasks": state.tasks.size },
+      detail: `${String(capped)} tasks parked on their fix-round cap in one run`,
+    });
+  return out;
+};
+
+// ------------------------------------------------------ tool and capability (D-cs)
+
+/**
+ * Programs whose word after the program is one of the program's own fixed subcommands (`git
+ * rebase`, `docker compose`), never a name of the project's. For any other program that word may be
+ * a host, a database, a script or a package of the project (`ssh prod-db`, `psql acme_orders`,
+ * `pnpm acme-migrate`), so an upstream tool fact leaves it out (`toolShapeUpstreamKey`).
+ */
+export const TOOL_SUBCOMMAND_PROGRAMS: ReadonlySet<string> = new Set([
+  "brew",
+  "cargo",
+  "docker",
+  "gh",
+  "git",
+  "go",
+  "helm",
+  "kubectl",
+  "npm",
+  "podman",
+  "terraform",
+]);
+
+/**
+ * The programs whose name a `tool` fact may send to VTC's repo (D-by; spine §5 reading 232): VTC's
+ * own vocabulary of common developer tools, the shared subcommand programs among them. Any other
+ * `program` stays in the project's run log: it may be the project's own script or CLI, or a body
+ * line a log recorded before contracts 5.6.0 read as a command. A script named by a path
+ * (`<path>`) or a word the lexer could not name (`<other>`) carries no text and is kept.
+ */
+export const TOOL_UPSTREAM_PROGRAMS: ReadonlySet<string> = new Set([
+  ...COMMAND_SHAPE_SUBCOMMAND_PROGRAMS,
+  COMMAND_SHAPE_PATH,
+  COMMAND_SHAPE_OTHER,
+  ...[
+    "awk",
+    "base64",
+    "basename",
+    "bash",
+    "bundle",
+    "bunx",
+    "cat",
+    "cd",
+    "chmod",
+    "column",
+    "composer",
+    "cp",
+    "curl",
+    "cut",
+    "dart",
+    "date",
+    "diff",
+    "dig",
+    "dirname",
+    "du",
+    "echo",
+    "eslint",
+    "export",
+    "ffmpeg",
+    "file",
+    "find",
+    "flutter",
+    "gem",
+    "gradle",
+    "grep",
+    "gzip",
+    "head",
+    "java",
+    "javac",
+    "jest",
+    "jq",
+    "kill",
+    "less",
+    "ln",
+    "ls",
+    "lsof",
+    "make",
+    "mkdir",
+    "mv",
+    "mvn",
+    "mypy",
+    "mysql",
+    "nc",
+    "node",
+    "npx",
+    "openssl",
+    "patch",
+    "perl",
+    "php",
+    "pnpx",
+    "printf",
+    "prettier",
+    "ps",
+    "psql",
+    "pwd",
+    "pytest",
+    "python",
+    "python3",
+    "readlink",
+    "realpath",
+    "redis-cli",
+    "rg",
+    "rm",
+    "rmdir",
+    "rsync",
+    "ruby",
+    "ruff",
+    "scp",
+    "sed",
+    "seq",
+    "sh",
+    "sha256sum",
+    "shasum",
+    "sleep",
+    "sort",
+    "source",
+    "sqlite3",
+    "ssh",
+    "stat",
+    "swift",
+    "tail",
+    "tar",
+    "tee",
+    "test",
+    "timeout",
+    "touch",
+    "tr",
+    "tree",
+    "tsc",
+    "uname",
+    "uniq",
+    "unzip",
+    "vitest",
+    "wc",
+    "wget",
+    "which",
+    "xargs",
+    "xcodebuild",
+    "yq",
+    "zip",
+    "zsh",
+  ],
+]);
+
+/**
+ * Pure (D-cs): the key of a shape as it may leave the machine, or `null` when it may not: a
+ * program outside {@link TOOL_UPSTREAM_PROGRAMS} stays local; otherwise `commandShapeKey` with the
+ * subcommand kept only for a {@link TOOL_SUBCOMMAND_PROGRAMS} program (`-` otherwise), so a
+ * project's host or database name never reaches VTC's repo (reading 221 (1): the shape key and the
+ * task count only). The flag hash holds flag names only (contracts 5.6.0: no attached value). The
+ * run's log keeps the full shape.
+ */
+export const toolShapeUpstreamKey = (shape: CommandShape): string | null =>
+  TOOL_UPSTREAM_PROGRAMS.has(shape.program)
+    ? commandShapeKey(
+        TOOL_SUBCOMMAND_PROGRAMS.has(shape.program)
+          ? shape
+          : { program: shape.program, flags: shape.flags },
+      )
+    : null;
+
+/** The role-run ends that record the run's shell calls (`command_shapes`). */
+const SHAPED_EVENTS: ReadonlySet<string> = new Set([
+  "role.submitted",
+  "role.rejected",
+  "role.failed",
+]);
+
+/**
+ * Pure (D-cs "tool signal"; spine §5 reading 221 (1), spec §13 tool promotion): a shell command
+ * shape (`command_shapes` of `role.submitted`, and since 5.7.0 of `role.rejected` and `role.failed`
+ * too, reading 247(9); keyed by {@link toolShapeUpstreamKey}) the roles ran in
+ * `TOOL_SIGNAL_MIN_TASKS` or more distinct tasks across the repo's runs raises one `tool` fact. The
+ * subject is that key (a program, a subcommand of a known multi-command program and a flag-name
+ * hash: never a value, a path or a name of the project) and the only number the task count, so the
+ * report carries nothing of the project.
+ */
+export const toolSignalFacts = (
+  states: readonly Pick<RunState, "id" | "events">[],
+  base: Pick<AutomationFact, "run" | "source" | "at">,
+): AutomationFact[] => {
+  const tasks = new Map<string, Set<string>>();
+  for (const state of states)
+    for (const event of state.events) {
+      if (!SHAPED_EVENTS.has(event.type) || event.task === undefined) continue;
+      const shapes = (event.data as { command_shapes?: unknown }).command_shapes;
+      if (!Array.isArray(shapes)) continue;
+      for (const raw of shapes) {
+        const shape = CommandShapeCountSchema.safeParse(raw);
+        if (!shape.success) continue;
+        const key = toolShapeUpstreamKey(shape.data);
+        if (key === null) continue;
+        const set = tasks.get(key) ?? new Set<string>();
+        set.add(`${state.id}:${event.task}`);
+        tasks.set(key, set);
+      }
+    }
+  return [...tasks]
+    .filter(([, set]) => set.size >= TOOL_SIGNAL_MIN_TASKS)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, set]) => ({
+      ...base,
+      target: "upstream" as const,
+      kind: "tool" as const,
+      subject: key,
+      metrics: { "tool.tasks": set.size },
+      detail: `the roles ran \`${key}\` in ${String(set.size)} tasks: a candidate engine tool (§13)`,
+    }));
+};
+
+/**
+ * Pure (D-cs "capability signal"; spine §5 reading 221 (2)): a `missing_capability` slug the roles
+ * (`escalation.opened`, from `Question.missing_capability`) or the Lead (`escalation.answered`)
+ * named on `CAPABILITY_SIGNAL_MIN` or more escalations across the repo's runs raises one
+ * `capability` fact: the slug and the count only (an escalation naming it twice counts once); the
+ * reason text stays in the project's log.
+ */
+export const capabilitySignalFacts = (
+  states: readonly Pick<RunState, "id" | "events">[],
+  base: Pick<AutomationFact, "run" | "source" | "at">,
+): AutomationFact[] => {
+  const seen = new Map<string, Set<string>>();
+  const count = (slug: unknown, escalation: string): void => {
+    const parsed = MissingCapabilitySchema.shape.slug.safeParse(slug);
+    if (!parsed.success) return;
+    const set = seen.get(parsed.data) ?? new Set<string>();
+    set.add(escalation);
+    seen.set(parsed.data, set);
+  };
+  for (const state of states)
+    for (const event of state.events) {
+      if (event.type === "escalation.opened") {
+        const e = (
+          event.data as { escalation?: { id?: string; missing_capability?: { slug?: unknown } } }
+        ).escalation;
+        if (e?.id !== undefined) count(e.missing_capability?.slug, `${state.id}:${e.id}`);
+      } else if (event.type === "escalation.answered") {
+        const data = event.data as {
+          escalation?: string;
+          answer?: { missing_capability?: { slug?: unknown } };
+        };
+        if (data.escalation !== undefined)
+          count(data.answer?.missing_capability?.slug, `${state.id}:${data.escalation}`);
+      }
+    }
+  return [...seen]
+    .filter(([, set]) => set.size >= CAPABILITY_SIGNAL_MIN)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([slug, set]) => ({
+      ...base,
+      target: "upstream" as const,
+      kind: "capability" as const,
+      subject: slug,
+      metrics: { "capability.escalations": set.size },
+      detail: `${String(set.size)} escalations named the missing capability ${slug}`,
+    }));
+};
+
+// ------------------------------------------------------------ cost regression
+
+/** The scorecard metrics a cost regression is judged on (D-bv: quality per token, cost per task). */
+const COST_METRICS: readonly ScorecardMetricId[] = [
+  "tokens_per_success",
+  "escalations_per_100",
+  "cap_hits_per_100",
+];
+
+/**
+ * Pure: whether `current` is worse than `baseline` beyond `LOOKBACK_LIMITS` (the canary rollback
+ * limits, §13 step 6): tokens per success up more than `maxTokenRisePct`, or the escalation or
+ * cap-hit rate above 0 and at `rollbackRateRatio` times its baseline or more, a zero baseline
+ * included (reading 230(5)).
+ */
+export const costWorsened = (
+  metric: ScorecardMetricId,
+  baseline: number,
+  current: number,
+): boolean => {
+  if (metric === "tokens_per_success")
+    return baseline > 0 && current > baseline * (1 + LOOKBACK_LIMITS.maxTokenRisePct / 100);
+  if (metric === "escalations_per_100" || metric === "cap_hits_per_100")
+    // reading 230(5): a zero baseline counts once the current rate is above 0
+    return current > 0 && current >= baseline * LOOKBACK_LIMITS.rollbackRateRatio;
+  return false;
+};
+
+/**
+ * Pure (D-bv "cost regression"): for each role, mode and host, its newest prompt version (by the
+ * start of its scorecard window) against the version before it; one `cost` fact per metric that
+ * worsened beyond `LOOKBACK_LIMITS`. A metric without enough data (`value` null) on either side is
+ * not compared. The upstream module owns the fingerprint, the dedupe and the report.
+ */
+export const costRegressionFacts = (
+  cards: readonly Scorecard[],
+  meta: { readonly run: string; readonly at: string },
+): AutomationFact[] => {
+  const groups = new Map<string, Scorecard[]>();
+  for (const card of cards) {
+    const p = card.prompt;
+    const key = `${p.role}\u0000${p.mode ?? ""}\u0000${p.host}`;
+    groups.set(key, [...(groups.get(key) ?? []), card]);
+  }
+  const out: AutomationFact[] = [];
+  for (const group of groups.values()) {
+    const versions = [...group].sort((a, b) =>
+      a.window.from === b.window.from ? 0 : a.window.from < b.window.from ? -1 : 1,
+    );
+    const current = versions.at(-1);
+    const baseline = [...versions]
+      .reverse()
+      .find((c) => c.prompt.effective_sha256 !== current?.prompt.effective_sha256);
+    if (current === undefined || baseline === undefined) continue;
+    for (const metric of COST_METRICS) {
+      const before = baseline.metrics[metric]?.value;
+      const now = current.metrics[metric]?.value;
+      if (before === undefined || before === null || now === undefined || now === null) continue;
+      if (!costWorsened(metric, before, now)) continue;
+      const p = current.prompt;
+      out.push({
+        target: "upstream",
+        kind: "cost",
+        run: meta.run,
+        source: "lookback.scorecards",
+        at: meta.at,
+        role: p.role,
+        ...(p.mode === undefined ? {} : { mode: p.mode }),
+        host: p.host,
+        promptSha: p.effective_sha256,
+        baselinePromptSha: baseline.prompt.effective_sha256,
+        metric,
+        baseline: before,
+        current: now,
+        detail: `${p.role} on ${p.host}: ${metric} went from ${String(before)} to ${String(now)} against its previous prompt version`,
+      });
+    }
+  }
+  return out;
+};
+
+// ------------------------------------------------- an automatic run's release
+
+/**
+ * An automatic run's release (AD-27 rules 2 and 6, H-8): the head its release pushed to its
+ * `vtc/auto` branch, which the upstream module opens the draft PR for (`vtc:auto` and the kind's
+ * label, evidence first, marked ready on the Spec Verifier's pass). The engine opens no PR for an
+ * automatic run itself (`pushFeature`).
+ */
+export interface AutomaticRelease {
+  readonly run: string;
+  readonly feature: string;
+  /** The run's issue (`run.started.automation`). */
+  readonly automation: AutomationRunRef;
+  /** The commit the release pushed to `autoBranchName(kind, fingerprint)`. */
+  readonly head: string;
+  /**
+   * The run's cut point (D-ct; spine §5 reading 231): the commit the feature's integration branch
+   * was cut from, its first task's `task.workspace_assigned.baseline_revision`. The UI evidence
+   * renders it as the before side; never the default branch's tip, which may have moved on.
+   * Absent when no task of the feature got a workspace.
+   */
+  readonly base?: string;
+  /** The feature's title and the run's request (its issue). */
+  readonly title: string;
+  readonly request: string;
+  /** The feature's tasks that were not dropped, with their risk tags. */
+  readonly tasks: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly risk_tags: readonly string[];
+  }[];
+  /** Final Review step 3 (`pending`: no Spec-Verifier result, so the PR stays a draft). */
+  readonly specVerifier: "pass" | "fail" | "pending";
+  /** The Final Review results, step by step. */
+  readonly steps: readonly { readonly step: number; readonly status: string }[];
+  /** UI work adds before/after evidence; anything else the gate report (D-ce). */
+  readonly change: "ui" | "non_ui";
+  /** The feature's last Final Review gate run. */
+  readonly gateReport?: GateReport;
+  /** The PR the module already opened for this issue in this run (`upstream.pr_opened`). */
+  readonly pr?: number;
+  readonly startedAt: string;
+  readonly at: string;
+}
+
+/**
+ * Pure: the release `event` is, or `null`. A release is a `branch.pushed` of an automatic run's
+ * feature after the feature last passed Final Review (`ready_to_ship`), while it still is; the
+ * pushes after each merge come before that and are none. Reads `state` as of `event` or later.
+ */
+export const automaticReleaseOf = (state: RunState, event: VtcEvent): AutomaticRelease | null => {
+  const automation = state.automation;
+  if (automation === null || event.type !== "branch.pushed" || event.feature === undefined)
+    return null;
+  const pushed = parse("branch.pushed", event);
+  const feature = state.features.get(event.feature);
+  if (pushed === null || feature?.status !== "ready_to_ship") return null;
+  const passed = state.events.findLast(
+    (e) =>
+      e.type === "feature.status_changed" &&
+      e.feature === feature.id &&
+      (e.data as { to?: unknown }).to === "ready_to_ship",
+  );
+  if (passed === undefined || passed.seq > event.seq) return null;
+  const steps = new Map<number, string>();
+  for (const e of state.events) {
+    if (e.type !== "final_review.step_finished" || e.feature !== feature.id || e.seq > event.seq)
+      continue;
+    const step = parse("final_review.step_finished", e);
+    if (step !== null) steps.set(step.step, step.status);
+  }
+  const verifier = steps.get(3);
+  let pr: number | undefined;
+  for (const e of state.events) {
+    if (e.type !== "upstream.pr_opened") continue;
+    const v = parse("upstream.pr_opened", e);
+    if (
+      v !== null &&
+      v.fingerprint === automation.fingerprint &&
+      v.target.kind === automation.target.kind &&
+      v.target.repo === automation.target.repo
+    )
+      pr = v.number;
+  }
+  const tasks = feature.tasks.flatMap((id) => {
+    const task = state.tasks.get(id);
+    return task === undefined || task.status === "dropped"
+      ? []
+      : [{ id: task.id, title: task.title, risk_tags: task.risk_tags }];
+  });
+  // the integration branch is cut at its first task's workspace and only merged into after, so
+  // the first baseline of the feature's tasks is the cut point
+  const members = new Set(feature.tasks);
+  const cut = state.events.find(
+    (e) =>
+      e.type === "task.workspace_assigned" &&
+      e.task !== undefined &&
+      members.has(e.task) &&
+      e.seq <= event.seq,
+  );
+  const base =
+    cut === undefined ? undefined : parse("task.workspace_assigned", cut)?.baseline_revision;
+  const gateReport = state.gateReports
+    .filter(
+      (r) =>
+        r.seq < event.seq && r.report.reason === "final_review" && r.report.feature === feature.id,
+    )
+    .at(-1)?.report;
+  return {
+    run: state.id,
+    feature: feature.id,
+    automation,
+    head: pushed.commit,
+    ...(base === undefined ? {} : { base }),
+    title: feature.title,
+    request: state.request,
+    tasks,
+    specVerifier: verifier === "pass" ? "pass" : verifier === "fail" ? "fail" : "pending",
+    steps: [...steps].sort(([a], [b]) => a - b).map(([step, status]) => ({ step, status })),
+    change: featureHasUi(state, feature.id) ? "ui" : "non_ui",
+    ...(gateReport === undefined ? {} : { gateReport }),
+    ...(pr === undefined ? {} : { pr }),
+    startedAt: state.run.started_at,
+    at: event.ts,
+  };
+};
+
+// ------------------------------------------------------------- daily summary
+
+/** The `upstream.*` and `automation.skipped` events (D-ca). */
+export const isAutomationEvent = (type: string): boolean =>
+  type.startsWith("upstream.") || type === "automation.skipped";
+
+/**
+ * Pure (D-ca, AD-27 rule 7): the Lead's daily summary of what automation did in `events` (already
+ * the window to summarise): issues and PRs opened, updated and closed, with links, and what was
+ * skipped by reason. `null` when nothing happened.
+ */
+export const automationDailySummary = (events: readonly VtcEvent[], day: string): string | null => {
+  const of = (type: string): VtcEvent[] => events.filter((e) => e.type === type);
+  const links = (type: "upstream.issue_opened" | "upstream.pr_opened"): string[] =>
+    of(type).flatMap((e) => {
+      const v = parse(type, e);
+      return v === null ? [] : [`#${String(v.number)} ${v.url}`];
+    });
+  const issues = links("upstream.issue_opened");
+  const prs = links("upstream.pr_opened");
+  const updated = of("upstream.issue_updated").length;
+  const closed = of("upstream.issue_closed").length + of("upstream.pr_closed").length;
+  const reasons = new Map<string, number>();
+  for (const e of of("automation.skipped")) {
+    const v = parse("automation.skipped", e);
+    if (v !== null) reasons.set(v.reason, (reasons.get(v.reason) ?? 0) + 1);
+  }
+  if (issues.length + prs.length + updated + closed + reasons.size === 0) return null;
+  const parts = [
+    `Automation on ${day} (UTC): ${String(issues.length)} issue(s) and ${String(prs.length)} draft PR(s) opened, ${String(updated)} issue update(s), ${String(closed)} closed.`,
+    ...(issues.length === 0 ? [] : [`Issues: ${issues.slice(0, 5).join("; ")}.`]),
+    ...(prs.length === 0 ? [] : [`PRs for your review: ${prs.slice(0, 5).join("; ")}.`]),
+    ...(reasons.size === 0
+      ? []
+      : [`Skipped: ${[...reasons].map(([reason, n]) => `${reason} ${String(n)}`).join(", ")}.`]),
+  ];
+  return parts.join(" ").slice(0, 2000);
+};
+
+// ------------------------------------------------------------------- the seam
+
+/** What the daemon hands the upstream module (AD-27 rule 8; D-bu): engine facts in, events out. */
+export interface UpstreamWiringDeps {
+  readonly projectRoot: string;
+  readonly vtcHome: string;
+  /** The cli's `gh`, plumbing and evidence seams and the user's upstream settings. */
+  readonly automation: AutomationDeps;
+  /** The project's resolved settings now (`automationFor`, with `vtc pause`). */
+  readonly settings: () => AutomationSettings;
+  /** What the settings were resolved from now: the GitHub remote, the gh login, `vtc pause`. */
+  readonly context: () => AutomationContext;
+  /**
+   * The only way the module records what it did: an `upstream.*` or `automation.skipped` event,
+   * in `run`'s log (absent: the active run, else the next run to start).
+   */
+  readonly emit: (draft: EventDraft, run?: string) => void;
+  /**
+   * Starts an automatic run from an issue (a fixable item, D-bv, D-cd; AD-27 rule 2): queued until
+   * no run of the repo is open and automation is not paused, one run per issue.
+   */
+  readonly startRun: (input: StartInput, issue: AutomationRunRef) => Promise<void>;
+  readonly now: () => Date;
+}
+
+/** The upstream module as the daemon drives it. */
+export interface UpstreamWiring {
+  /** One fact that may raise an issue or PR; the module decides (dedupe, caps, privacy). */
+  onFact(fact: AutomationFact): Promise<void>;
+  /**
+   * An automatic run released its work to its `vtc/auto` branch: the module opens its draft PR
+   * (or marks the one it opened ready) from the pushed head, with evidence (AD-27 rules 2 and 6).
+   */
+  onAutomaticRelease?(release: AutomaticRelease): Promise<void>;
+  /** The periodic sweep (auto-close of quiet issues, the write queue); optional. */
+  sweep?(): Promise<void>;
+  close?(): Promise<void>;
+}
+
+/** The upstream module's factory (`upstream.createUpstream` at the round-4 merge). */
+export type CreateUpstream = (deps: UpstreamWiringDeps) => UpstreamWiring;

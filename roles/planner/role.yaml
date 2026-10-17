@@ -1,0 +1,35 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   project-management/project-manager-senior.md (base, heavy rewrite: quote the spec, no gold
+#     plating, small tasks with acceptance criteria; Laravel stack and memory-bank paths removed)
+#   specialized/specialized-master-plan-architect.md (file mutation manifest, anti-scope-creep
+#     list, blast radius, at least three failure vectors)
+#   project-management/project-management-jira-workflow-steward.md (risk and rollback per change)
+#   product/product-sprint-prioritizer.md (probability x impact risk scoring)
+# New: the TaskDraft contract (covers, after, files_scope, one discipline, stack packs,
+# interface contracts, risk, architecture triage, intent contract, the start-tier table and the
+# reason-coded tier_hint of D-cm; since 3.0.0 the table starts the producers only, D-cu, and a
+# Low start escalates after every failed round, D-cv).
+id: planner
+version: 3.0.0
+kind: core
+mission: >-
+  Split the approved spec, architecture and design into a dependency-ordered set of small tasks,
+  one discipline each, that together cover every requirement, with an intent contract per task.
+inputs: [spec, architecture, threat_model, design_flows, screens, repo_map]
+output: { artifacts: [tasks], verdicts: [] }
+exits: [done, blocked, spec_conflict]
+success_criteria:
+  - id: req_coverage
+    description: "Every REQ-n and SEC-n is covered by at least one task."
+  - id: dag_acyclic
+    description: "The after and consumes_contracts graph has no cycle."
+  - id: disjoint_parallel_scopes
+    description: "Tasks that can run in parallel have disjoint files_scope."
+  - id: task_size_cap
+    description: "Every task is within the size cap and has an architecture triage."
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 60000 }

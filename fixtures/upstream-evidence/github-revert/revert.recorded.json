@@ -1,0 +1,61 @@
+{
+  "v": 1,
+  "kind": "recorded",
+  "recorded_at": "2026-10-16T15:53:07.565Z",
+  "tools": {
+    "gh": "gh version 2.101.0 (2026-09-15)",
+    "git": "git version 2.49.0"
+  },
+  "repo": "bason-labs/bs-vtc",
+  "method": "merge",
+  "branches": {
+    "base": "vtc-h15/20261016T155237Z/base",
+    "feature": "vtc-h15/20261016T155237Z/feature"
+  },
+  "merge": {
+    "pr": 3,
+    "title": "H-15 merge probe 20261016T155237Z",
+    "merge_commit": "55a852e213463ad35424249f0d783d067cc6e781",
+    "auto": {
+      "exit": 0,
+      "output": "",
+      "merged_at_once": true
+    }
+  },
+  "revert": {
+    "via": "api",
+    "pr": 4,
+    "title": "Revert \"H-15 merge probe 20261016T155237Z\"",
+    "body": "Reverts bason-labs/bs-vtc#3",
+    "head": "revert-3-vtc-h15/20261016T155237Z/feature",
+    "merge_commit": "4d3c4c016691832d949729fc4e58b1440f07696a",
+    "commits": [
+      {
+        "sha": "4d3c4c016691832d949729fc4e58b1440f07696a",
+        "message": "Merge pull request #4 from bason-labs/revert-3-vtc-h15/20261016T155237Z/feature\n\nRevert \"H-15 merge probe 20261016T155237Z\""
+      },
+      {
+        "sha": "b05ada18134a2d2b6ef379263cbac0cb9265171a",
+        "message": "Revert \"H-15 merge probe 20261016T155237Z\""
+      }
+    ]
+  },
+  "listed": [
+    {
+      "number": 4,
+      "title": "Revert \"H-15 merge probe 20261016T155237Z\"",
+      "body": "Reverts bason-labs/bs-vtc#3",
+      "merge_commit": "4d3c4c016691832d949729fc4e58b1440f07696a"
+    },
+    {
+      "number": 3,
+      "title": "H-15 merge probe 20261016T155237Z",
+      "body": "Throwaway PR of the H-15 merge and revert check (spine §5 reading 239). Safe to delete.",
+      "merge_commit": "55a852e213463ad35424249f0d783d067cc6e781"
+    }
+  ],
+  "detection": {
+    "git_log": false,
+    "pr_reference": true
+  }
+}

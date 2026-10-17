@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","model":"claude-sonnet-5","tools":["Read"],"cwd":"/work/app"}
+{"type":"result","subtype":"success","is_error":true,"duration_ms":120,"num_turns":0,"result":"Invalid API key · Please run /login","session_id":"5f1c2a9e-0d3b-4e7a-9c61-2b8d4f0e7a13","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}

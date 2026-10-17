@@ -1,0 +1,53 @@
+# Homebrew formula for vtc, rendered per release by packages/cli/scripts/release-render.ts
+# (spine AD-26 rule 2) and attached to the release as vtc.rb. Pushing it to a tap
+# (<owner>/homebrew-<name>, Formula/vtc.rb) is a later, separate step.
+class Vtc < Formula
+  desc "Local multi-agent software delivery: a gated virtual tech company"
+  homepage "https://github.com/{{repo}}"
+  version "{{version}}"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/{{repo}}/releases/download/v{{version}}/vtc-{{version}}-darwin-arm64.tar.gz"
+      sha256 "{{sha256_darwin_arm64}}"
+    end
+    on_intel do
+      url "https://github.com/{{repo}}/releases/download/v{{version}}/vtc-{{version}}-darwin-x64.tar.gz"
+      sha256 "{{sha256_darwin_x64}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/{{repo}}/releases/download/v{{version}}/vtc-{{version}}-linux-arm64.tar.gz"
+      sha256 "{{sha256_linux_arm64}}"
+    end
+    on_intel do
+      url "https://github.com/{{repo}}/releases/download/v{{version}}/vtc-{{version}}-linux-x64.tar.gz"
+      sha256 "{{sha256_linux_x64}}"
+    end
+  end
+
+  def install
+    bin.install "vtc"
+  end
+
+  # D-bo: the Claude Code settings vtc install writes change between releases
+  def caveats
+    <<~EOS
+      Upgrading from an earlier vtc? In each repo where you use VTC with Claude Code, re-run
+        vtc install --host claude-code
+      so its settings carry this release's session sandbox rules.
+    EOS
+  end
+
+  test do
+    ENV["VTC_HOME"] = (testpath/".vtc").to_s
+    assert_match "vtc #{version} ", shell_output("#{bin}/vtc --version")
+    # Outside a git repository the engine bridge answers MCP itself and writes nothing.
+    initialize = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":' \
+                 '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"brew","version":"1"}}}'
+    output = pipe_output("#{bin}/vtc engine --mcp --host claude-code", "#{initialize}\n", 0)
+    assert_match '"serverInfo":{"name":"vtc"', output
+  end
+end

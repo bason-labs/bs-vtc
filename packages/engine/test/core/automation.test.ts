@@ -1,0 +1,775 @@
+/**
+ * The automation triggers and read model (AD-27; D-bv, D-ca): which engine events raise an
+ * automatic issue or PR for which target, the Lead's daily summary, and `GET /api/automation`
+ * folded from the `upstream.*` events of every run.
+ */
+import { describe, expect, it } from "vitest";
+import {
+  AutomationReportSchema,
+  automationFor,
+  type AutomationSettings,
+  type Scorecard,
+  type VtcEvent,
+} from "@vtc/shared";
+import {
+  AUTOMATION_OFF_NOTE,
+  AUTOMATION_SNAPSHOT_NOTE,
+  applyEvent,
+  automationDailySummary,
+  automationFacts,
+  automationReportView,
+  costRegressionFacts,
+  costWorsened,
+  createReadModel,
+  type RunState,
+} from "../../src/core/index.js";
+import { parkEscalation } from "../../src/core/escalations.js";
+import { BaselineGatesError, infraDetail } from "../../src/core/jobs.js";
+import { emptyRunState, PROJECT_GATES_PARK_PREFIX } from "../../src/core/state.js";
+
+let seq = 0;
+const ev = (
+  type: string,
+  data: Record<string, unknown>,
+  extra: Partial<VtcEvent> = {},
+  ts = "2026-10-14T10:00:00.000Z",
+): VtcEvent => ({ v: 1, seq: (seq += 1), ts, run: "r1", type, actor: "engine", data, ...extra });
+
+const stateWith = (...events: VtcEvent[]): RunState => {
+  const state = emptyRunState("r1", "2026-10-14T09:00:00.000Z");
+  for (const e of events) applyEvent(state, e);
+  return state;
+};
+
+const FINDING = {
+  fingerprint: "5".repeat(64),
+  source: "role",
+  source_name: "spec_verifier",
+  rule_id: "reset.expiry-not-checked",
+  category: "security",
+  kind: "implementation_deviation",
+  title: "Expired reset tokens are accepted",
+  severity: "medium",
+  confidence: 0.8,
+  location: { path: "src/t-2/reset.ts", symbol: "reset" },
+  evidence: { type: "file_line", ref: "src/t-2/reset.ts:31" },
+  req_ids: ["REQ-2.AC-1"],
+  route: "out_of_scope",
+  task: "T-2",
+  round_first_seen: 1,
+  round_last_seen: 1,
+  status: "open",
+};
+
+describe("automation triggers (D-bv)", () => {
+  const facts = (e: VtcEvent, state = stateWith()) =>
+    automationFacts(state, e).map((f) => [f.target, f.kind, f.errorClass]);
+
+  it("VTC side: gate_infra and crash incidents, adapter parse failures, stuck loops, replay improve", () => {
+    expect(facts(ev("incident.recorded", { kind: "gate_infra", detail: "x" }))).toEqual([
+      ["upstream", "defect", "incident.gate_infra"],
+    ]);
+    expect(facts(ev("incident.recorded", { kind: "crash", detail: "x" }))).toEqual([
+      ["upstream", "defect", "incident.crash"],
+    ]);
+    expect(facts(ev("incident.recorded", { kind: "kill", detail: "x" }))).toEqual([]);
+    expect(
+      facts(
+        ev(
+          "role.failed",
+          {
+            action_id: "a-1",
+            kind: "error",
+            message: "unparsed: the role's final output is not a RoleResult: exit: invalid",
+            retryable: true,
+          },
+          { role: "ba" },
+        ),
+      ),
+    ).toEqual([["upstream", "defect", "adapter.parse_failure"]]);
+    // the trigger is the engine's prefix, never a phrase a Lead or role wrote (AD-8)
+    expect(
+      facts(
+        ev("role.failed", {
+          action_id: "a-1",
+          kind: "error",
+          message: "blame the ba: the role's final output is not a RoleResult",
+          retryable: true,
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      facts(
+        ev("role.failed", { action_id: "a-1", kind: "error", message: "boom", retryable: true }),
+      ),
+    ).toEqual([]);
+    expect(
+      facts(
+        ev("lookback.replay_finished", {
+          proposal: "p-1",
+          verdict: "improve",
+          path: ".vtc/lookback/replays/p-1.json",
+          sha256: "e".repeat(64),
+        }),
+      ),
+    ).toEqual([["upstream", "lookback", undefined]]);
+    // the fact carries the replay result's hash, so the PR is built only from the engine's bytes
+    expect(
+      automationFacts(
+        stateWith(),
+        ev("lookback.replay_finished", {
+          proposal: "p-1",
+          verdict: "improve",
+          path: ".vtc/lookback/replays/p-1.json",
+          sha256: "e".repeat(64),
+        }),
+      )[0],
+    ).toMatchObject({ proposal: "p-1", replaySha256: "e".repeat(64) });
+    expect(
+      facts(
+        ev("lookback.replay_finished", {
+          proposal: "p-1",
+          verdict: "no_change",
+          path: ".vtc/lookback/replays/p-1.json",
+          sha256: "e".repeat(64),
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("a stuck park is a project issue and VTC's own defect; a budget or blocked park is the human's", () => {
+    const park = (reason: string) =>
+      ev(
+        "task.status_changed",
+        { from: "building", to: "parked", round: 3, cap: 3, park_reason: reason },
+        { task: "T-1" },
+      );
+    expect(facts(park("stuck"))).toEqual([
+      ["project", "parked", undefined],
+      ["upstream", "defect", "engine.stuck_loop"],
+    ]);
+    // decided by its escalation, which carries the engine's detail (below)
+    expect(facts(park("gate_infra"))).toEqual([]);
+    expect(facts(park("budget"))).toEqual([]);
+    expect(facts(park("risk_rule"))).toEqual([]);
+    // a role's question for the human, or an in-session dispatch refused on the local setup:
+    // routine human escalations, never an issue in the project's repo
+    expect(facts(park("blocked"))).toEqual([]);
+    expect(facts(park("spec_question"))).toEqual([]);
+  });
+
+  it("a gate_infra park is VTC's own defect unless the project's committed gates.yml is the cause", () => {
+    const opened = (scope: { task?: string; feature?: string }, detail: string) =>
+      ev(
+        "escalation.opened",
+        {
+          escalation: parkEscalation({
+            id: "E-1",
+            run: "r1",
+            ...scope,
+            reason: "gate_infra",
+            detail,
+            evidence: [],
+            blocks: scope.task === undefined ? [] : [scope.task],
+            now: new Date("2026-10-14T10:00:00.000Z"),
+          }),
+        },
+        scope,
+      );
+    const vtc = [["upstream", "defect", "incident.gate_infra"]];
+    // VTC's or the machine's infrastructure: worktree, merge queue, gate sandbox, browser pin
+    expect(facts(opened({ task: "T-1" }, "could not create the task worktree: EACCES"))).toEqual(
+      vtc,
+    );
+    expect(
+      facts(opened({ task: "T-1" }, "the merge commit is not the gated commit on the gated base")),
+    ).toEqual(vtc);
+    expect(
+      facts(opened({ feature: "F-1" }, "Final Review gates failed for infrastructure reasons")),
+    ).toEqual(vtc);
+    // one fingerprint for every run: the upstream defect names no run, task or project path
+    const defect = automationFacts(stateWith(), opened({ task: "T-1" }, "x"))[0];
+    expect(defect).toMatchObject({ task: "T-1", errorClass: "incident.gate_infra" });
+    expect(defect?.ruleId).toBeUndefined();
+    // the project's gates.yml: a project issue in its own repo, one per run
+    const project = automationFacts(
+      stateWith(),
+      opened({ task: "T-1" }, infraDetail("the gates could not run", new BaselineGatesError("no"))),
+    );
+    expect(project.map((f) => [f.target, f.kind, f.ruleId])).toEqual([
+      ["project", "parked", "parked/gates_config/r1"],
+    ]);
+    // the prefix is the engine's, at the start of its detail; mid-text it decides nothing
+    expect(
+      facts(opened({ task: "T-1" }, `the gates could not run: ${PROJECT_GATES_PARK_PREFIX} x`)),
+    ).toEqual(vtc);
+    expect(infraDetail("the gates could not run", new Error("spawn ENOENT"))).toBe(
+      "the gates could not run: spawn ENOENT",
+    );
+    // any other escalation raises nothing here
+    expect(
+      facts(
+        ev(
+          "escalation.opened",
+          {
+            escalation: parkEscalation({
+              id: "E-2",
+              run: "r1",
+              task: "T-1",
+              reason: "budget",
+              detail: "the task's budget is spent",
+              evidence: [],
+              blocks: ["T-1"],
+              now: new Date("2026-10-14T10:00:00.000Z"),
+            }),
+          },
+          { task: "T-1" },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it("project side: red post-merge CI, reverts, escaped defects, out-of-scope findings", () => {
+    expect(
+      facts(
+        ev(
+          "feature.post_merge_ci",
+          { merge_commit: "a".repeat(40), status: "red", runs: [] },
+          { feature: "F-1" },
+        ),
+      ),
+    ).toEqual([["project", "ci_failure", undefined]]);
+    expect(
+      facts(
+        ev(
+          "feature.post_merge_ci",
+          { merge_commit: "a".repeat(40), status: "green", runs: [] },
+          { feature: "F-1" },
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      facts(
+        ev(
+          "feature.reverted",
+          { merge_commit: "a".repeat(40), detail: "reverted" },
+          { feature: "F-1" },
+        ),
+      ),
+    ).toEqual([["project", "escaped_defect", undefined]]);
+    expect(
+      facts(
+        ev(
+          "lookback.escaped_defect",
+          { merge_commit: "a".repeat(40), kind: "revert", tasks: ["T-1"] },
+          { feature: "F-1" },
+        ),
+      ),
+    ).toEqual([["project", "escaped_defect", undefined]]);
+    expect(facts(ev("finding.recorded", { finding: FINDING }, { task: "T-2" }))).toEqual([
+      ["project", "finding", undefined],
+    ]);
+    expect(
+      facts(ev("finding.recorded", { finding: { ...FINDING, route: "patch" } }, { task: "T-2" })),
+    ).toEqual([]);
+  });
+
+  it("an advisory the dependency gate found (osv-scanner) is a VTC-repo security fact too, with only its id and package (D-bv (4))", () => {
+    const advisory = {
+      ...FINDING,
+      source: "tool",
+      source_name: "osv-scanner",
+      rule_id: "GHSA-aaaa-bbbb-cccc",
+      category: "supply_chain",
+      title: "zod@4.6.7: a parsing flaw",
+      location: { path: "pnpm-lock.yaml", symbol: "zod@4.6.7" },
+      evidence: { type: "command_output", ref: "gates/1/osv.json" },
+      route: "patch",
+    };
+    const { kind: _kind, ...tool } = advisory;
+    const raised = automationFacts(
+      stateWith(),
+      ev("finding.recorded", { finding: tool }, { task: "T-2" }),
+    );
+    expect(raised).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "security",
+        advisory: { id: "GHSA-aaaa-bbbb-cccc", package: "zod" },
+      }),
+    ]);
+    // a scoped package keeps its scope; a finding of another tool is none
+    const scoped = automationFacts(
+      stateWith(),
+      ev(
+        "finding.recorded",
+        { finding: { ...tool, location: { path: "pnpm-lock.yaml", symbol: "@vtc/x@1.0.0" } } },
+        { task: "T-2" },
+      ),
+    );
+    expect(scoped[0]?.advisory).toEqual({ id: "GHSA-aaaa-bbbb-cccc", package: "@vtc/x" });
+    expect(
+      automationFacts(
+        stateWith(),
+        ev("finding.recorded", { finding: { ...tool, source_name: "gitleaks" } }, { task: "T-2" }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("Final Review leftovers: the feature findings a finished run left open", () => {
+    const leftover = { ...FINDING, route: "defer", status: "deferred", feature: "F-1" };
+    const { task: _task, ...featureFinding } = leftover;
+    const state = stateWith(ev("finding.recorded", { finding: featureFinding }));
+    expect(facts(ev("run.finished", { outcome: "delivered" }), state)).toEqual([
+      ["project", "final_review", undefined],
+    ]);
+  });
+});
+
+describe("config signals at a run's end (D-cd; spine §5 reading 216)", () => {
+  /** A finished run whose tasks of `sizes` parked for `reason` (each once, some twice). */
+  const run = (parks: readonly { task: string; size: "S" | "M" | "L"; reason: string }[]) => {
+    const state = stateWith();
+    for (const p of parks) {
+      state.tasks.set(p.task, { id: p.task, size: p.size } as never);
+      state.events.push(
+        ev(
+          "task.status_changed",
+          { from: "building", to: "parked", park_reason: p.reason, round: 1 },
+          {
+            task: p.task,
+          },
+        ),
+      );
+    }
+    state.tasks.set("T-9", { id: "T-9", size: "M" } as never);
+    return automationFacts(state, ev("run.finished", { outcome: "delivered" }));
+  };
+
+  it("raises a config improvement when 3 or more tasks of one size hit their budget", () => {
+    const facts = run([
+      { task: "T-1", size: "M", reason: "budget" },
+      { task: "T-2", size: "M", reason: "budget" },
+      { task: "T-2", size: "M", reason: "budget" },
+      { task: "T-3", size: "M", reason: "budget" },
+      { task: "T-4", size: "S", reason: "budget" },
+    ]);
+    expect(facts).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "config",
+        subject: "budget.task_m",
+        metrics: { "budget.m.parked_tasks": 3, "budget.m.tasks": 4 },
+      }),
+    ]);
+  });
+
+  it("raises one when 3 or more tasks hit their fix-round cap", () => {
+    const facts = run([
+      { task: "T-1", size: "S", reason: "cap" },
+      { task: "T-2", size: "M", reason: "cap" },
+      { task: "T-3", size: "L", reason: "cap" },
+    ]);
+    expect(facts).toEqual([
+      expect.objectContaining({
+        target: "upstream",
+        kind: "config",
+        subject: "caps.fix_rounds",
+        metrics: { "caps.parked_tasks": 3, "caps.tasks": 4 },
+      }),
+    ]);
+  });
+
+  it("raises none below 3 tasks, nor for another park reason", () => {
+    expect(
+      run([
+        { task: "T-1", size: "M", reason: "budget" },
+        { task: "T-2", size: "M", reason: "budget" },
+        { task: "T-3", size: "M", reason: "stuck" },
+        { task: "T-4", size: "M", reason: "cap" },
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("the daily summary (D-ca)", () => {
+  it("counts what automation did with links, and is null when nothing happened", () => {
+    const opened = ev("upstream.issue_opened", {
+      target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+      kind: "defect",
+      fingerprint: "0123456789abcdef",
+      number: 7,
+      url: "https://github.com/bason-labs/bs-vtc/issues/7",
+    });
+    const skipped = ev("automation.skipped", { reason: "rate_limit", detail: "5 issues today" });
+    const text = automationDailySummary([opened, skipped], "2026-10-14");
+    expect(text).toBe(
+      "Automation on 2026-10-14 (UTC): 1 issue(s) and 0 draft PR(s) opened, 0 issue update(s), 0 closed. Issues: #7 https://github.com/bason-labs/bs-vtc/issues/7. Skipped: rate_limit 1.",
+    );
+    expect(automationDailySummary([], "2026-10-14")).toBeNull();
+  });
+});
+
+describe("GET /api/automation (AutomationReport)", () => {
+  const settings: AutomationSettings = automationFor(
+    {},
+    { upstream: { repo: "bason-labs/bs-vtc", share: true } },
+    { githubRemote: false, ghLoggedIn: true, paused: false },
+  );
+  const target = { kind: "project", repo: "acme/app" };
+
+  it("folds the upstream.* events of every run into items, newest first, with the skips and notes", () => {
+    const events = [
+      ev(
+        "upstream.issue_opened",
+        {
+          target,
+          kind: "ci_failure",
+          fingerprint: "0123456789abcdef",
+          number: 3,
+          url: "https://github.com/acme/app/issues/3",
+        },
+        {},
+        "2026-10-14T10:00:00.000Z",
+      ),
+      ev(
+        "upstream.pr_opened",
+        {
+          target,
+          kind: "ci_failure",
+          fingerprint: "0123456789abcdef",
+          number: 4,
+          url: "https://github.com/acme/app/pull/4",
+          branch: "vtc/auto/ci_failure/01234567",
+          issue: 3,
+          evidence: "partial",
+        },
+        { run: "r2" },
+        "2026-10-14T11:00:00.000Z",
+      ),
+      ev(
+        "upstream.issue_opened",
+        {
+          target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+          kind: "defect",
+          fingerprint: "fedcba9876543210",
+          number: 9,
+          url: "https://github.com/bason-labs/bs-vtc/issues/9",
+        },
+        {},
+        "2026-10-14T09:00:00.000Z",
+      ),
+      ev(
+        "upstream.issue_closed",
+        {
+          target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+          kind: "defect",
+          fingerprint: "fedcba9876543210",
+          number: 9,
+          url: "https://github.com/bason-labs/bs-vtc/issues/9",
+          reason: "quiet",
+        },
+        {},
+        "2026-10-14T09:30:00.000Z",
+      ),
+      ev("automation.skipped", { reason: "paused", kind: "parked", detail: "paused" }),
+    ];
+    const report = automationReportView(events, settings);
+    expect(AutomationReportSchema.safeParse(report).success).toBe(true);
+    expect(report).toMatchObject({
+      issues: false,
+      prs: false,
+      upstream: true,
+      upstream_repo: "bason-labs/bs-vtc",
+      evidence_hosting: "branch",
+      notes: ["automatic issues and PRs are off: this project has no GitHub remote"],
+    });
+    expect(report.items).toEqual([
+      {
+        target,
+        kind: "ci_failure",
+        fingerprint: "0123456789abcdef",
+        issue: { number: 3, url: "https://github.com/acme/app/issues/3", state: "open" },
+        pr: {
+          number: 4,
+          url: "https://github.com/acme/app/pull/4",
+          state: "draft",
+          evidence: "partial",
+        },
+        first_at: "2026-10-14T10:00:00.000Z",
+        last_at: "2026-10-14T11:00:00.000Z",
+      },
+      {
+        target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+        kind: "defect",
+        fingerprint: "fedcba9876543210",
+        issue: { number: 9, url: "https://github.com/bason-labs/bs-vtc/issues/9", state: "closed" },
+        pr: null,
+        first_at: "2026-10-14T09:00:00.000Z",
+        last_at: "2026-10-14T09:30:00.000Z",
+      },
+    ]);
+    expect(report.skipped).toEqual([
+      { at: "2026-10-14T10:00:00.000Z", reason: "paused", kind: "parked", detail: "paused" },
+    ]);
+  });
+
+  it("shows a PR as merged once its issue closed as completed (its fix merged); a quiet close does not", () => {
+    const item = { target, kind: "ci_failure", fingerprint: "0123456789abcdef" } as const;
+    const pr = ev(
+      "upstream.pr_opened",
+      {
+        ...item,
+        number: 4,
+        url: "https://github.com/acme/app/pull/4",
+        branch: "vtc/auto/ci_failure/01234567",
+        issue: 3,
+        evidence: "complete",
+      },
+      {},
+      "2026-10-14T11:00:00.000Z",
+    );
+    const closed = (reason: "completed" | "quiet") =>
+      ev(
+        "upstream.issue_closed",
+        { ...item, number: 3, url: "https://github.com/acme/app/issues/3", reason },
+        {},
+        "2026-10-14T12:00:00.000Z",
+      );
+    expect(automationReportView([pr, closed("completed")], settings).items[0]?.pr?.state).toBe(
+      "merged",
+    );
+    expect(automationReportView([pr, closed("quiet")], settings).items[0]?.pr?.state).toBe("draft");
+    // an issue closed with no PR has none to merge
+    expect(automationReportView([closed("completed")], settings).items[0]?.pr).toBeNull();
+  });
+
+  it("without automation wiring, everything is off with a note", () => {
+    const report = automationReportView([], null);
+    expect(report).toMatchObject({
+      issues: false,
+      prs: false,
+      upstream: false,
+      notes: [AUTOMATION_OFF_NOTE],
+      items: [],
+      skipped: [],
+    });
+  });
+
+  it("a committed snapshot says its settings are not known, not that the engine had no automation", () => {
+    const notes = (mode: "live" | "snapshot") =>
+      createReadModel({
+        repoRoot: "/nonexistent",
+        mode,
+        versions: { engine: "0.0.0", contracts: "5.0.0" },
+        prototypeUrl: () => null,
+        runs: () => [stateWith()],
+        usage: () => new Map(),
+        git: null,
+      }).automation().notes;
+    expect(notes("snapshot")).toEqual([AUTOMATION_SNAPSHOT_NOTE]);
+    expect(notes("live")).toEqual([AUTOMATION_OFF_NOTE]);
+  });
+
+  it("shows the automatic actions taken while no run was open, before any run's log holds them (D-ca)", () => {
+    const between = {
+      v: 1,
+      run: "",
+      seq: 1,
+      ts: "2026-10-13T10:00:00.000Z",
+      type: "upstream.issue_closed",
+      actor: "engine",
+      data: {
+        target: { kind: "upstream", repo: "bason-labs/bs-vtc" },
+        kind: "defect",
+        fingerprint: "0123456789abcdef",
+        number: 7,
+        url: "https://github.com/bason-labs/bs-vtc/issues/7",
+        reason: "quiet",
+      },
+    } as unknown as VtcEvent;
+    const report = createReadModel({
+      repoRoot: "/nonexistent",
+      mode: "live",
+      versions: { engine: "0.0.0", contracts: "5.2.0" },
+      prototypeUrl: () => null,
+      runs: () => [stateWith()],
+      usage: () => new Map(),
+      git: null,
+      automationEvents: () => [between],
+    }).automation();
+    expect(report.items).toEqual([
+      expect.objectContaining({
+        fingerprint: "0123456789abcdef",
+        issue: expect.objectContaining({ number: 7, state: "closed" }) as object,
+      }),
+    ]);
+  });
+});
+
+describe("project facts name a stable problem (D-bv, D-bx dedupe)", () => {
+  const one = (e: VtcEvent, state = stateWith()) => {
+    const [fact] = automationFacts(state, e).filter((f) => f.target === "project");
+    if (fact === undefined) throw new Error("no project fact");
+    return fact;
+  };
+
+  it("a parked task is keyed by its run, task and reason, and titled with the task", () => {
+    const state = stateWith();
+    state.tasks.set("T-1", {
+      id: "T-1",
+      title: "Reset tokens expire",
+      feature: "F-1",
+    } as unknown as Parameters<typeof state.tasks.set>[1]);
+    const fact = one(
+      ev(
+        "task.status_changed",
+        { from: "building", to: "parked", round: 3, cap: 3, park_reason: "stuck" },
+        { task: "T-1" },
+      ),
+      state,
+    );
+    expect(fact.ruleId).toBe("parked/stuck/r1/T-1");
+    expect(fact.title).toMatch(/^Task T-1 parked \(stuck\)/);
+  });
+
+  it("red CI, a revert and an escaped defect of one merge share the merge; a finding is keyed by its fingerprint", () => {
+    const merge = "a".repeat(40);
+    expect(
+      one(
+        ev(
+          "feature.post_merge_ci",
+          { merge_commit: merge, status: "red", runs: [] },
+          { feature: "F-1" },
+        ),
+      ),
+    ).toMatchObject({
+      ruleId: `post_merge_ci/${merge}`,
+      title: expect.stringContaining("aaaaaaaaaaaa") as string,
+    });
+    const reverted = one(
+      ev("feature.reverted", { merge_commit: merge, detail: "reverted" }, { feature: "F-1" }),
+    );
+    const escaped = one(
+      ev(
+        "lookback.escaped_defect",
+        { merge_commit: merge, kind: "revert", tasks: ["T-1"] },
+        { feature: "F-1" },
+      ),
+    );
+    expect(reverted.ruleId).toBe(`escaped_defect/${merge}`);
+    expect(escaped.ruleId).toBe(reverted.ruleId);
+    const finding = one(ev("finding.recorded", { finding: FINDING }, { task: "T-2" }));
+    expect(finding).toMatchObject({
+      ruleId: `finding/${FINDING.fingerprint}`,
+      path: "src/t-2/reset.ts",
+      title: "security finding: Expired reset tokens are accepted",
+    });
+  });
+});
+
+describe("cost regressions from Lookback's scorecards (D-bv)", () => {
+  const sha = (c: string) => c.repeat(64);
+  const card = (
+    effective: string,
+    from: string,
+    metrics: Scorecard["metrics"],
+    role = "engineer",
+  ): Scorecard => ({
+    v: 1,
+    prompt: {
+      role,
+      host: "claude-code",
+      locked_sha256: sha("1"),
+      editable_sha256: effective,
+      effective_sha256: effective,
+    },
+    grader_bundle_sha: sha("9"),
+    window: { from, to: "2026-10-14T00:00:00.000Z" },
+    metrics,
+    breakdown: [],
+    written_at: "2026-10-14T00:00:00.000Z",
+  });
+  const m = (value: number | null) => ({ value, ci_low: null, ci_high: null, n: 20 });
+  const meta = { run: "r1", at: "2026-10-14T12:00:00.000Z" };
+
+  it("compares each role's newest version with the one before it, beyond LOOKBACK_LIMITS", () => {
+    const facts = costRegressionFacts(
+      [
+        card(sha("b"), "2026-10-10T00:00:00.000Z", {
+          tokens_per_success: m(13000),
+          escalations_per_100: m(4),
+          cap_hits_per_100: m(1),
+        }),
+        card(sha("a"), "2026-10-01T00:00:00.000Z", {
+          tokens_per_success: m(10000),
+          escalations_per_100: m(2),
+          cap_hits_per_100: m(1),
+        }),
+      ],
+      meta,
+    );
+    expect(facts.map((f) => [f.target, f.kind, f.metric, f.baseline, f.current])).toEqual([
+      ["upstream", "cost", "tokens_per_success", 10000, 13000],
+      ["upstream", "cost", "escalations_per_100", 2, 4],
+    ]);
+    expect(facts[0]).toMatchObject({
+      role: "engineer",
+      host: "claude-code",
+      promptSha: sha("b"),
+      baselinePromptSha: sha("a"),
+      run: "r1",
+      source: "lookback.scorecards",
+      at: meta.at,
+    });
+  });
+
+  it("raises nothing within the limits, with too little data, or with one version", () => {
+    expect(
+      costRegressionFacts(
+        [
+          card(sha("b"), "2026-10-10T00:00:00.000Z", { tokens_per_success: m(11900) }),
+          card(sha("a"), "2026-10-01T00:00:00.000Z", { tokens_per_success: m(10000) }),
+        ],
+        meta,
+      ),
+    ).toEqual([]);
+    expect(
+      costRegressionFacts(
+        [
+          card(sha("b"), "2026-10-10T00:00:00.000Z", { tokens_per_success: m(null) }),
+          card(sha("a"), "2026-10-01T00:00:00.000Z", { tokens_per_success: m(10000) }),
+        ],
+        meta,
+      ),
+    ).toEqual([]);
+    expect(
+      costRegressionFacts(
+        [card(sha("a"), "2026-10-01T00:00:00.000Z", { tokens_per_success: m(10000) })],
+        meta,
+      ),
+    ).toEqual([]);
+    // two roles never compare with each other
+    expect(
+      costRegressionFacts(
+        [
+          card(sha("b"), "2026-10-10T00:00:00.000Z", { tokens_per_success: m(50000) }, "qa"),
+          card(sha("a"), "2026-10-01T00:00:00.000Z", { tokens_per_success: m(10000) }),
+        ],
+        meta,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("costWorsened (reading 230(5): a zero rate baseline counts)", () => {
+  it("raises a rate from zero once it is above 0, and keeps the ratio otherwise", () => {
+    expect(costWorsened("escalations_per_100", 0, 40)).toBe(true);
+    expect(costWorsened("cap_hits_per_100", 0, 1)).toBe(true);
+    expect(costWorsened("escalations_per_100", 0, 0)).toBe(false);
+    expect(costWorsened("escalations_per_100", 2, 4)).toBe(true);
+    expect(costWorsened("escalations_per_100", 2, 3)).toBe(false);
+    // tokens per success from zero is never compared
+    expect(costWorsened("tokens_per_success", 0, 1000)).toBe(false);
+  });
+});

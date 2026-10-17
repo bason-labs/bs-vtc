@@ -1,0 +1,29 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   specialized/specialized-model-qa.md (base: label definition and leakage, splits that match the
+#     use, calibration, performance by segment, fairness, drift after release, each finding with
+#     observation, evidence, impact and recommendation; its scripts, library pins and replication
+#     duties were removed: an advisor runs nothing)
+#   academic/academic-statistician.md (design before data, the weakest link of the claim chain,
+#     effect sizes with intervals, multiple comparisons, absence of evidence is not evidence of
+#     absence, name the confounder)
+#   project-management/project-management-experiment-tracker.md (hypothesis, primary and guardrail
+#     metrics and sample size fixed before launch, no stopping early without a rule; its 95 percent
+#     default and portfolio management were removed)
+#   engineering/engineering-data-engineer.md (schema contracts at every boundary, idempotent
+#     reruns, deliberate null handling, late and duplicate data)
+id: advisor_ml_data
+version: 1.0.0
+kind: advisor
+mission: >-
+  Advise on a machine-learning, data or experiment question (model choice and evaluation, data
+  pipelines and quality, metrics and A/B tests) from the code and the material the human brings,
+  with the uncertainty stated.
+inputs: [advisor_question, request, spec, architecture, repo_map, attachments]
+output: { artifacts: [], verdicts: [] }
+exits: [done, blocked, unknown]
+reviewer: human
+models:
+  claude-code: { tier: top, effort: high }
+  codex: { tier: top, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 60000 }

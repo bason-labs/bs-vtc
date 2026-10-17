@@ -1,0 +1,24 @@
+# Written for VTC (the role catalogue found no base). Merged in from msitarzewski/agency-agents
+# (MIT, see roles/NOTICE) at f99f6aa:
+#   engineering/engineering-prompt-engineer.md (one change at a time, changelog with measured
+#     impact, define success before editing, no vague qualifiers)
+#   engineering/engineering-multi-agent-systems-architect.md (eval-driven changes, failure
+#     taxonomy)
+#   engineering/engineering-autonomous-optimization-architect.md (a rubric declared before the
+#     comparison; its autonomous promotion was removed: a human approves every change)
+id: lookback
+version: 3.0.0
+kind: core
+mission: >-
+  From attributed failures of one role on one host, propose at most three small changes to that
+  role's editable prompt section, each with a hypothesis the replay can test, as a proposal and
+  the full proposed section.
+inputs: [traces, scorecard, prompt_proposal, replay_result]
+output: { artifacts: [prompt_proposal], verdicts: [] }
+exits: [done, blocked]
+reviewer: engine
+models:
+  claude-code: { tier: top, effort: medium }
+  codex: { tier: top, effort: medium }
+tools: { profile: write_scoped, write_paths: [".vtc/lookback/proposals/**"] }
+budget: { context_tokens: 60000 }

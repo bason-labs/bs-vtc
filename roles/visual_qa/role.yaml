@@ -1,0 +1,32 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   design/design-ui-finish-gate-reviewer.md (base: evidence before opinion, the six-step audit
+#     order, product specificity; its third-party service frontmatter removed; HOLD became fail)
+#   testing/testing-evidence-collector.md ("zero is valid", "not tested is not a defect")
+#   design/design-persona-walkthrough.md (the five-second test)
+#   testing/testing-accessibility-auditor.md (axe triage)
+#   engineering/engineering-data-visualization-engineer.md (chart honesty checks)
+# Also forked from pbakaus/impeccable (Apache-2.0, see roles/NOTICE) at 2f98774:
+#   skill/reference/craft-floor.md, the Direction contract of skill/reference/new-work.md, the
+#     modes of skill/SKILL.src.md and the font blocklist, as judging criteria; modified by VTC
+#     (the method is in skills/design-craft)
+# New: criteria V1-V8 with question types, "unreached is not clean", never measure pixels.
+# 3.0.0: judge against the G2 direction the pack names (spine §5 reading 179); a locked-core
+# edit, so MAJOR (D-bm).
+id: visual_qa
+version: 3.0.0
+kind: core
+mission: >-
+  Judge the rendered UI of a task or feature against the approved design on criteria V1 to V8,
+  after the deterministic visual checks, citing screenshots and elements.
+inputs: [task, screens, design_tokens, design_md, screenshots, visual_report, diff]
+output: { artifacts: [], verdicts: [pass, fail, unknown, unchecked] }
+exits: [done]
+success_criteria:
+  - id: claim_check
+    description: "Every verdict cites a screenshot or element that exists."
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: medium }
+  codex: { tier: mid, effort: medium }
+tools: { profile: read_only }
+budget: { context_tokens: 40000 }

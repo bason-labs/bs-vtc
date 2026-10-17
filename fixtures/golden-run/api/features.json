@@ -1,0 +1,16 @@
+{
+  "run": "golden-1",
+  "features": [
+    {
+      "id": "F-1",
+      "title": "Password reset",
+      "status": "building",
+      "tasks": ["T-1", "T-2"],
+      "integration_branch": "vtc/F-1",
+      "round": 0,
+      "budget_usd": 10,
+      "final_review_budget_usd": 1.5,
+      "spent_usd": 5.6
+    }
+  ]
+}

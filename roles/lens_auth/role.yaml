@@ -1,0 +1,20 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa. A lens reviewer
+# (§5.3): it compiles from roles/_shared/lens-reviewer.md, this prompt and skills/lens-auth.
+#   engineering/engineering-identity-access-engineer.md, specialized/agentic-identity-trust.md
+id: lens_auth
+version: 1.0.0
+kind: lens
+mission: >-
+  Review a task's diff that touches authentication, sessions, tokens, recovery, permissions or tenant isolation, against the identity and access lens checklist.
+inputs: [task, diff, gate_report, threat_model]
+output: { artifacts: [], verdicts: [pass, fail, unknown] }
+exits: [done]
+success_criteria:
+  - id: claim_check
+    description: "Every finding cites a changed line that exists."
+reviewer: engine
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: read_only }
+budget: { context_tokens: 30000 }

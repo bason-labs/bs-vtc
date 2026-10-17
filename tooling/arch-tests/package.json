@@ -1,0 +1,20 @@
+{
+  "name": "@vtc/arch-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Proves the architecture checks fire: every dependency-cruiser rule and the AD-9 / AD-2 lint rules against planted fixtures.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@vtc/shared": "workspace:*",
+    "dependency-cruiser": "18.6.0",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "typescript-eslint": "8.71.2",
+    "vitest": "5.0.4"
+  }
+}

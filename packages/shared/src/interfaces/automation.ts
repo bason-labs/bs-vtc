@@ -1,0 +1,367 @@
+/**
+ * Seams of automatic issues and PRs (spine AD-27; D-bu, D-bw, D-ce). New in contracts 5.0.0.
+ *
+ * - {@link IssueService} and {@link AutoPullRequestService}: GitHub through the user's own `gh`
+ *   login. The upstream team implements both in `@vtc/engine` (`upstream/`) with an injectable
+ *   command, like `createGhPullRequests`; tests inject fakes and never run the real `gh` (D-cc).
+ * - {@link GitPlumbing}: the local git plumbing the orphan evidence branch and the automatic
+ *   branches are written through, with no checkout and no work-tree change. Engine core implements
+ *   it in `git/` (AD-13 rule 4: git code stays there); the upstream module builds the writers on it.
+ * - {@link EvidenceRecorder}: Playwright capture in the gate sandbox with the pinned visual
+ *   toolchain (AD-24), implemented by the gate-runner team in `gates/`; the upstream module
+ *   orchestrates what to capture.
+ * - {@link AutomationDeps}: what the cli injects (`EngineDeps.automation`).
+ *
+ * Every implementation: never reads a token, sets `GH_PROMPT_DISABLED=1`, passes bodies with
+ * `--body-file`, refuses `GH_FORBIDDEN_ARGS`, merges, auto-merge, force pushes, repo-setting
+ * changes and any push outside `autoPushRefAllowed` (AD-27 rule 1).
+ */
+import type { GateReport } from "../gate-result.js";
+import type { GitSha, RelPath } from "../primitives.js";
+import type {
+  AutoFingerprint,
+  AutoKind,
+  AutoMarker,
+  EvidenceFileKind,
+  EvidenceHosting,
+  EvidencePartialReason,
+  GitHubRepo,
+} from "../upstream.js";
+
+/** One file to attach or embed, by its neutral name inside the per-action staging directory. */
+export interface EvidenceAttachment {
+  /** `NN-<slug>.<ext>` (`EvidenceFileNameSchema`), relative to `stagingDir`. */
+  readonly name: string;
+  readonly alt: string;
+}
+
+/** An issue as VTC reads it back from a label listing (`gh issue list --label vtc:auto`). */
+export interface AutoIssueRef {
+  readonly number: number;
+  readonly url: string;
+  readonly state: "open" | "closed";
+  readonly stateReason: "completed" | "not_planned" | "reopened" | null;
+  readonly labels: readonly string[];
+  readonly marker: AutoMarker | null;
+  readonly updatedAt: string;
+  /** A comment without `AUTO_COMMENT_MARKER` exists (VTC posts as the user, so not by author). */
+  readonly humanActivity: boolean;
+  /**
+   * When the issue was opened (`gh --json createdAt`), so the daily cap counts from the remote
+   * listing (reading 208). Absent from a service that does not report it: the ledger decides.
+   * New in 5.1.0.
+   */
+  readonly createdAt?: string;
+  /**
+   * VTC's quiet sweep closed it: closed as not planned, right after a comment carrying
+   * `QUIET_CLOSE_MARKER`. Absent from a service that does not report it. New in 5.1.0.
+   */
+  readonly closedQuietByVtc?: boolean;
+  /**
+   * The issue's title and body as listed (`gh --json title,body`): an automatic run started from
+   * an issue another installation opened takes them as its spec. Absent from a service that does
+   * not report them. New in 5.3.0.
+   */
+  readonly title?: string;
+  readonly body?: string;
+}
+
+export interface AutoIssueRequest {
+  readonly title: string;
+  /** Absolute staging directory holding `body.md` and the attachments; `gh` runs with it as cwd. */
+  readonly stagingDir: string;
+  /** The body file, relative to `stagingDir` (always `--body-file`, never `--body`). */
+  readonly bodyFile: string;
+  readonly labels: readonly string[];
+  readonly attach?: readonly EvidenceAttachment[];
+}
+
+/** GitHub issues for one repo (D-bu). Every write is queued serially per repo (AD-27 rule 1). */
+export interface IssueService {
+  /** `gh label create … --force` for each missing label (idempotent). */
+  ensureLabels(repo: GitHubRepo, labels: readonly string[]): Promise<void>;
+  /** Every `vtc:auto` issue, open and closed, from the issues API (never search). */
+  listAutomatic(repo: GitHubRepo): Promise<readonly AutoIssueRef[]>;
+  create(repo: GitHubRepo, request: AutoIssueRequest): Promise<AutoIssueRef>;
+  /** Replaces the body (the occurrence table) through `--body-file`. */
+  editBody(repo: GitHubRepo, number: number, request: AutoIssueRequest): Promise<void>;
+  /** A comment that carries `AUTO_COMMENT_MARKER`. */
+  comment(repo: GitHubRepo, number: number, request: AutoIssueRequest): Promise<void>;
+  reopen(repo: GitHubRepo, number: number, comment: string): Promise<void>;
+  close(
+    repo: GitHubRepo,
+    number: number,
+    reason: "completed" | "not_planned",
+    comment: string,
+  ): Promise<void>;
+}
+
+/** An automatic PR as VTC reads it back. */
+export interface AutoPrRef {
+  readonly number: number;
+  readonly url: string;
+  readonly headRefName: string;
+  readonly headSha: string;
+  readonly isDraft: boolean;
+  readonly state: "open" | "closed" | "merged";
+  readonly labels: readonly string[];
+  readonly marker: AutoMarker | null;
+}
+
+export interface AutoPrRequest extends AutoIssueRequest {
+  readonly kind: AutoKind;
+  readonly fingerprint: AutoFingerprint;
+  /** `autoBranchName(kind, fingerprint)`, already pushed through {@link GitPlumbing.push}. */
+  readonly branch: string;
+  /** The repo's default branch (`gh repo view --json defaultBranchRef`). */
+  readonly base: string;
+}
+
+/**
+ * Automatic PRs for one repo (D-bw): always opened as draft, marked ready only once evidence and
+ * the Spec-Verifier verdict are complete, never merged, never auto-merged, never self-reviewed.
+ */
+export interface AutoPullRequestService {
+  listOpenAutomatic(repo: GitHubRepo): Promise<readonly AutoPrRef[]>;
+  openDraft(repo: GitHubRepo, request: AutoPrRequest): Promise<AutoPrRef>;
+  editBody(repo: GitHubRepo, number: number, request: AutoIssueRequest): Promise<AutoPrRef>;
+  markReady(repo: GitHubRepo, number: number): Promise<AutoPrRef>;
+  /**
+   * Closes with a comment. Deletes the branch only when its remote head is still `deleteIfHead`
+   * (the last commit VTC pushed), so a human's commits are never deleted.
+   */
+  close(repo: GitHubRepo, number: number, comment: string, deleteIfHead?: string): Promise<void>;
+}
+
+/** One file of a plumbing commit: new bytes, or `null` to delete the path. */
+export interface PlumbingChange {
+  readonly path: RelPath;
+  readonly bytes: Uint8Array | null;
+}
+
+/**
+ * Local git plumbing for one repo directory (engine core's `git.createGitPlumbing`). It writes
+ * objects and refs only: no checkout, no work-tree or index change (a temporary index), the
+ * user's own git and credentials, no signing override, never `--force`.
+ */
+export interface GitPlumbing {
+  /** The commit `ref` names locally, or `null`. */
+  resolve(ref: string): Promise<GitSha | null>;
+  /**
+   * A new commit whose tree is `base`'s tree with `changes` applied (`base` null: an empty tree,
+   * for the orphan evidence branch), with `parents` and `message`; returns its id.
+   */
+  commit(request: {
+    readonly base: GitSha | null;
+    readonly parents: readonly GitSha[];
+    readonly changes: readonly PlumbingChange[];
+    readonly message: string;
+  }): Promise<GitSha>;
+  /** `git update-ref <ref> <sha> <expected>`; fails when the ref moved (`expected` null = new). */
+  updateRef(ref: string, sha: GitSha, expected: GitSha | null): Promise<void>;
+  /**
+   * `git push <remote> <sha>:<dst>` without force. Refuses a `dst` that `autoPushRefAllowed`
+   * rejects or that names the default branch.
+   */
+  push(remote: string, sha: GitSha, dst: string): Promise<void>;
+  /**
+   * `git fetch --no-tags --prune <remote> <refspecs…>`, into remote-tracking refs only
+   * (`refs/remotes/<remote>/…`), and only for the shared automation branches (every
+   * `vtc/auto/<kind>/<fp8>` and `vtc-evidence`); never a local branch, a tag, the index or the
+   * work tree; the user's own git and credentials, no prompt. Rejects on a refspec outside that
+   * set or when git fails. Replaces the upstream module's `RemoteRefs.fetch` seam. Optional so an
+   * implementation before 5.4.0 still compiles; engine core's has it from round 5. New in 5.4.0.
+   */
+  fetch?(remote: string, refspecs: readonly string[]): Promise<void>;
+  /**
+   * A commit's full message, read from the object (`git cat-file commit`), or `null` when the repo
+   * lacks it; replaces `RemoteRefs.message` (another installation's head is recognised by its
+   * `Generated-by: VTC` trailer). New in 5.4.0.
+   */
+  message?(sha: GitSha): Promise<string | null>;
+  /**
+   * The repo-relative paths `head` changes against its merge base with `base`
+   * (`git diff --name-only base...head`), so the upstream module can refuse an automatic PR that
+   * touches files its kind may not (a routing PR changes only `packages/shared/src/tier-routing.ts`,
+   * reading 219) before it opens (AD-8; `AutomationSkipReason` `out_of_scope`, 5.6.0). Renames
+   * name both paths. Throws when git fails. New in 5.5.0; engine core's implements it from 5.6.0.
+   */
+  changedPaths?(base: GitSha, head: GitSha): Promise<readonly string[]>;
+  /** The merge base of two commits (`git merge-base`), or `null` when they share none. New in 5.5.0. */
+  mergeBase?(a: GitSha, b: GitSha): Promise<GitSha | null>;
+}
+
+/** Engine core implements it as `git.createGitPlumbing`. */
+export type CreateGitPlumbing = (deps: { readonly repoRoot: string }) => GitPlumbing;
+
+/** One thing to capture from a loopback page (the evidence snapshot server, AD-27 rule 6). */
+export interface EvidenceShot {
+  /** The output file name (`EvidenceFileNameSchema`). */
+  readonly name: string;
+  readonly kind: EvidenceFileKind;
+  /** Path and query on the capture origin, e.g. `/runs/R1?evidence=upstream#replay`. */
+  readonly path: string;
+  readonly viewport: { readonly width: number; readonly height: number };
+  /** Video: record this long at most; absent = a screenshot. */
+  readonly videoSeconds?: number;
+  /** A selector that must be visible before capture starts. */
+  readonly waitFor?: string;
+}
+
+export interface EvidenceCaptureRequest {
+  /** `http://127.0.0.1:<port>`: the only origin the browser may reach; every other request aborts. */
+  readonly origin: string;
+  /** Absolute output directory (the per-action staging directory). */
+  readonly outDir: string;
+  readonly shots: readonly EvidenceShot[];
+  /** Painted as solid blocks before any frame (video too) and masked on screenshots. */
+  readonly redactSelectors: readonly string[];
+  /**
+   * Values that must not be visible: known secret values and, for an upstream target, the
+   * project-identifier denylist. A visible hit discards the file (never the matched text in
+   * any report).
+   */
+  readonly denyText: readonly string[];
+}
+
+export interface EvidenceCaptureResult {
+  readonly files: readonly {
+    readonly name: string;
+    readonly kind: EvidenceFileKind;
+    readonly bytes: number;
+  }[];
+  /** Shots that failed or were discarded by the redaction scan, with a reason that holds no matched text. */
+  readonly failed: readonly { readonly name: string; readonly reason: string }[];
+}
+
+/**
+ * A UI before/after capture for an automatic PR (D-ct; spine §5 reading 223): Final Review of an
+ * automatic run whose change touches UI only. The gate runner checks out `base` a second time in
+ * a clean gate checkout, installs, builds and serves it in the gate sandbox with the project's
+ * committed `gates.yml` (`visual.app`), renders the Visual QA screens at the Visual QA viewports,
+ * and does the same for `head`; with `flowSeconds` it also records the changed flow on both.
+ * Every frame passes the same redaction as {@link EvidenceCaptureRequest}. It costs build time,
+ * no AI tokens.
+ */
+export interface BeforeAfterRequest {
+  /** Absolute path of the project checkout the run belongs to (read only; never its work tree). */
+  readonly repoRoot: string;
+  /** The PR's base: the default branch commit the automatic branch was cut from. */
+  readonly base: GitSha;
+  /** The PR's head. */
+  readonly head: GitSha;
+  /** Absolute output directory (the per-action staging directory). */
+  readonly outDir: string;
+  /** Screen ids (`screens.yaml`) the change touches; absent: every Visual QA screen. */
+  readonly screens?: readonly string[];
+  /** Record the changed flow for at most this long (≤ `EVIDENCE_LIMITS.maxFlowSeconds`); absent: no video. */
+  readonly flowSeconds?: number;
+  /**
+   * The id of the flow to script on both sides (`.vtc/design/flows.yaml`, `DesignFlowsFileSchema`;
+   * D-ct; spine §5 reading 247(7)), chosen by the upstream module with `selectDesignFlow` from the
+   * head's flows file. Each side reads the flow from its own commit's flows file and runs its
+   * steps while it records, within `flowSeconds`; a side whose file lacks the flow, or whose steps
+   * fail, records the first screen as before and says so in {@link BeforeAfterResult}`.flow`.
+   * Absent: no flow is scripted (the first-screen recording). New in 5.7.0.
+   */
+  readonly flow?: string;
+  readonly redactSelectors: readonly string[];
+  readonly denyText: readonly string[];
+}
+
+export interface BeforeAfterResult {
+  /** `ui_before` / `ui_after` screenshots and `flow_video` files, by their neutral names. */
+  readonly files: EvidenceCaptureResult["files"];
+  readonly failed: EvidenceCaptureResult["failed"];
+  /**
+   * Set when a side is missing: the PR keeps `evidence: partial` with this reason (the base did
+   * not build or serve, no `visual.app`, no browser, …) and a detail that holds no project text.
+   */
+  readonly partial?: { readonly reason: EvidencePartialReason; readonly detail: string };
+  /**
+   * What each side's `flow_video` shows when the request named a `flow`: `scripted` (every step
+   * ran), `idle` (the side's flows file has no such flow, so the first screen was recorded) or
+   * `failed` (a step failed; the recording up to it is kept). The PR caption follows it. New in
+   * 5.7.0.
+   */
+  readonly flow?: {
+    readonly id: string;
+    readonly before: "scripted" | "idle" | "failed";
+    readonly after: "scripted" | "idle" | "failed";
+  };
+}
+
+/**
+ * Evidence capture (D-ce), implemented by the gate-runner team over the visual toolchain and the
+ * gate sandbox (AD-24); nothing is downloaded at capture time.
+ */
+export interface EvidenceRecorder {
+  /**
+   * UI before/after (D-ct, {@link BeforeAfterRequest}). Optional so a recorder before 5.4.0 still
+   * compiles; absent, a UI automatic PR stays `evidence: partial` (reading 212(10)). New in 5.4.0.
+   */
+  captureBeforeAfter?(request: BeforeAfterRequest): Promise<BeforeAfterResult>;
+  capture(request: EvidenceCaptureRequest): Promise<EvidenceCaptureResult>;
+  /**
+   * Renders a gate report and its test results to self-contained HTML in `outDir` (the non-UI
+   * evidence of D-ce) and returns its file name, for `capture` to screenshot.
+   */
+  renderGateReport(request: {
+    readonly report: GateReport;
+    readonly outDir: string;
+  }): Promise<{ readonly html: string }>;
+}
+
+/**
+ * What the cli hands the daemon for automation (`EngineDeps.automation`). Absent: automation is
+ * off with a visible note. The cli reads the user settings from `~/.vtc/config.yaml`; the project
+ * settings come from `project.yaml` at the run's commit.
+ */
+export interface AutomationDeps {
+  /** Default: the upstream module's `gh`-backed services. */
+  readonly issues?: IssueService;
+  readonly pullRequests?: AutoPullRequestService;
+  /** Absent: no capture is possible, so no automatic PR opens (issues still do). */
+  readonly evidence?: EvidenceRecorder;
+  readonly plumbing?: CreateGitPlumbing;
+  /**
+   * `~/.vtc/config.yaml` `upstream` (D-bz, D-by). The cli supplies live getters for `repo`,
+   * `share` and `checkout`: consumers read each field at each use and never spread, clone or parse
+   * the object once, so a `share: false` set between queueing and sending an item still stops it
+   * (AD-27 rule 5).
+   */
+  readonly upstream: {
+    readonly repo: GitHubRepo;
+    /** The user-level switch for all projects; default true. */
+    readonly share: boolean;
+    /** Absolute path of a local bs-vtc clone set up for VTC, for upstream PRs; absent: issues only. */
+    readonly checkout?: string;
+  };
+  /**
+   * Resolved by the cli when the daemon starts (`gh --version` and the remote host); the user's
+   * `automation.evidence_hosting` is read live.
+   */
+  readonly hosting: EvidenceHosting;
+  /** ffmpeg is on PATH (GIF previews; without it, `branch` hosting marks evidence partial). */
+  readonly ffmpeg: boolean;
+  /**
+   * Whether the user's `gh` is logged in now (D-bz): `gh auth status`'s exit code only, prompts
+   * disabled, nothing it prints kept and no token read (AD-27 rule 1); `false` without gh. The
+   * daemon asks when it starts and again on its sweep timer, and `AutomationContext.ghLoggedIn`
+   * is the last answer, so a logged-out gh turns automation off with a visible note. Absent: the
+   * caller checked the login before it injected automation. New in 5.2.0.
+   */
+  readonly ghLogin?: () => Promise<boolean>;
+  /**
+   * Scans VTC's own dependencies for advisories (D-bv (4), spine §5 reading 216): the lockfile this
+   * VTC was built from (embedded in the binary; the product repo's in development), read by the
+   * pinned osv-scanner offline against the database `vtc calibrate` downloaded, in the gate
+   * sandbox. Each advisory id and package name; `null` when it cannot scan (no database: nothing
+   * is downloaded for it). The daemon asks at most once a day and raises each advisory as a
+   * `security` issue in VTC's repo, whatever project it runs for. Absent: not scanned. New in
+   * 5.3.0.
+   */
+  readonly vtcAdvisories?: () => Promise<
+    readonly { readonly id: string; readonly package: string }[] | null
+  >;
+}

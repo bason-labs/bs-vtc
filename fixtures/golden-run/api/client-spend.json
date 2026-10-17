@@ -1,0 +1,30 @@
+{
+  "scope": "_shared",
+  "client": null,
+  "total_usd": 3.42,
+  "unpriced_runs": 0,
+  "projects": [
+    {
+      "repo_key": "0123456789abcdef",
+      "project": "app",
+      "runs": 1,
+      "spent_usd": 3.42,
+      "last_finished_at": "2026-10-12T17:00:00.000Z"
+    }
+  ],
+  "runs": [
+    {
+      "v": 1,
+      "scope": "_shared",
+      "client": null,
+      "repo_key": "0123456789abcdef",
+      "project": "app",
+      "run": "golden-0",
+      "outcome": "done",
+      "finished_at": "2026-10-12T17:00:00.000Z",
+      "spent_usd": 3.42,
+      "unpriced_runs": 0,
+      "features": [{ "feature": "F-1", "title": "Password reset", "spent_usd": 3.42 }]
+    }
+  ]
+}

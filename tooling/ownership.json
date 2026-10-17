@@ -1,0 +1,80 @@
+{
+  "$comment": "AD-15: who owns every path. A file belongs to a team when it matches one of the team's globs and none of its '!' exclusions. tooling/arch-tests checks that every file in the repo has exactly one owner; `pnpm verify:scope <team> --base <ref>` fails when a team branch changes a file outside its globs. `regenerated` files are owned by the integrator but rewritten by tools on any branch (pnpm-lock.yaml after a team edits its own package.json), so verify:scope lets any team change them; the integrator re-resolves them on the integration branch and nobody hand-merges them (AD-15 rule 2).",
+  "regenerated": ["pnpm-lock.yaml"],
+  "teams": {
+    "integrator": [
+      "packages/shared/**",
+      "!packages/shared/src/helpers/redaction.ts",
+      "packages/engine/package.json",
+      "packages/engine/tsconfig*.json",
+      "packages/engine/vitest.config.ts",
+      "packages/engine/src/index.ts",
+      "docs/**",
+      "README.md",
+      "tooling/**",
+      ".dependency-cruiser.cjs",
+      "eslint.config.js",
+      "tsconfig*.json",
+      "turbo.json",
+      "vitest.shared.ts",
+      "vitest.tmpdir.ts",
+      "vitest.config.ts",
+      "package.json",
+      "pnpm-workspace.yaml",
+      "pnpm-lock.yaml",
+      ".gitignore",
+      ".nvmrc",
+      ".prettierrc.json",
+      ".prettierignore",
+      ".githooks/**",
+      ".github/**",
+      "!.github/workflows/release.yml"
+    ],
+    "engine-core": [
+      "packages/engine/**",
+      "!packages/engine/package.json",
+      "!packages/engine/tsconfig*.json",
+      "!packages/engine/vitest.config.ts",
+      "!packages/engine/src/index.ts",
+      "!packages/engine/src/gates/**",
+      "!packages/engine/test/gates/**",
+      "!packages/engine/src/lookback/**",
+      "!packages/engine/src/research/**",
+      "!packages/engine/test/lookback/**",
+      "!packages/engine/test/research/**",
+      "!packages/engine/src/upstream/**",
+      "!packages/engine/test/upstream/**",
+      "fixtures/golden-run/**"
+    ],
+    "gate-runner": [
+      "packages/engine/src/gates/**",
+      "packages/engine/test/gates/**",
+      "gates/**",
+      "packages/cli/src/commands/calibrate.ts",
+      "packages/shared/src/helpers/redaction.ts",
+      "THIRD_PARTY/**",
+      "NOTICE"
+    ],
+    "roles-compiler": ["roles/**", "skills/**", "plugins/**", "packages/compiler/**"],
+    "adapters": ["packages/adapters/**"],
+    "dashboard": ["apps/dashboard/**", "fixtures/dashboard-export/**"],
+    "cli-binary": [
+      "packages/cli/**",
+      "!packages/cli/src/commands/calibrate.ts",
+      ".github/workflows/release.yml",
+      "packaging/**",
+      "CHANGELOG.md"
+    ],
+    "lookback-research": [
+      "packages/engine/src/lookback/**",
+      "packages/engine/src/research/**",
+      "packages/engine/test/lookback/**",
+      "packages/engine/test/research/**"
+    ],
+    "upstream": [
+      "packages/engine/src/upstream/**",
+      "packages/engine/test/upstream/**",
+      "fixtures/upstream-evidence/**"
+    ]
+  }
+}

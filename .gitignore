@@ -3,3 +3,16 @@
 claude-session-*.zip
 # VTC local state (when the product runs here)
 .vtc/state/
+# build + tooling output
+node_modules/
+dist/
+# Next.js build cache and static export (apps/dashboard/out, AD-20)
+.next/
+out/
+# planted build output that proves AD1-no-imports-of-build-output fires
+!tooling/arch-tests/fixtures/repo/packages/engine/dist/
+.turbo/
+coverage/
+*.tsbuildinfo
+# Claude Code runtime state of a local session (not repo content)
+.claude/scheduled_tasks.lock

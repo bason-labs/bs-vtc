@@ -1,0 +1,520 @@
+/**
+ * Owner: cli+binary team; the scanner pins and store come from the Gate Runner (gate-runner
+ * team). `vtc doctor [--download]` checks the prerequisites (§4.4): the runtime, git, the host
+ * CLIs and their logins (through `claude auth status --json` and `codex login status` only,
+ * AD-9; an apiKeyHelper-only Claude setup warns, D-ab), gh, the auto-resume timer (launchd on
+ * macOS, systemd on Linux, none on Windows in v1: D-aj), the credential variables the detached
+ * daemon passes (`~/.vtc/config.yaml` `env_passthrough`, D-ak), the OS sandbox gate commands
+ * run in (none fails unless the user opted in with `gates.allow_unsandboxed`, which warns; D-al),
+ * the repo's Claude session sandbox and what it misses (D-an), the repo's running engine (one
+ * of an incompatible `vtc` fails), the visual stack's browser against its pin (AD-24), the pinned
+ * scanners (`gates.createScannerStore`; Checkov without a native build warns, D-u) and the
+ * osv-scanner offline database. Since wave 3 also: Claude Code's minimum version for headless
+ * runs (`CLAUDE_MIN_VERSION`, AD-25), each adapter's `authStatus()` (what the engine checks before
+ * an unattended run), and in a VTC repo the merge level with the Level-3 preflight (AD-23 rule 1).
+ * Since the wave-3 closing round: an API-key login warns with `API_KEY_BILLING_WARNING` and fails
+ * nothing (D-bq); the user's Claude hooks and enabled plugins that headless role runs load under
+ * `--setting-sources user` are listed as a §7 accepted residual, read from the user's
+ * `settings.json` only (D-bp); research search on the host's own web search, or the configured
+ * keyed provider (H-3); and whether the user's own yt-dlp is there for YouTube transcripts (D-bs).
+ * Since round 4 (AD-27): the gh login through `gh auth status`'s exit code only, the evidence
+ * hosting gh allows and the browser capture uses, ffmpeg (optional: GIF previews), the project's
+ * automation settings and notes (`automationFor`), the neutral notice for provider billing (D-ci)
+ * and where research roles get host web search (D-cf).
+ * Since round 5 (H-9): the effective routing (`routing-view.ts`, also `vtc config`): the routing
+ * table and the project's `routing` range (a `min_tier` above `max_tier` fails), each host's tier
+ * → model map (effort only where a tier has no model id), and the user's Lookback replay pace
+ * (an invalid `~/.vtc/config.yaml` `lookback` fails).
+ * Since round 6: each shipped price table's models, source and date, and the user's `prices`
+ * overrides, warning only when a host that reports no cost has no known price at all (H-12,
+ * `prices.ts`); the model ids a host refused, with the last time and detail (D-cx,
+ * `model-refusals.ts`).
+ * Since the owner's first run (readings 264, 265): a long list (a session sandbox with hundreds of
+ * missing deny rules) is counted with a few examples, `--verbose` prints it whole; a
+ * `.vtc/project.yaml` or `.vtc/gates.yml` that the repo's ignore rules keep out of git warns
+ * and names the rule (`vtc-config-ignore.ts`). Doctor never suggests the statusline shim (H-10).
+ * `info` lines report and never fail.
+ * `--download` fetches the missing scanners into `~/.vtc/`, each verified against its pinned
+ * SHA-256 (§4.4), and refreshes the osv-scanner database into `~/.vtc/osv-db/` for the repo's
+ * lockfiles. `--install-browser` (explicit only, D-ay) installs the browser store and its pin
+ * (`browser-install.ts`). Exits 1 when a required check fails.
+ */
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { ADAPTER_FACTORIES } from "@vtc/adapters";
+import { core, gates, git } from "@vtc/engine";
+import {
+  hostConfigDirsOf,
+  type HostAdapter,
+  type HostAuthStatus,
+  type HostId,
+  type ProjectConfig,
+} from "@vtc/shared";
+import {
+  checkAutomation,
+  checkEvidence,
+  checkFfmpeg,
+  checkGhLogin,
+  checkHostWeb,
+  checkProviderBilling,
+  checkUpstreamCheckout,
+  inspectCheckout,
+  type CheckoutFacts,
+} from "../automation-checks.js";
+import {
+  hostingRequestOf,
+  probeAutomation,
+  shippedAutomationFactories,
+  upstreamSettingsOf,
+  type AutomationProbe,
+} from "../automation-wiring.js";
+import {
+  checkBrowser,
+  defaultBrowserInstallDeps,
+  installBrowser,
+  sha256OfFile,
+  type BrowserCheckEnv,
+} from "../browser-install.js";
+import { daemonState } from "../daemon.js";
+import { checkClaudeUserSettings } from "../claude-user-settings.js";
+import {
+  checkEngine,
+  checkHostAuth,
+  checkHostBilling,
+  checkMergeLevel,
+  checkEnvPassthrough,
+  checkGateSandbox,
+  checkToolsHashedAfterScripts,
+  checkSessionSandbox,
+  checkVtcConfigIgnored,
+  detectGateSandbox,
+  runDoctorChecks,
+  type DoctorCheck,
+  type DoctorEnv,
+  type GateSandboxReport,
+  type MergeLevelEnv,
+} from "../doctor-checks.js";
+import { createGhRemoteMerge } from "../gh-remote-merge.js";
+import {
+  checkModelRefusals,
+  readModelRefusals,
+  type ModelRefusalsRead,
+} from "../model-refusals.js";
+import { checkPrices, priceTablesOf, type HostPriceTable } from "../prices.js";
+import { exec } from "../process.js";
+import { printable } from "../human-gesture.js";
+import { findRepoRoot, isVtcProject } from "../repo.js";
+import {
+  readProjectRouting,
+  routingChecks,
+  routingView,
+  type ProjectRoutingRead,
+  type WeeklyWindows,
+} from "../routing-view.js";
+import { checkResearchSearch, checkYtDlp, findYtDlp } from "../research-checks.js";
+import {
+  checkOsvDatabase,
+  checkScanners,
+  downloadOsvDatabase,
+  osvFetchedAt,
+  type OsvEnv,
+  type ScannerEnv,
+} from "../scanner-checks.js";
+import { wakeRecords } from "../scheduler.js";
+import {
+  claudeSessionSandboxOf,
+  defaultSessionSandboxEnv,
+  readClaudeUserSettings,
+  type LocalSettingsRead,
+  type SessionSandboxReport,
+} from "../session-sandbox.js";
+import { ignoredVtcConfig, type IgnoredVtcConfig } from "../vtc-config-ignore.js";
+import { autoResumeTimer, defaultTimerHost } from "../timer.js";
+import { readUserConfig, type UserConfigRead } from "../user-config.js";
+import { createAdapters } from "../wiring.js";
+import { readWeeklyWindows } from "./config.js";
+import { readMergeLevelLedger } from "./merge-level.js";
+import type { CommandContext, CommandSpec } from "./types.js";
+import { EXIT, guarded, parseFlags } from "./util.js";
+
+/** The user config when doctor is given none to read: every default. */
+const NO_USER_CONFIG: UserConfigRead = {
+  ok: true,
+  path: "~/.vtc/config.yaml",
+  config: { version: 1, env_passthrough: [] },
+};
+
+const MARK = { ok: "ok  ", info: "info", warn: "warn", fail: "FAIL" } as const;
+
+const readOrNull = (path: string): string | null => {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+};
+
+/** What `vtc doctor` checks; each optional part is skipped when absent. */
+export interface DoctorCommandEnv extends DoctorEnv {
+  readonly scanners?: ScannerEnv;
+  /** The osv-scanner offline database; checked with the scanners. */
+  readonly osv?: OsvEnv;
+  /** `~/.vtc/config.yaml` (D-ak). */
+  readonly userConfig?: () => UserConfigRead;
+  /** The running engine of the repo doctor runs in, or `null` (no repo, no daemon). */
+  readonly engine?: () => Promise<DoctorCheck | null>;
+  /** The visual stack's browser pin (AD-24). */
+  readonly browser?: BrowserCheckEnv;
+  /** `--install-browser`: installs the store and writes the pin (D-ay, explicit only). */
+  readonly installBrowser?: (log: (line: string) => void) => Promise<unknown>;
+  /** Each adapter's `authStatus()` (AD-25 rule 3); hosts without one are left out. */
+  readonly hostAuth?: () => Promise<readonly HostAuthStatus[]>;
+  /** The merge level of the VTC repo doctor runs in (AD-23), `null` outside one. */
+  readonly mergeLevel?: () => Promise<MergeLevelEnv | null>;
+  /** The OS sandbox gate commands run in (D-al), `null` when the machine has none. */
+  readonly gateSandbox?: () => Promise<GateSandboxReport>;
+  /** The Claude session sandbox of the repo doctor runs in (D-an), `null` outside a repo. */
+  readonly sessionSandbox?: () => Promise<SessionSandboxReport | null>;
+  /** The repo's `.vtc/project.yaml` / `gates.yml` its ignore rules match; `null` outside a repo. */
+  readonly vtcConfigIgnored?: () => Promise<readonly IgnoredVtcConfig[] | null>;
+  /** The user's Claude `settings.json`, whose hooks and plugins headless role runs load (D-bp). */
+  readonly claudeUserSettings?: () => LocalSettingsRead;
+  /** The user's own yt-dlp for YouTube transcripts, `null` when absent (D-bs). */
+  readonly ytDlp?: () => Promise<string | null>;
+  /** The environment the research search key is read from (H-3). Default: none set. */
+  readonly researchEnv?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Automation (AD-27): this machine's gh, login, ffmpeg and origin remote, and the `project.yaml`
+   * settings of the VTC repo doctor runs in (`null` outside one; throws when it does not load).
+   */
+  readonly automation?: {
+    readonly probe: () => Promise<AutomationProbe>;
+    readonly project: () => Promise<Pick<ProjectConfig, "upstream" | "automation"> | null>;
+    /** This build has the gate runner's evidence recorder; absent: not reported. */
+    readonly recorder?: boolean;
+    /** What is at `upstream.checkout` (D-by); absent: not checked. */
+    readonly checkout?: (path: string) => Promise<CheckoutFacts>;
+  };
+  /**
+   * The shipped default price tables of the adapters that ship one (H-12,
+   * `HostAdapter.defaultPrices`); absent: none are shown.
+   */
+  readonly priceTables?: () => Promise<readonly HostPriceTable[]>;
+  /** The model ids a host refused (D-cx, `<vtcHome>/engines/model-refusals.jsonl`). */
+  readonly modelRefusals?: () => ModelRefusalsRead;
+  /** Each adapter's `capabilities.safeHostWeb` (D-cf). */
+  readonly hostWeb?: () => Promise<Readonly<Partial<Record<HostId, boolean>>>>;
+  /**
+   * The effective routing (H-9, `routing-view.ts`): the project's `routing` and `hosts.models`,
+   * and each host's weekly window from the repo's running engine (never started for it).
+   */
+  readonly routing?: {
+    readonly project: () => Promise<ProjectRoutingRead>;
+    readonly weekly: () => Promise<WeeklyWindows>;
+  };
+}
+
+/** `<name> --version` on PATH: a scanner the user installed where no pinned build exists. */
+const versionOnPath = async (name: string): Promise<string | null> => {
+  const result = await exec(name, ["--version"], { timeoutMs: 15_000 });
+  return result.code === 0 ? result.stdout.trim().split(/\r?\n/)[0] || name : null;
+};
+
+/**
+ * The base branch the engine opens PRs against, from `git rev-parse --abbrev-ref HEAD`, as the
+ * engine's `baseBranch` picks it: the current branch, or `main` when HEAD is detached or on a
+ * `vtc/` branch. Doctor's Level-3 preflight checks that branch.
+ */
+export const engineBaseBranch = (abbrevHead: string): string => {
+  const out = abbrevHead.trim();
+  return out === "" || out === "HEAD" || out.startsWith("vtc/") ? "main" : out;
+};
+
+/**
+ * Every adapter's `authStatus()` (AD-25 rule 3). One that rejects (its host CLI is missing, say)
+ * counts as `logged_in: null`, "its status command did not run", so doctor still reports every
+ * other check; adapters without a status command are left out.
+ */
+export const gatherHostAuth = async (
+  adapters: Partial<Record<HostId, Pick<HostAdapter, "authStatus">>>,
+  now: () => Date,
+): Promise<HostAuthStatus[]> => {
+  const statuses = await Promise.all(
+    (Object.entries(adapters) as [HostId, Pick<HostAdapter, "authStatus">][]).map(
+      async ([host, adapter]): Promise<HostAuthStatus | null> => {
+        if (adapter.authStatus === undefined) return null;
+        try {
+          return await adapter.authStatus();
+        } catch {
+          return { host, logged_in: null, method: null, checked_at: now().toISOString() };
+        }
+      },
+    ),
+  );
+  return statuses.filter((s): s is HostAuthStatus => s !== null);
+};
+
+/** Constructs the adapters only to ask them; no plugin is extracted or installed. */
+const withAdapters = async <T>(
+  vtcHome: string,
+  ask: (adapters: Partial<Record<HostId, HostAdapter>>) => Promise<T>,
+): Promise<T> => {
+  const adapters = createAdapters(ADAPTER_FACTORIES, {
+    vtcHome,
+    pluginDir: (host, home) => join(home, "plugins", "doctor", host),
+    codexHome: hostConfigDirsOf(process.env, homedir()).codex,
+  });
+  try {
+    return await ask(adapters);
+  } finally {
+    await Promise.allSettled(Object.values(adapters).map((a) => a.dispose()));
+  }
+};
+
+export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
+  const timer = autoResumeTimer(process.platform);
+  /** A directory of the user's own, never a repo, to run bare command names in. */
+  const ownDir = (): string => (existsSync(ctx.vtcHome) ? ctx.vtcHome : homedir());
+  return {
+    exec,
+    versions: process.versions,
+    ...(timer === null
+      ? process.platform === "win32"
+        ? { timer: "unsupported" as const }
+        : {}
+      : {
+          timer: {
+            kind: timer.kind,
+            read: () => readOrNull(timer.file(defaultTimerHost())),
+            program: timer.program,
+            exists: existsSync,
+            wakeups: () => wakeRecords(ctx.vtcHome),
+          },
+        }),
+    scanners: { open: gates.createScannerStore, vtcHome: ctx.vtcHome, onPath: versionOnPath },
+    osv: {
+      fetchedAt: osvFetchedAt,
+      checkout: () => findRepoRoot(ctx.cwd),
+      download: downloadOsvDatabase,
+    },
+    userConfig: () => readUserConfig(ctx.vtcHome),
+    engine: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      return repoRoot === null
+        ? null
+        : checkEngine(repoRoot, await daemonState(ctx.vtcHome, repoRoot));
+    },
+    browser: { vtcHome: ctx.vtcHome, sha256: sha256OfFile },
+    installBrowser: (log) => installBrowser(ctx.vtcHome, defaultBrowserInstallDeps(log)),
+    hostAuth: () => withAdapters(ctx.vtcHome, (a) => gatherHostAuth(a, () => new Date())),
+    priceTables: () => withAdapters(ctx.vtcHome, (a) => Promise.resolve(priceTablesOf(a))),
+    modelRefusals: () => readModelRefusals(ctx.vtcHome),
+    hostWeb: () =>
+      withAdapters(ctx.vtcHome, (adapters) =>
+        Promise.resolve(
+          Object.fromEntries(
+            Object.entries(adapters).map(([host, a]) => [
+              host,
+              a.capabilities.safeHostWeb === true,
+            ]),
+          ),
+        ),
+      ),
+    automation: {
+      probe: async () =>
+        probeAutomation(exec, {
+          repoRoot: await findRepoRoot(ctx.cwd),
+          login: true,
+          // gh, ffmpeg and git run by name outside the repo (a repo could ship an ffmpeg.exe)
+          cwd: ownDir(),
+        }),
+      recorder: shippedAutomationFactories().evidence !== undefined,
+      checkout: (path) => inspectCheckout(exec, path, ownDir()),
+      project: async () => {
+        const repoRoot = await findRepoRoot(ctx.cwd);
+        return repoRoot === null || !isVtcProject(repoRoot)
+          ? null
+          : core.loadProjectConfig(repoRoot);
+      },
+    },
+    mergeLevel: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      if (repoRoot === null || !isVtcProject(repoRoot)) return null;
+      const remote = createGhRemoteMerge({ repoRoot });
+      // the branch the engine's PRs target (engine `baseBranch`): the current branch, or `main`
+      // when HEAD is detached or on a VTC branch
+      const head = await git.runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], {
+        allowFailure: true,
+      });
+      return {
+        configured: core.loadProjectConfig(repoRoot).merge_level,
+        ledger: readMergeLevelLedger(repoRoot).entries,
+        base: engineBaseBranch(head.code === 0 ? head.stdout.toString("utf8") : ""),
+        remote: () => remote.remote(),
+        policy: (b) => remote.policy(b),
+      };
+    },
+    gateSandbox: () => Promise.resolve(detectGateSandbox()),
+    sessionSandbox: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      return repoRoot === null
+        ? null
+        : claudeSessionSandboxOf(repoRoot, ctx.vtcHome, defaultSessionSandboxEnv(), ctx.cwd);
+    },
+    vtcConfigIgnored: async () => {
+      const repoRoot = await findRepoRoot(ctx.cwd);
+      return repoRoot === null ? null : ignoredVtcConfig(repoRoot);
+    },
+    claudeUserSettings: () => {
+      const { userSettings } = defaultSessionSandboxEnv();
+      return userSettings === null
+        ? { kind: "absent", path: "~/.claude/settings.json" }
+        : readClaudeUserSettings(userSettings);
+    },
+    routing: {
+      project: async () => readProjectRouting(await findRepoRoot(ctx.cwd)),
+      weekly: async () => readWeeklyWindows(ctx.vtcHome, await findRepoRoot(ctx.cwd)),
+    },
+    ytDlp: async () =>
+      findYtDlp({ pathEnv: process.env.PATH ?? "", repoRoot: await findRepoRoot(ctx.cwd) }),
+    researchEnv: process.env,
+  };
+};
+
+export const createDoctorCommand = (
+  env: (ctx: CommandContext) => DoctorCommandEnv = defaultDoctorEnv,
+): CommandSpec => ({
+  name: "doctor",
+  summary:
+    "Check prerequisites (runtime, git, host CLIs, versions, logins and billing, gh and its login, automation and evidence (gh --attach, ffmpeg, browser), host web search, routing (tier table, project range, models per tier, Lookback pace), price tables and overrides, refused model ids, auto-resume timer, the user hooks and plugins role runs load, env passthrough, research search and yt-dlp, gate sandbox, session sandbox, the repo's engine and merge level, the browser, pinned scanners, osv database, .vtc config kept out of git); --download fetches missing scanners and the osv database; --install-browser installs the visual stack's browser; --verbose lists long lists whole",
+  run: (args, ctx) =>
+    guarded("doctor", ctx, async () => {
+      const { values } = parseFlags(args, {
+        download: { type: "boolean" },
+        "install-browser": { type: "boolean" },
+        verbose: { type: "boolean" },
+      });
+      const e = env(ctx);
+      if (values["install-browser"] === true) {
+        if (e.installBrowser === undefined) throw new Error("this vtc cannot install a browser");
+        try {
+          await e.installBrowser((line) => {
+            ctx.io.out(line);
+          });
+        } catch (error) {
+          ctx.io.err(
+            `vtc doctor: the browser was not installed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return EXIT.failed;
+        }
+      }
+      const checks = await runDoctorChecks(e);
+      const statuses = e.hostAuth === undefined ? null : await e.hostAuth();
+      if (statuses !== null) {
+        const auth = checkHostAuth(statuses);
+        if (auth !== null) checks.push(auth);
+        const billing = checkHostBilling(statuses);
+        if (billing !== null) checks.push(billing);
+        const provider = checkProviderBilling(statuses);
+        if (provider !== null) checks.push(provider);
+      }
+      if (e.claudeUserSettings !== undefined)
+        checks.push(...checkClaudeUserSettings(e.claudeUserSettings()));
+      const userConfig = e.userConfig?.() ?? null;
+      if (userConfig !== null) checks.push(checkEnvPassthrough(userConfig));
+      checks.push(
+        ...checkPrices(userConfig, e.priceTables === undefined ? [] : await e.priceTables()),
+      );
+      if (e.modelRefusals !== undefined) checks.push(...checkModelRefusals(e.modelRefusals()));
+      const search =
+        userConfig === null ? null : checkResearchSearch(userConfig, e.researchEnv ?? {});
+      if (search !== null) checks.push(search);
+      if (e.ytDlp !== undefined) checks.push(checkYtDlp(await e.ytDlp()));
+      if (e.gateSandbox !== undefined)
+        checks.push(checkGateSandbox(await e.gateSandbox(), userConfig));
+      const afterScripts = checkToolsHashedAfterScripts(userConfig);
+      if (afterScripts !== null) checks.push(afterScripts);
+      const session = e.sessionSandbox === undefined ? null : await e.sessionSandbox();
+      if (session !== null)
+        checks.push(checkSessionSandbox(session, { verbose: values.verbose === true }));
+      const ignored = e.vtcConfigIgnored === undefined ? null : await e.vtcConfigIgnored();
+      const ignoredCheck = ignored === null ? null : checkVtcConfigIgnored(ignored);
+      if (ignoredCheck !== null) checks.push(ignoredCheck);
+      const browser = e.browser === undefined ? null : await checkBrowser(e.browser);
+      if (browser !== null) checks.push(browser);
+      if (e.automation !== undefined) {
+        const probe = await e.automation.probe();
+        const login = checkGhLogin(probe);
+        if (login !== null) checks.push(login);
+        const user = userConfig ?? NO_USER_CONFIG;
+        checks.push(
+          checkEvidence(probe, hostingRequestOf(user), browser, e.automation.recorder ?? true),
+        );
+        checks.push(checkFfmpeg(probe.ffmpeg));
+        const upstream = upstreamSettingsOf(user);
+        if (upstream.checkout !== undefined && e.automation.checkout !== undefined)
+          checks.push(
+            checkUpstreamCheckout(
+              upstream.repo,
+              upstream.checkout,
+              await e.automation.checkout(upstream.checkout),
+            ),
+          );
+        try {
+          const project = await e.automation.project();
+          if (project !== null) checks.push(checkAutomation(probe, user, project));
+        } catch (error) {
+          checks.push({
+            name: "automation",
+            status: "fail",
+            // repo content: a message that quotes the file is shown with its controls escaped
+            detail: `cannot read the project's settings: ${printable(error instanceof Error ? error.message : String(error))}`,
+          });
+        }
+      }
+      if (e.hostWeb !== undefined) checks.push(checkHostWeb(statuses ?? [], await e.hostWeb()));
+      if (e.routing !== undefined) {
+        const [project, weekly] = await Promise.all([e.routing.project(), e.routing.weekly()]);
+        checks.push(
+          ...routingChecks(routingView({ project, user: userConfig ?? NO_USER_CONFIG, weekly })),
+        );
+      }
+      const engine = e.engine === undefined ? null : await e.engine();
+      if (engine !== null) checks.push(engine);
+      if (e.mergeLevel !== undefined) {
+        try {
+          const level = await e.mergeLevel();
+          if (level !== null) checks.push(await checkMergeLevel(level));
+        } catch (error) {
+          // e.g. the ledger is a symlink: report it and run the other checks
+          checks.push({
+            name: "merge level",
+            status: "fail",
+            detail: `cannot read it: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
+      if (e.scanners !== undefined) {
+        const mode = values.download === true ? "download" : "check";
+        checks.push(
+          ...(await checkScanners(e.scanners, mode, (line) => {
+            ctx.io.out(line);
+          })),
+        );
+        if (e.osv !== undefined) {
+          if (mode === "download") ctx.io.out("Refreshing the osv-scanner offline database...");
+          const store = (e.scanners.open ?? gates.createScannerStore)({
+            vtcHome: e.scanners.vtcHome,
+          });
+          checks.push(await checkOsvDatabase(e.osv, e.scanners.vtcHome, store, mode));
+        }
+      }
+      for (const c of checks) ctx.io.out(`${MARK[c.status]}  ${c.name.padEnd(12)} ${c.detail}`);
+      const failed = checks.filter((c) => c.status === "fail").length;
+      ctx.io.out(failed === 0 ? "vtc is ready." : `${String(failed)} check(s) failed.`);
+      return failed === 0 ? EXIT.ok : EXIT.failed;
+    }),
+});
+
+export const command = createDoctorCommand();

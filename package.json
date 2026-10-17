@@ -1,0 +1,36 @@
+{
+  "name": "vtc",
+  "private": true,
+  "description": "VTC (Virtual Tech Company): local multi-agent software delivery. Monorepo root.",
+  "type": "module",
+  "packageManager": "pnpm@10.11.0",
+  "engines": {
+    "node": ">=22.14"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint && eslint eslint.config.js vitest.shared.ts vitest.tmpdir.ts vitest.config.ts .dependency-cruiser.cjs",
+    "test": "turbo run test",
+    "deps:check": "depcruise packages apps --config .dependency-cruiser.cjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm typecheck && pnpm lint && pnpm deps:check && pnpm test && pnpm format:check",
+    "verify": "pnpm check && pnpm build",
+    "verify:scope": "node --experimental-strip-types --disable-warning=ExperimentalWarning tooling/arch-tests/src/verify-scope.ts",
+    "hooks:install": "git config core.hooksPath .githooks"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.5",
+    "dependency-cruiser": "18.6.0",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "turbo": "2.11.7",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.2",
+    "vitest": "5.0.4"
+  }
+}

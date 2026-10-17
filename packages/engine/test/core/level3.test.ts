@@ -1,0 +1,756 @@
+/**
+ * Level-3 auto-merge (spec §6.7, D9; spine AD-23; §5 readings 104 and 105) with a fake
+ * `RemoteMergeService`: the preflight at run start (no required checks → Level 2 with a reason
+ * and an escalation), the checklist on the gated SHA, auto-merge bound to it, a moved head that
+ * parks, the post-merge watch that downgrades through the ledger and records the escaped defect,
+ * and `vtc pause` turning auto-merge off.
+ */
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { MERGE_LEVEL_LEDGER, type PullRequestRef, type VisualSummary } from "@vtc/shared";
+import { level3VisualStatus } from "../../src/core/level3.js";
+import { cleanupDirs, git } from "../helpers/repo.js";
+import {
+  authorTests,
+  build,
+  CLAUDE,
+  createHarness,
+  draft,
+  only,
+  passFinalReview,
+  reportCoverage,
+  SPEC_ONE,
+  throughPlan,
+  verdictPass,
+  type Harness,
+  type HarnessOptions,
+} from "../helpers/engine-harness.js";
+
+vi.setConfig({ testTimeout: 30_000 });
+afterEach(cleanupDirs);
+
+interface Line {
+  type: string;
+  feature?: string;
+  run: string;
+  data: Record<string, unknown>;
+}
+
+const eventsOf = (h: Harness, run: string): Line[] =>
+  readFileSync(join(h.repo, `.vtc/runs/${run}/events.jsonl`), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Line);
+const runId = (h: Harness): string => h.engine.status({}).run.id;
+const ofType = (h: Harness, type: string, run = runId(h)): Line[] =>
+  eventsOf(h, run).filter((e) => e.type === type);
+
+const level3 = (over: HarnessOptions = {}): Harness => {
+  const h = createHarness({ project: { merge_level: 3 }, level3: true, ...over });
+  reportCoverage(h);
+  return h;
+};
+
+/** One task from plan to the end of its Final Review (the release runs in the background). */
+const toRelease = async (h: Harness): Promise<void> => {
+  const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+  await authorTests(h, only(actions, "qa"));
+  await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+  await verdictPass(
+    h,
+    only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+    "src/t-1/impl.ts",
+  );
+  await h.engine.settle();
+  await passFinalReview(h);
+};
+
+const gatedSha = (h: Harness): string => {
+  const report = ofType(h, "gate.result").findLast((e) => e.data.reason === "final_review");
+  return String(report?.data.head);
+};
+
+describe("AD-23 rule 1: the Level-3 preflight at run start", () => {
+  it("runs at Level 3 when the base enforces a required check", async () => {
+    const h = level3();
+    await toRelease(h);
+    const run = runId(h);
+    expect(ofType(h, "run.started", run)[0]?.data.merge_level).toBe(3);
+    expect(ofType(h, "merge.preflight", run)[0]?.data).toMatchObject({
+      configured_level: 3,
+      effective_level: 3,
+      ok: true,
+      failed: [],
+    });
+    await h.release();
+  });
+
+  it("a base with no required status check starts the run at Level 2, with the reason and an escalation", async () => {
+    const h = level3();
+    h.remote3.rules = { ...h.remote3.rules, required_checks: [] };
+    await toRelease(h);
+    const run = runId(h);
+    expect(ofType(h, "run.started", run)[0]?.data.merge_level).toBe(2);
+    const preflight = ofType(h, "merge.preflight", run)[0]?.data;
+    expect(preflight).toMatchObject({
+      ok: false,
+      failed: ["no_required_checks"],
+      effective_level: 2,
+    });
+    expect(String(preflight?.detail)).toContain("required status check");
+    const escalation = ofType(h, "escalation.opened", run)[0]?.data.escalation as {
+      reason: string;
+      detail: string;
+    };
+    expect(escalation.reason).toBe("blocked");
+    expect(escalation.detail).toContain("runs at Level 2");
+    // Level 2: the PR is marked ready and nothing is merged by VTC
+    expect(h.remote3.calls.some((c) => c.startsWith("enable"))).toBe(false);
+    expect(h.engine.status({ run }).run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("without a RemoteMergeService the run starts at Level 2", async () => {
+    const h = createHarness({ project: { merge_level: 3 } });
+    await toRelease(h);
+    expect(ofType(h, "merge.preflight")[0]?.data).toMatchObject({ ok: false, effective_level: 2 });
+    expect(ofType(h, "run.started")[0]?.data.merge_level).toBe(2);
+    await h.release();
+  });
+
+  it("gh not signed in fails the preflight before the policy is read", async () => {
+    const h = level3();
+    h.remote3.info = { github: true, ghAuthenticated: false };
+    await toRelease(h);
+    expect(ofType(h, "merge.preflight")[0]?.data).toMatchObject({ failed: ["gh_unauthenticated"] });
+    expect(h.remote3.calls.filter((c) => c.startsWith("policy"))).toEqual([]);
+    await h.release();
+  });
+});
+
+describe("AD-23 rules 2–3: the checklist and auto-merge bound to the gated SHA", () => {
+  it("evaluates the checklist, enables auto-merge on the gated SHA, ships and finishes", async () => {
+    const h = level3();
+    await toRelease(h);
+    const run = runId(h);
+    const sha = gatedSha(h);
+    const checklist = ofType(h, "feature.checklist", run)[0]?.data as {
+      ok: boolean;
+      items: { id: string; ok: boolean }[];
+    };
+    expect(checklist.ok).toBe(true);
+    expect(checklist.items.map((i) => i.id)).toEqual([
+      "final_review",
+      "reviewers",
+      "coverage",
+      "test_integrity",
+      "risk_rules",
+      "waivers",
+      "remote_ci",
+    ]);
+    expect(h.remote3.calls).toContain(`enable vtc/F-1 ${sha.slice(0, 7)} squash`);
+    expect(ofType(h, "feature.auto_merge_enabled", run)[0]?.data).toEqual({
+      pr_number: 7,
+      head_sha: sha,
+      method: "squash",
+      merge_queue: false,
+    });
+    const status = h.engine.status({ run });
+    expect(status.features[0]).toMatchObject({ status: "shipped", pr: { state: "merged" } });
+    expect(status.run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("waits for pending required checks, then merges", async () => {
+    const h = level3();
+    h.remote3.checks = [[{ name: "ci", state: "pending" }], [{ name: "ci", state: "success" }]];
+    await toRelease(h);
+    expect(h.remote3.calls.filter((c) => c.startsWith("checks"))).toHaveLength(2);
+    expect(h.engine.status({ run: runId(h) }).features[0]?.status).toBe("shipped");
+    await h.release();
+  });
+
+  it("a red required check fails the checklist and parks the feature, the PR left for review", async () => {
+    const h = level3();
+    h.remote3.checks = [[{ name: "ci", state: "failure" }]];
+    await toRelease(h);
+    const run = runId(h);
+    const checklist = ofType(h, "feature.checklist", run)[0]?.data as {
+      ok: boolean;
+      items: { id: string; ok: boolean }[];
+    };
+    expect(checklist.ok).toBe(false);
+    expect(checklist.items.find((i) => i.id === "remote_ci")?.ok).toBe(false);
+    expect(h.remote3.calls.some((c) => c.startsWith("enable"))).toBe(false);
+    const status = h.engine.status({ run });
+    expect(status.features[0]).toMatchObject({ status: "parked", park_reason: "blocked" });
+    expect(status.run.finished_at).toBeUndefined();
+    await h.release();
+  });
+
+  it("answering the park retries the auto-merge once the human fixed the cause", async () => {
+    const h = level3();
+    h.remote3.checks = [[{ name: "ci", state: "failure" }]];
+    await toRelease(h);
+    const run = runId(h);
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+    };
+    h.remote3.checks = [[{ name: "ci", state: "success" }]];
+    await h.engine.answer(
+      {
+        escalation: escalation.id,
+        answer: { option: "retry", text: "CI fixed", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await h.engine.settle();
+    const status = h.engine.status({ run });
+    expect(status.features[0]?.status).toBe("shipped");
+    expect(status.run.finished_at).toBeDefined();
+    await h.release();
+  });
+
+  it("the park offers a retry or finishing at Level 2 (D-bd, reading 158)", async () => {
+    const h = level3();
+    h.remote3.checks = [[{ name: "ci", state: "failure" }]];
+    await toRelease(h);
+    const escalation = ofType(h, "escalation.opened").at(-1)?.data.escalation as {
+      options: { id: string; effect: string }[];
+      recommended: string;
+      detail: string;
+    };
+    expect(escalation.options.map((o) => [o.id, o.effect])).toEqual([
+      ["retry", "retry"],
+      ["finish-level-2", "finish_level_2"],
+    ]);
+    expect(escalation.recommended).toBe("retry");
+    expect(escalation.detail).toContain("finish at Level 2");
+    await h.release();
+  });
+
+  it("finishing at Level 2 turns off the auto-merge VTC left on, leaves the PR open and ends the run (D-bd)", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    // the park leaves auto-merge on: GitHub refused to turn it off then
+    const disable = h.remote3.disableAutoMerge.bind(h.remote3);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+    };
+    h.remote3.disableAutoMerge = disable;
+    const calls = h.remote3.calls.length;
+    await h.engine.answer(
+      {
+        escalation: escalation.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await h.engine.settle();
+    expect(h.remote3.calls.slice(calls)).toEqual(["disable vtc/F-1"]);
+    const status = h.engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "ready_to_ship",
+      pr: { state: "open", auto_merge: "disabled" },
+    });
+    expect(status.run.finished_at).toBeDefined();
+    expect(ofType(h, "run.finished", run).at(-1)?.data).toMatchObject({ outcome: "done" });
+    // it changes no merge level: the ledger is for downgrades only (reading 158)
+    expect(existsSync(join(h.repo, MERGE_LEVEL_LEDGER))).toBe(false);
+    expect(ofType(h, "run.merge_level_changed", run)).toEqual([]);
+    await h.release();
+  });
+
+  it("finishing at Level 2 that the engine stopped in the middle of finishes on the next start", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    const disable = h.remote3.disableAutoMerge.bind(h.remote3);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+    };
+    // the answer's call to turn auto-merge off is in flight when the engine stops
+    let calling: () => void = () => undefined;
+    const called = new Promise<void>((resolve) => {
+      calling = resolve;
+    });
+    let hangUp: (error: Error) => void = () => undefined;
+    h.remote3.disableAutoMerge = () => {
+      calling();
+      return new Promise((_resolve, reject) => {
+        hangUp = reject;
+      });
+    };
+    await h.engine.answer(
+      {
+        escalation: escalation.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await called;
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    // the next start (the old engine lost its lock: it can no longer append)
+    h.remote3.disableAutoMerge = disable;
+    const engine = h.reopen();
+    await engine.settle();
+    hangUp(new Error("the engine stopped"));
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    const status = engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "ready_to_ship",
+      pr: { state: "open", auto_merge: "disabled" },
+    });
+    expect(status.run.finished_at).toBeDefined();
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("finishing at Level 2 whose auto-merge cannot be turned off parks again, the run left open", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    const first = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as { id: string };
+    await h.engine.answer(
+      {
+        escalation: first.id,
+        answer: { option: "finish-level-2", who_should_have_caught: "none" },
+      },
+      CLAUDE,
+    );
+    await h.engine.settle();
+    const again = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      id: string;
+      detail: string;
+      options: { id: string }[];
+    };
+    expect(again.id).not.toBe(first.id);
+    expect(again.detail).toContain("could NOT turn its auto-merge off");
+    expect(again.options.map((o) => o.id)).toEqual(["retry", "finish-level-2"]);
+    const status = h.engine.status({ run });
+    expect(status.features[0]?.status).toBe("parked");
+    expect(status.run.finished_at).toBeUndefined();
+    await h.release();
+  });
+
+  it("required checks still pending after the timeout park the feature", async () => {
+    const h = level3();
+    h.remote3.checks = [[{ name: "ci", state: "pending" }]];
+    await toRelease(h);
+    const feature = h.engine.status({ run: runId(h) }).features[0];
+    expect(feature).toMatchObject({ status: "parked", park_reason: "blocked" });
+    const escalation = ofType(h, "escalation.opened").at(-1)?.data.escalation as { detail: string };
+    expect(escalation.detail).toContain("still pending");
+    await h.release();
+  });
+
+  it("a head that moves after auto-merge was enabled parks the feature", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    await toRelease(h);
+    const run = runId(h);
+    // GitHub keeps auto-merge on after a push: VTC turns it off before it parks
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    expect(ofType(h, "feature.auto_merge_disabled", run).at(-1)?.data).toMatchObject({
+      reason: "head_moved",
+    });
+    expect(h.engine.status({ run }).features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "blocked",
+    });
+    await h.release();
+  });
+
+  it("a moved head whose auto-merge cannot be turned off parks with what the human must do", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    await toRelease(h);
+    const run = runId(h);
+    expect(ofType(h, "feature.auto_merge_disabled", run)).toEqual([]);
+    expect(h.engine.status({ run }).features[0]?.status).toBe("parked");
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      detail: string;
+    };
+    expect(escalation.detail).toContain("could NOT turn its auto-merge off");
+    expect(escalation.detail).toContain("--disable-auto");
+    await h.release();
+  });
+
+  it("a PR GitHub merged at a head other than the gated SHA is never marked shipped", async () => {
+    const h = level3();
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      const pr = await enable(request);
+      // the head moved and merged between two polls
+      h.prs.current = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+      return pr;
+    };
+    await toRelease(h);
+    const run = runId(h);
+    const status = h.engine.status({ run });
+    expect(status.features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "blocked",
+      pr: { state: "merged" },
+    });
+    expect(status.run.finished_at).toBeUndefined();
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      detail: string;
+    };
+    expect(escalation.detail).toContain("not at the commit Final Review verified");
+    await h.release();
+  });
+
+  it("a pause that lands while auto-merge is being enabled still turns it off", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    const enable = h.remote3.enableAutoMerge.bind(h.remote3);
+    h.remote3.enableAutoMerge = async (request) => {
+      // vtc pause runs while gh is enabling auto-merge: the feature's PR is not yet recorded as
+      // enabled, so the pause's own sweep skips it
+      await h.engine.pause({});
+      return enable(request);
+    };
+    await toRelease(h);
+    expect(h.remote3.calls.filter((c) => c === "disable vtc/F-1")).toHaveLength(1);
+    expect(h.remote3.calls.indexOf("disable vtc/F-1")).toBeGreaterThan(
+      h.remote3.calls.findIndex((c) => c.startsWith("enable")),
+    );
+    expect(ofType(h, "feature.auto_merge_disabled").at(-1)?.data).toMatchObject({
+      reason: "paused",
+    });
+    expect(h.prs.current?.auto_merge).toBe("disabled");
+    await h.release();
+  });
+
+  it("vtc pause turns off the pending auto-merge VTC enabled", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    let wake: () => void = () => undefined;
+    let waiting: () => void = () => undefined;
+    const asleep = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    h.sleeper = () =>
+      new Promise((resolve) => {
+        wake = resolve;
+        waiting();
+      });
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle().catch(() => undefined);
+    void passFinalReview(h);
+    await asleep; // auto-merge is enabled and the engine waits for the merge
+    await h.engine.pause({});
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    expect(ofType(h, "feature.auto_merge_disabled").at(-1)?.data).toMatchObject({
+      reason: "paused",
+    });
+    h.sleeper = null;
+    wake();
+    await h.engine.settle();
+    expect(h.engine.status({}).run.finished_at).toBeUndefined();
+    await h.release();
+  });
+});
+
+describe("the engine's shutdown during a Level-3 wait", () => {
+  it("stops the wait at once, leaves the auto-merge on GitHub and the feature ready to ship", async () => {
+    const h = level3();
+    h.remote3.mergeOnEnable = false;
+    let waiting: () => void = () => undefined;
+    const asleep = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    // a wait that would last the whole merge timeout unless the shutdown cuts it short
+    h.sleeper = () =>
+      new Promise(() => {
+        waiting();
+      });
+    const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+    await authorTests(h, only(actions, "qa"));
+    await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+    await verdictPass(
+      h,
+      only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+      "src/t-1/impl.ts",
+    );
+    await h.engine.settle().catch(() => undefined);
+    void passFinalReview(h).catch(() => undefined);
+    await asleep;
+    await h.engine.shutdown();
+    expect(h.remote3.calls.some((c) => c.startsWith("disable"))).toBe(false);
+    const status = h.engine.status({});
+    expect(status.features[0]?.status).toBe("ready_to_ship");
+    expect(status.run.finished_at).toBeUndefined();
+    await h.release();
+  });
+});
+
+/** Auto-merge enabled, then the engine shut down while it waited for the merge (left on GitHub). */
+const shutDownAfterEnable = async (h: Harness): Promise<void> => {
+  h.remote3.mergeOnEnable = false;
+  let waiting: () => void = () => undefined;
+  const asleep = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  h.sleeper = () =>
+    new Promise(() => {
+      waiting();
+    });
+  const actions = await throughPlan(h, [draft("T-1")], SPEC_ONE);
+  await authorTests(h, only(actions, "qa"));
+  await build(h, only((await h.engine.next({}, CLAUDE)).actions, "engineer"));
+  await verdictPass(
+    h,
+    only((await h.engine.next({}, CLAUDE)).actions, "spec_verifier"),
+    "src/t-1/impl.ts",
+  );
+  await h.engine.settle().catch(() => undefined);
+  void passFinalReview(h).catch(() => undefined);
+  await asleep;
+  await h.engine.shutdown();
+  expect(h.prs.current?.auto_merge).toBe("enabled");
+  h.sleeper = null;
+};
+
+/**
+ * Someone pushed to the feature branch while the engine was down: the PR's head is no longer the
+ * gated SHA, and the release's push and PR update on the next start report it without
+ * `auto_merge` (as `gh pr view` without `autoMergeRequest` does).
+ */
+const pushWhileDown = (h: Harness): void => {
+  const moved = { ...(h.prs.current as PullRequestRef), head_sha: "d".repeat(40) };
+  h.prs.current = moved;
+  const { auto_merge: _ignored, ...unreported } = moved;
+  const upsert = (): Promise<PullRequestRef> => {
+    h.prs.current = {
+      ...unreported,
+      ...(h.prs.current?.auto_merge === "disabled" ? { auto_merge: "disabled" as const } : {}),
+    };
+    return Promise.resolve(h.prs.current);
+  };
+  h.prs.upsertDraft = upsert;
+  h.prs.markReady = upsert;
+};
+
+describe("the next start after a shutdown that left auto-merge on", () => {
+  it("a head that moved while the engine was down: auto-merge is turned off before the park", async () => {
+    const h = level3();
+    await shutDownAfterEnable(h);
+    pushWhileDown(h);
+    const engine = h.reopen();
+    await engine.settle();
+    const run = engine.status({}).run.id;
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    expect(h.prs.current?.auto_merge).toBe("disabled");
+    expect(ofType(h, "feature.auto_merge_disabled", run).at(-1)?.data).toMatchObject({
+      reason: "head_moved",
+    });
+    expect(engine.status({ run }).features[0]).toMatchObject({
+      status: "parked",
+      park_reason: "blocked",
+    });
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("required checks that stay pending after the restart: auto-merge is turned off before the park", async () => {
+    const h = level3();
+    await shutDownAfterEnable(h);
+    h.remote3.checks = [[{ name: "ci", state: "pending" }]];
+    const engine = h.reopen();
+    await engine.settle();
+    const run = engine.status({}).run.id;
+    expect(h.remote3.calls).toContain("disable vtc/F-1");
+    expect(ofType(h, "feature.auto_merge_disabled", run).at(-1)?.data).toMatchObject({
+      reason: "timeout",
+    });
+    expect(engine.status({ run }).features[0]?.status).toBe("parked");
+    await engine.shutdown();
+    await h.release();
+  });
+
+  it("a disable that fails on the restart parks with what the human must do", async () => {
+    const h = level3();
+    await shutDownAfterEnable(h);
+    pushWhileDown(h);
+    h.remote3.disableAutoMerge = () => Promise.reject(new Error("gh: HTTP 502"));
+    const engine = h.reopen();
+    await engine.settle();
+    const run = engine.status({}).run.id;
+    const escalation = ofType(h, "escalation.opened", run).at(-1)?.data.escalation as {
+      detail: string;
+    };
+    expect(escalation.detail).toContain("could NOT turn its auto-merge off");
+    expect(escalation.detail).toContain("--disable-auto");
+    await engine.shutdown();
+    await h.release();
+  });
+});
+
+describe("AD-23 rules 4–5: the post-merge watch and the ledger", () => {
+  it("a red required base run downgrades through the ledger and records the escaped defect", async () => {
+    const h = level3();
+    await toRelease(h);
+    const run = runId(h);
+    h.remote3.baseRunList = [{ name: "ci", conclusion: "failure", required: true }];
+    await h.engine.watchMerged();
+    await h.engine.settle();
+    expect(ofType(h, "feature.post_merge_ci", run)[0]?.data).toMatchObject({
+      merge_commit: "c".repeat(40),
+      status: "red",
+    });
+    expect(ofType(h, "run.merge_level_changed", run).at(-1)?.data).toEqual({
+      from: 3,
+      to: 2,
+      reason: "post_merge_ci_failure",
+    });
+    expect(ofType(h, "lookback.escaped_defect", run)[0]).toMatchObject({
+      feature: "F-1",
+      data: { merge_commit: "c".repeat(40), kind: "post_merge_ci_failure", tasks: ["T-1"] },
+    });
+    const ledger = readFileSync(join(h.repo, MERGE_LEVEL_LEDGER), "utf8").trim().split("\n");
+    expect(ledger.map((l) => JSON.parse(l) as Record<string, unknown>)).toEqual([
+      expect.objectContaining({
+        kind: "downgrade",
+        cap: 2,
+        reason: "post_merge_ci_failure",
+        feature: "F-1",
+      }),
+    ]);
+    // once: a second poll records nothing new
+    await h.engine.watchMerged();
+    expect(readFileSync(join(h.repo, MERGE_LEVEL_LEDGER), "utf8").trim().split("\n")).toHaveLength(
+      1,
+    );
+    // project.yaml is never edited; the next run starts capped at Level 2, without a preflight
+    expect(readFileSync(join(h.repo, ".vtc/project.yaml"), "utf8")).toContain('"merge_level": 3');
+    git(h.repo, "add", "-A");
+    git(h.repo, "commit", "-qm", "ledger");
+    await h.engine.start(
+      { request: "Next", track: "feature", repo: "existing", has_ui: false, risk_hints: [] },
+      CLAUDE,
+    );
+    const next = runId(h);
+    expect(next).not.toBe(run);
+    expect(ofType(h, "run.started", next)[0]?.data.merge_level).toBe(2);
+    expect(ofType(h, "merge.preflight", next)).toEqual([]);
+    await h.release();
+  });
+
+  it("a revert downgrades too, and green CI downgrades nothing", async () => {
+    const h = level3();
+    await toRelease(h);
+    const run = runId(h);
+    h.remote3.baseRunList = [{ name: "ci", conclusion: "success", required: true }];
+    await h.engine.watchMerged();
+    expect(ofType(h, "feature.post_merge_ci", run).at(-1)?.data).toMatchObject({ status: "green" });
+    expect(existsSync(join(h.repo, MERGE_LEVEL_LEDGER))).toBe(false);
+    h.remote3.reverts = [{ commit: "e".repeat(40), detected_by: "git_log" }];
+    await h.engine.watchMerged();
+    expect(ofType(h, "feature.reverted", run)[0]?.data).toMatchObject({
+      merge_commit: "c".repeat(40),
+      revert: { commit: "e".repeat(40), detected_by: "git_log" },
+    });
+    expect(ofType(h, "lookback.escaped_defect", run)[0]?.data).toMatchObject({ kind: "revert" });
+    expect(readFileSync(join(h.repo, MERGE_LEVEL_LEDGER), "utf8")).toContain('"reason":"revert"');
+    await h.release();
+  });
+
+  it("the watch ends after the window", async () => {
+    const h = level3();
+    await toRelease(h);
+    h.advance(25 * 3_600_000);
+    h.remote3.baseRunList = [{ name: "ci", conclusion: "failure", required: true }];
+    await h.engine.watchMerged();
+    expect(h.remote3.calls.filter((c) => c.startsWith("runs"))).toEqual([]);
+    expect(existsSync(join(h.repo, MERGE_LEVEL_LEDGER))).toBe(false);
+    await h.release();
+  });
+});
+
+describe("the Level-3 visual item (readings 124, 137)", () => {
+  const summary = (over: Partial<VisualSummary> = {}): VisualSummary => ({
+    status: "pass",
+    report: ".vtc/evidence/F-1/gates/a1/visual/report.json",
+    counts: {
+      renders: 1,
+      unreached: 0,
+      axe_violations: 0,
+      axe_incomplete: 0,
+      style_mismatches: 0,
+      diffs_over_budget: 0,
+      token_lint: 0,
+      detector: 0,
+    },
+    findings: [],
+    ...over,
+  });
+
+  it("a pass on the doctor's store (or with no toolchain named) counts", () => {
+    expect(level3VisualStatus(summary({ toolchain: "vtc" }), true)).toBe("pass");
+    expect(level3VisualStatus(summary(), true)).toBe("pass");
+  });
+
+  it("a pass on the project's own Playwright reads as skipped", () => {
+    expect(level3VisualStatus(summary({ toolchain: "project" }), true)).toBe("skipped");
+  });
+
+  it("a failure stays a failure on either toolchain", () => {
+    expect(level3VisualStatus(summary({ status: "fail", toolchain: "project" }), true)).toBe(
+      "fail",
+    );
+  });
+
+  it("no visual step: unchecked for a UI feature, n/a otherwise", () => {
+    expect(level3VisualStatus(undefined, true)).toBe("unchecked");
+    expect(level3VisualStatus(undefined, false)).toBeNull();
+  });
+});

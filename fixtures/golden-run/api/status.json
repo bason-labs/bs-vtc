@@ -1,0 +1,99 @@
+{
+  "run": {
+    "id": "golden-1",
+    "track": "feature",
+    "repo": "existing",
+    "has_ui": false,
+    "risk_hints": ["auth"],
+    "phase": "build",
+    "gates": {
+      "G1": {
+        "status": "approved",
+        "frozen": [
+          {
+            "path": ".vtc/spec/spec.md",
+            "sha256": "7bb78c23849c2262a75ef19db9b4b03743dc9195cc48597c1017d18e44fef18e"
+          }
+        ],
+        "decided_at": "2026-10-13T09:04:00.000Z"
+      },
+      "G2": {
+        "status": "approved",
+        "frozen": [
+          {
+            "path": ".vtc/architecture/spine.md",
+            "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ],
+        "decided_at": "2026-10-13T09:07:00.000Z"
+      }
+    },
+    "paused": false,
+    "merge_level_effective": 2,
+    "started_at": "2026-10-13T09:00:00.000Z",
+    "pipeline_config_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "tasks_by_status": {
+    "merged": 1,
+    "parked": 1
+  },
+  "parked": [
+    {
+      "task": "T-2",
+      "reason": "cap"
+    }
+  ],
+  "features": [
+    {
+      "id": "F-1",
+      "title": "Password reset",
+      "status": "building",
+      "tasks": ["T-1", "T-2"],
+      "integration_branch": "vtc/F-1",
+      "round": 0,
+      "budget_usd": 10,
+      "final_review_budget_usd": 1.5,
+      "spent_usd": 5.6
+    }
+  ],
+  "open_escalations": 1,
+  "budget": {
+    "budget_usd": 10,
+    "spent_usd": 5.6
+  },
+  "usage": {
+    "hosts": [
+      {
+        "host": "claude-code",
+        "source": "statusline",
+        "windows": [
+          {
+            "kind": "five_hour",
+            "label": "five_hour",
+            "window_minutes": 300,
+            "used_pct": 41,
+            "resets_at": "2026-10-13T13:00:00.000Z"
+          },
+          {
+            "kind": "weekly",
+            "label": "seven_day",
+            "window_minutes": 10080,
+            "used_pct": 18,
+            "resets_at": "2026-10-18T00:00:00.000Z"
+          }
+        ],
+        "model_limits": [],
+        "updated_at": "2026-10-13T09:41:00.000Z"
+      },
+      {
+        "host": "codex",
+        "source": "none",
+        "windows": [],
+        "model_limits": [],
+        "updated_at": null
+      }
+    ],
+    "interrupted_tasks": [],
+    "auto_resume_at": null
+  }
+}

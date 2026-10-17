@@ -1,0 +1,667 @@
+/**
+ * Run state projected from the event log (AD-7 rules 5 and 10). Pure: `applyEvent` derives every
+ * engine-owned field from a core event and nothing else, so a replay of `events.jsonl` and the
+ * live engine (which applies each event right after appending it) always agree. Unknown event
+ * types are kept in `events` and otherwise ignored (AD-3 rule 5).
+ */
+import {
+  HOST_IDS,
+  isEventOfType,
+  readEventData,
+  SESSION_DEFAULT_MODEL,
+  type Escalation,
+  type Feature,
+  type Finding,
+  type FrozenArtifact,
+  type GateReport,
+  type HostId,
+  type IntentContract,
+  type MergeLevel,
+  type ModelFallback,
+  type ModelTier,
+  type RoleExit,
+  type Run,
+  type SessionRef,
+  type Task,
+  type TaskStatus,
+  type TierReason,
+  type TokenUsage,
+  type UsageSnapshot,
+  type Verdict,
+  type VtcEvent,
+  type AutomationRunRef,
+} from "@vtc/shared";
+
+/**
+ * How the engine's own `role.failed` starts for a run a resume superseded (`Engine.resume`): such
+ * a run is `stopped`, not the role's failure, and never counts toward the stuck limits
+ * (`consecutiveFailures`, Final Review's). Only the engine writes it: a failure message a Lead or
+ * a host supplied goes through {@link reportedFailureMessage} first.
+ */
+export const SUPERSEDED_RUN_PREFIX = "superseded:";
+
+/**
+ * How the engine's own `role.failed` starts for a headless run whose final output is not a
+ * `RoleResult` (`submitInputFor`): the automation trigger of an upstream `adapter.parse_failure`
+ * defect (D-bv) matches it. Only the engine writes it, as {@link SUPERSEDED_RUN_PREFIX}.
+ */
+export const PARSE_FAILURE_PREFIX = "unparsed:";
+
+/**
+ * How the engine's own detail of a `gate_infra` park starts when the cause is the project's
+ * committed `gates.yml` (none at the base, or not the one the run started with: `baselineGates`):
+ * the one `gate_infra` park VTC reports as a project problem rather than its own defect (reading
+ * 190). Only the engine writes a `gate_infra` detail, and it puts this first.
+ */
+export const PROJECT_GATES_PARK_PREFIX = "project gates.yml:";
+
+/**
+ * A failure message a Lead or a host supplied, as the engine logs it: one that opens like one of
+ * the engine's own ({@link SUPERSEDED_RUN_PREFIX}, {@link PARSE_FAILURE_PREFIX}) is prefixed
+ * `reported: `, so a role or host can never mark its own run stopped, nor word its failure into an
+ * upstream defect (AD-8: the engine decides).
+ */
+export const reportedFailureMessage = (message: string): string => {
+  const opening = message.trimStart();
+  return (
+    [SUPERSEDED_RUN_PREFIX, PARSE_FAILURE_PREFIX].some((p) => opening.startsWith(p))
+      ? `reported: ${message}`
+      : message
+  ).slice(0, 2000);
+};
+
+/**
+ * Whether a run the host refused its model for ends as a model refusal (D-cx, reading 244): it
+ * passed a model flag, it is not already the fallback (a second refusal is an ordinary error), and
+ * it is no replay trial (a trial measures its tier; off it, it measures nothing).
+ */
+export const modelRefusable = (
+  run: Pick<RoleRunRecord, "model" | "modelFallback" | "replayTrial">,
+): boolean =>
+  run.modelFallback === undefined &&
+  run.replayTrial !== true &&
+  run.model !== SESSION_DEFAULT_MODEL &&
+  run.model !== "unknown";
+
+/** One role run (a `role.dispatched` and what became of it). */
+export interface RoleRunRecord {
+  readonly action_id: string;
+  readonly seq: number;
+  readonly role: string;
+  readonly mode?: string;
+  readonly subject?: string;
+  readonly task?: string;
+  readonly feature?: string;
+  readonly prompt_sha: string;
+  readonly host: HostId;
+  readonly model: string;
+  readonly dispatched_at: string;
+  /** The tier the run started on and why (H-9, D-cm); absent on a log written before 5.4.0. */
+  readonly tier?: ModelTier;
+  readonly tier_reason?: TierReason;
+  readonly tier_clamped?: boolean;
+  readonly dispatch: "subagent" | "headless";
+  readonly agent: string;
+  readonly pack: string;
+  readonly resume: SessionRef | null;
+  /** `in_flight` until a terminal event: submitted, rejected, failed, or interrupted by a limit. */
+  status: "in_flight" | "submitted" | "rejected" | "failed" | "interrupted";
+  /** Seq of the terminal event, when there is one. */
+  closedSeq?: number;
+  exit: RoleExit | null;
+  verdicts: { subject: string; verdict: Verdict }[];
+  head?: string;
+  sessionRef: SessionRef | null;
+  tokens: TokenUsage | null;
+  costUsd: number | null;
+  /**
+   * What the run counts toward the budgets (H-12, spine §5 reading 236): `cost_usd`, or for a
+   * run whose model has no known price `role.submitted.budget_usd` (its tokens at the host's price
+   * ceiling), or for a task's rejected, failed or limit-hit run the engine's spend that followed
+   * its close ({@link RunState.unpricedCloses}); `null` when nothing is known. Since contracts
+   * 5.8.0 (reading 249) those closing events carry `budget_usd` themselves, so a task-less run
+   * (an advisor, the front half) counts too; the inference from the following spend stays for
+   * logs written before 5.8.0.
+   */
+  budgetUsd: number | null;
+  rejection?: { reason: string; issues: string[] };
+  /**
+   * A failed run the engine or the human stopped, not the role's failure: a resume superseded it
+   * ({@link SUPERSEDED_RUN_PREFIX}), `vtc pause` killed it (`killedByPause`), or the engine
+   * stopped it when its task parked on budget (`stoppedOnBudget`).
+   */
+  stopped?: boolean;
+  /**
+   * The engine-launched run ended with cause `budget` while its task was parked: the engine
+   * killed it on the park (§11). Engine facts only, so replay sees the same.
+   */
+  stoppedOnBudget?: boolean;
+  /**
+   * The engine-launched run ended killed while the run was paused (`headless.ended` with cause
+   * `killed` after a `run.paused`): engine facts only, so replay sees the same.
+   */
+  killedByPause?: boolean;
+  /**
+   * The dispatch passes no model flag because the host refused the one it resolved on an earlier
+   * attempt (`role.dispatched.model_fallback`, D-cx; spine §5 reading 244).
+   */
+  readonly modelFallback?: ModelFallback;
+  /** A Lookback replay trial (`role.dispatched.purpose` `lookback_replay`, reading 177). */
+  readonly replayTrial?: boolean;
+  /**
+   * The host refused the run's model before any work (`headless.ended` with cause
+   * `model_refused`, D-cx): the run ends stopped, neither a failure nor a fix round, and the step
+   * is dispatched once more without a model flag. Only a run with a model flag that is not itself
+   * the fallback, and no replay trial (its tier is what it measures), ends this way.
+   */
+  modelRefused?: boolean;
+}
+
+export interface GateReportRecord {
+  readonly seq: number;
+  /** Parsed, with defaults applied: what the engine decides on. */
+  readonly report: GateReport;
+  /** The payload exactly as logged: what the read routes return. */
+  readonly raw: GateReport;
+}
+
+export interface FindingRecord {
+  readonly seq: number;
+  finding: Finding;
+}
+
+/** The last usage-limit hit and its persisted auto-resume schedule (§6.9 steps 2–4). */
+export interface LimitRecord {
+  readonly seq: number;
+  readonly host: HostId;
+  readonly resetsAt: string | null;
+  readonly autoResumeAt: string | null;
+  readonly sessionRef: SessionRef | null;
+  readonly pendingActionIds: readonly string[];
+}
+
+export interface MergeRecord {
+  readonly seq: number;
+  readonly task: string;
+  readonly into: string;
+  readonly commit: string;
+}
+
+export interface PushRecord {
+  readonly seq: number;
+  readonly feature: string;
+  readonly branch: string;
+  readonly commit: string;
+}
+
+export interface RunState {
+  readonly id: string;
+  run: Run;
+  /** The run's idea or change request (`run.started.request`, redacted). */
+  request: string;
+  /** The configured merge level at start (`run.started.merge_level`). */
+  mergeLevel: MergeLevel;
+  /**
+   * An automatic run's issue (`run.started.automation`, D-cd, AD-27 rule 2): it skips G1 and G2,
+   * the Spec Verifier reads the issue, and it never runs at merge Level 3. `null`: a run the human
+   * asked for.
+   */
+  automation: AutomationRunRef | null;
+  readonly tasks: Map<string, Task>;
+  readonly intents: Map<string, IntentContract>;
+  /** The status a task had right before it was parked or interrupted (its checkpoint). */
+  readonly checkpoints: Map<string, TaskStatus>;
+  readonly features: Map<string, Feature>;
+  /** Keyed by `<task or feature>:<fingerprint>`. */
+  readonly findings: Map<string, FindingRecord>;
+  readonly escalations: Map<string, Escalation>;
+  readonly roleRuns: Map<string, RoleRunRecord>;
+  readonly gateReports: GateReportRecord[];
+  readonly usage: Map<HostId, UsageSnapshot>;
+  limit: LimitRecord | null;
+  /** Frozen interface contracts by provider task (`contract.frozen`). */
+  readonly contracts: Map<string, { path: string; sha256: string }>;
+  readonly merges: MergeRecord[];
+  readonly pushes: PushRecord[];
+  /** Change requests by escalation id. */
+  readonly changeRequests: Map<
+    string,
+    { artifact: string; frozen: FrozenArtifact; task?: string; decided?: "approved" | "rejected" }
+  >;
+  /** Last `budget.updated` with scope run, if any. */
+  runBudget: { budget_usd: number; spent_usd: number } | null;
+  /**
+   * H-12 (spine §5 reading 236), by task: the last run of the task that a `role.rejected`,
+   * `role.failed` or `limit.hit` closed with no `cost_usd`. Those events carry no `budget_usd`
+   * (the contract has it on `role.submitted` only), so the run's ceiling-priced amount is read
+   * from the engine's task `budget.updated` that `recordSpend` emits right after the close: its
+   * `spent_usd` increase is what the run counted toward the budgets ({@link unpricedSpend}).
+   */
+  readonly unpricedCloses: Map<string, string>;
+  lastSeq: number;
+  readonly events: VtcEvent[];
+}
+
+export const findingKey = (finding: Pick<Finding, "fingerprint" | "task" | "feature">): string =>
+  `${finding.task ?? finding.feature ?? "run"}:${finding.fingerprint}`;
+
+const pendingGate = (): Run["gates"]["G1"] => ({ status: "pending", frozen: [] });
+
+/** A run's state before any event (only `run.started` creates a usable run). */
+export const emptyRunState = (id: string, startedAt: string): RunState => ({
+  id,
+  run: {
+    id,
+    track: "feature",
+    repo: "existing",
+    has_ui: false,
+    risk_hints: [],
+    phase: "intake",
+    gates: { G1: pendingGate(), G2: pendingGate() },
+    paused: false,
+    merge_level_effective: 2,
+    started_at: startedAt,
+    pipeline_config_hash: "0".repeat(64),
+  },
+  request: "",
+  mergeLevel: 2,
+  automation: null,
+  tasks: new Map(),
+  intents: new Map(),
+  checkpoints: new Map(),
+  features: new Map(),
+  findings: new Map(),
+  escalations: new Map(),
+  roleRuns: new Map(),
+  gateReports: [],
+  usage: new Map(),
+  limit: null,
+  contracts: new Map(),
+  merges: [],
+  pushes: [],
+  changeRequests: new Map(),
+  runBudget: null,
+  unpricedCloses: new Map(),
+  lastSeq: 0,
+  events: [],
+});
+
+const refreeze = (state: RunState, path: string, sha256: string): void => {
+  for (const gate of [state.run.gates.G1, state.run.gates.G2]) {
+    gate.frozen = gate.frozen.map((f) => (f.path === path ? { path, sha256 } : f));
+  }
+};
+
+const updateTask = (state: RunState, id: string | undefined, patch: (task: Task) => Task): void => {
+  if (id === undefined) return;
+  const task = state.tasks.get(id);
+  if (task !== undefined) state.tasks.set(id, patch(task));
+};
+
+/** A task's run closed without a cost or a budget amount ({@link RunState.unpricedCloses}). */
+const noteUnpricedClose = (state: RunState, run: RoleRunRecord): void => {
+  if (run.task === undefined) return;
+  if (run.budgetUsd === null) state.unpricedCloses.set(run.task, run.action_id);
+  else state.unpricedCloses.delete(run.task);
+};
+
+/**
+ * H-12: the engine's task `budget.updated` after an unpriced run closed counts that run's tokens
+ * at its host's price ceiling (`recordSpend`); the increase becomes the run's `budgetUsd`, so the
+ * §11 shares (`shareSpend`) count it as the task budget does. A human's budget raise keeps the
+ * spend and adds nothing.
+ */
+const unpricedSpend = (state: RunState, event: VtcEvent, spentUsd: number): void => {
+  if (event.task === undefined) return;
+  const actionId = state.unpricedCloses.get(event.task);
+  if (actionId === undefined || event.actor !== "engine") return;
+  state.unpricedCloses.delete(event.task);
+  const run = state.roleRuns.get(actionId);
+  const before = state.tasks.get(event.task)?.spent_usd;
+  if (run?.budgetUsd !== null || before === undefined) return;
+  const delta = Math.round((spentUsd - before) * 1e6) / 1e6;
+  if (delta > 0) run.budgetUsd = delta;
+};
+
+const updateFeature = (
+  state: RunState,
+  id: string | undefined,
+  patch: (feature: Feature) => Feature,
+): void => {
+  if (id === undefined) return;
+  const feature = state.features.get(id);
+  if (feature !== undefined) state.features.set(id, patch(feature));
+};
+
+/** Applies one event in place. Events must arrive in `seq` order. */
+export const applyEvent = (state: RunState, event: VtcEvent): void => {
+  state.events.push(event);
+  state.lastSeq = Math.max(state.lastSeq, event.seq);
+  if (isEventOfType(event, "run.started")) {
+    const data = readEventData(event);
+    state.run = {
+      ...state.run,
+      track: data.track,
+      repo: data.repo,
+      has_ui: data.has_ui,
+      risk_hints: data.risk_hints,
+      phase: "intake",
+      merge_level_effective: data.merge_level,
+      started_at: event.ts,
+      pipeline_config_hash: data.pipeline_config_hash,
+    };
+    state.request = data.request;
+    state.mergeLevel = data.merge_level;
+    state.automation = data.automation ?? null;
+  } else if (isEventOfType(event, "run.phase_changed")) {
+    state.run.phase = readEventData(event).to;
+  } else if (isEventOfType(event, "run.paused")) {
+    state.run.paused = true;
+  } else if (isEventOfType(event, "run.resumed")) {
+    state.run.paused = false;
+    if (readEventData(event).auto && state.limit !== null) {
+      state.limit = { ...state.limit, autoResumeAt: null };
+    }
+  } else if (isEventOfType(event, "run.finished")) {
+    state.run.finished_at = event.ts;
+  } else if (isEventOfType(event, "run.merge_level_changed")) {
+    state.run.merge_level_effective = readEventData(event).to;
+  } else if (isEventOfType(event, "gate.approved")) {
+    const data = readEventData(event);
+    for (const gate of data.gates) {
+      state.run.gates[gate] = { status: "approved", frozen: data.frozen, decided_at: event.ts };
+    }
+  } else if (isEventOfType(event, "gate.rejected")) {
+    for (const gate of readEventData(event).gates) {
+      state.run.gates[gate] = { status: "rejected", frozen: [], decided_at: event.ts };
+    }
+  } else if (isEventOfType(event, "task.created")) {
+    const data = readEventData(event);
+    state.tasks.set(data.task.id, data.task);
+    if (data.intent !== undefined) state.intents.set(data.task.id, data.intent);
+  } else if (isEventOfType(event, "task.status_changed")) {
+    const data = readEventData(event);
+    if (data.to === "parked" || data.to === "interrupted") {
+      if (event.task !== undefined) state.checkpoints.set(event.task, data.from);
+    }
+    updateTask(state, event.task, (task) => {
+      const { park_reason: _p, risk_rule: _r, ...rest } = task;
+      return {
+        ...rest,
+        status: data.to,
+        round: data.round,
+        cap: data.cap,
+        ...(data.park_reason === undefined ? {} : { park_reason: data.park_reason }),
+        ...(data.risk_rule === undefined ? {} : { risk_rule: data.risk_rule }),
+      };
+    });
+  } else if (isEventOfType(event, "task.workspace_assigned")) {
+    const data = readEventData(event);
+    updateTask(state, event.task, (task) => ({
+      ...task,
+      worktree: data.worktree,
+      branch: data.branch,
+      baseline_revision: data.baseline_revision,
+    }));
+  } else if (isEventOfType(event, "task.session_updated")) {
+    const data = readEventData(event);
+    updateTask(state, event.task, (task) => ({ ...task, session_ref: data.session_ref }));
+  } else if (isEventOfType(event, "contract.frozen")) {
+    const data = readEventData(event);
+    if (event.task !== undefined) state.contracts.set(event.task, data);
+    updateTask(state, event.task, (task) =>
+      task.provides_contract === undefined
+        ? task
+        : { ...task, provides_contract: { ...task.provides_contract, frozen_sha256: data.sha256 } },
+    );
+  } else if (isEventOfType(event, "feature.created")) {
+    const { feature } = readEventData(event);
+    state.features.set(feature.id, feature);
+  } else if (isEventOfType(event, "feature.task_added")) {
+    const { task } = readEventData(event);
+    updateFeature(state, event.feature, (f) =>
+      f.tasks.includes(task) ? f : { ...f, tasks: [...f.tasks, task] },
+    );
+  } else if (isEventOfType(event, "feature.status_changed")) {
+    const data = readEventData(event);
+    updateFeature(state, event.feature, (f) => {
+      const { park_reason: _p, risk_rule: _r, ...rest } = f;
+      return {
+        ...rest,
+        status: data.to,
+        round: data.round,
+        ...(data.park_reason === undefined ? {} : { park_reason: data.park_reason }),
+        ...(data.risk_rule === undefined ? {} : { risk_rule: data.risk_rule }),
+      };
+    });
+  } else if (isEventOfType(event, "feature.pr_updated")) {
+    const { pr } = readEventData(event);
+    updateFeature(state, event.feature, (f) => ({ ...f, pr }));
+  } else if (isEventOfType(event, "branch.pushed")) {
+    const data = readEventData(event);
+    if (event.feature !== undefined) {
+      state.pushes.push({
+        seq: event.seq,
+        feature: event.feature,
+        branch: data.branch,
+        commit: data.commit,
+      });
+    }
+  } else if (isEventOfType(event, "role.dispatched")) {
+    const data = readEventData(event);
+    state.roleRuns.set(data.action_id, {
+      action_id: data.action_id,
+      seq: event.seq,
+      role: event.role ?? "unknown",
+      ...(data.mode === undefined ? {} : { mode: data.mode }),
+      ...(data.subject === undefined ? {} : { subject: data.subject }),
+      ...(event.task === undefined ? {} : { task: event.task }),
+      ...(event.feature === undefined ? {} : { feature: event.feature }),
+      prompt_sha: event.prompt_sha ?? "",
+      host: event.host ?? (HOST_IDS[0] as HostId),
+      model: event.model ?? "unknown",
+      dispatched_at: event.ts,
+      ...(data.tier === undefined || data.tier_reason === undefined
+        ? {}
+        : {
+            tier: data.tier,
+            tier_reason: data.tier_reason,
+            ...(data.tier_clamped === undefined ? {} : { tier_clamped: data.tier_clamped }),
+          }),
+      dispatch: data.dispatch,
+      agent: data.agent,
+      pack: data.pack,
+      resume: data.resume,
+      ...(data.model_fallback === undefined ? {} : { modelFallback: data.model_fallback }),
+      ...(data.purpose === "lookback_replay" ? { replayTrial: true } : {}),
+      status: "in_flight",
+      exit: null,
+      verdicts: [],
+      sessionRef: null,
+      tokens: null,
+      costUsd: null,
+      budgetUsd: null,
+    });
+  } else if (isEventOfType(event, "role.submitted")) {
+    const data = readEventData(event);
+    const run = state.roleRuns.get(data.action_id);
+    if (run !== undefined) {
+      run.status = "submitted";
+      run.closedSeq = event.seq;
+      run.exit = data.exit;
+      run.verdicts = data.verdicts;
+      if (data.head !== undefined) run.head = data.head;
+      run.sessionRef = data.session_ref;
+      run.tokens = event.tokens ?? null;
+      run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
+      if (run.task !== undefined) state.unpricedCloses.delete(run.task);
+    }
+  } else if (isEventOfType(event, "role.rejected")) {
+    const data = readEventData(event);
+    const run = state.roleRuns.get(data.action_id);
+    if (run?.status === "in_flight") {
+      run.status = "rejected";
+      run.closedSeq = event.seq;
+      run.rejection = { reason: data.reason, issues: data.issues };
+      run.tokens = event.tokens ?? null;
+      run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
+      noteUnpricedClose(state, run);
+    }
+  } else if (isEventOfType(event, "headless.ended")) {
+    const data = readEventData(event);
+    const run = state.roleRuns.get(data.action_id);
+    // `vtc pause` killed it: the pause is logged first, the kill is the engine's (headless.ts)
+    if (run?.status === "in_flight" && data.cause === "killed" && state.run.paused)
+      run.killedByPause = true;
+    // the engine stopped it because its task parked on budget (§11; submit.ts `stopTaskHeadless`)
+    if (
+      run?.status === "in_flight" &&
+      data.cause === "budget" &&
+      run.task !== undefined &&
+      state.tasks.get(run.task)?.status === "parked"
+    )
+      run.stoppedOnBudget = true;
+    // D-cx (reading 244): the host refused the run's model; the step runs once more without it
+    if (run?.status === "in_flight" && data.cause === "model_refused" && modelRefusable(run)) {
+      run.status = "failed";
+      run.closedSeq = event.seq;
+      run.stopped = true;
+      run.modelRefused = true;
+    }
+  } else if (isEventOfType(event, "role.failed")) {
+    const data = readEventData(event);
+    const run = state.roleRuns.get(data.action_id);
+    if (run?.status === "in_flight") {
+      run.status = "failed";
+      run.closedSeq = event.seq;
+      run.costUsd = event.cost_usd ?? null;
+      run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;
+      noteUnpricedClose(state, run);
+      if (
+        data.message.startsWith(SUPERSEDED_RUN_PREFIX) ||
+        run.killedByPause === true ||
+        run.stoppedOnBudget === true
+      )
+        run.stopped = true;
+    }
+  } else if (isEventOfType(event, "gate.result")) {
+    state.gateReports.push({
+      seq: event.seq,
+      report: readEventData(event),
+      raw: event.data as unknown as GateReport,
+    });
+  } else if (isEventOfType(event, "finding.recorded")) {
+    const { finding } = readEventData(event);
+    state.findings.set(findingKey(finding), { seq: event.seq, finding });
+    if (finding.route === "defer" && finding.task !== undefined) {
+      updateTask(state, finding.task, (task) =>
+        task.deferred.includes(finding.fingerprint)
+          ? task
+          : { ...task, deferred: [...task.deferred, finding.fingerprint] },
+      );
+    }
+  } else if (isEventOfType(event, "finding.status_changed")) {
+    const data = readEventData(event);
+    const scope = event.task ?? event.feature ?? "run";
+    const record = state.findings.get(`${scope}:${data.fingerprint}`);
+    if (record !== undefined) {
+      const { waiver: _w, ...rest } = record.finding;
+      record.finding = {
+        ...rest,
+        status: data.to,
+        ...(data.waiver === undefined ? {} : { waiver: data.waiver }),
+      };
+    }
+  } else if (isEventOfType(event, "escalation.opened")) {
+    const { escalation } = readEventData(event);
+    state.escalations.set(escalation.id, escalation);
+  } else if (isEventOfType(event, "escalation.answered")) {
+    const data = readEventData(event);
+    const escalation = state.escalations.get(data.escalation);
+    if (escalation !== undefined) {
+      state.escalations.set(data.escalation, {
+        ...escalation,
+        answer: data.answer,
+        answered_at: event.ts,
+      });
+    }
+  } else if (isEventOfType(event, "change_request.opened")) {
+    const data = readEventData(event);
+    state.changeRequests.set(data.escalation, {
+      artifact: data.artifact,
+      frozen: data.frozen,
+      ...(data.task === undefined ? {} : { task: data.task }),
+    });
+  } else if (isEventOfType(event, "change_request.decided")) {
+    const data = readEventData(event);
+    const cr = state.changeRequests.get(data.escalation);
+    if (cr !== undefined) cr.decided = data.decision;
+    if (data.new_sha256 !== undefined) refreeze(state, data.frozen.path, data.new_sha256);
+  } else if (isEventOfType(event, "spec.clarified")) {
+    const data = readEventData(event);
+    refreeze(state, data.path, data.new_sha256);
+  } else if (isEventOfType(event, "budget.updated")) {
+    const data = readEventData(event);
+    if (data.scope === "task") {
+      unpricedSpend(state, event, data.spent_usd);
+      updateTask(state, event.task, (task) => ({
+        ...task,
+        budget_usd: data.budget_usd,
+        spent_usd: data.spent_usd,
+      }));
+    } else if (data.scope === "feature") {
+      updateFeature(state, event.feature, (f) => ({
+        ...f,
+        budget_usd: data.budget_usd,
+        spent_usd: data.spent_usd,
+      }));
+    } else {
+      state.runBudget = { budget_usd: data.budget_usd, spent_usd: data.spent_usd };
+    }
+  } else if (isEventOfType(event, "usage.updated")) {
+    const { snapshot } = readEventData(event);
+    state.usage.set(snapshot.host, snapshot);
+  } else if (isEventOfType(event, "limit.hit")) {
+    const data = readEventData(event);
+    state.limit = {
+      seq: event.seq,
+      host: data.host,
+      resetsAt: data.resets_at,
+      autoResumeAt: data.auto_resume_at,
+      sessionRef: data.session_ref,
+      pendingActionIds: data.pending_action_ids,
+    };
+    for (const id of data.pending_action_ids) {
+      const run = state.roleRuns.get(id);
+      if (run?.status === "in_flight") {
+        run.status = "interrupted";
+        run.closedSeq = event.seq;
+        // the cost the host reported before the limit (D-at), on the hit that closed the run
+        if (event.cost_usd !== undefined) {
+          run.costUsd = event.cost_usd;
+          run.budgetUsd = event.cost_usd;
+        } else if (data.budget_usd !== undefined && data.pending_action_ids.length === 1) {
+          // H-12 (reading 249): the ceiling amount of the one run the hit closed
+          run.budgetUsd = data.budget_usd;
+        }
+        noteUnpricedClose(state, run);
+      }
+    }
+  } else if (isEventOfType(event, "merge.completed")) {
+    const data = readEventData(event);
+    if (event.task !== undefined) {
+      state.merges.push({ seq: event.seq, task: event.task, into: data.into, commit: data.commit });
+    }
+  }
+};
+
+/** Replays a run's events (in `seq` order) into its state. */
+export const projectRun = (events: readonly VtcEvent[]): RunState => {
+  const first = events[0];
+  if (first === undefined) throw new RangeError("a run needs at least one event");
+  const state = emptyRunState(first.run, first.ts);
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) applyEvent(state, event);
+  return state;
+};

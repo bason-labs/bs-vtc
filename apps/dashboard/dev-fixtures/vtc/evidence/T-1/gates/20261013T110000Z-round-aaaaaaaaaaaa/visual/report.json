@@ -1,0 +1,99 @@
+{
+  "v": 1,
+  "run": "golden-1",
+  "task": "T-1",
+  "status": "unchecked",
+  "toolchain": "vtc",
+  "browser": {
+    "name": "chromium-headless-shell",
+    "version": "141.0",
+    "executable_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "renders": [
+    {
+      "key": "login:default:390:light",
+      "status": "rendered",
+      "screenshot": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/login-default-390-light.png",
+      "reference": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/ref-login-default-390-light.png",
+      "source_hash": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "key": "login:default:1440:dark",
+      "status": "rendered",
+      "screenshot": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/login-default-1440-dark.png",
+      "source_hash": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "key": "login:error:390:light",
+      "status": "unreached",
+      "source_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "detail": "state=error never rendered: the route redirected"
+    }
+  ],
+  "axe": [
+    {
+      "key": "login:default:1440:dark",
+      "violations": [
+        {
+          "rule": "color-contrast",
+          "impact": "serious",
+          "help": "Elements must meet contrast",
+          "nodes": 2
+        }
+      ],
+      "incomplete": [
+        {
+          "rule": "aria-hidden-focus",
+          "impact": null,
+          "help": "Hidden content focusable",
+          "nodes": 1
+        }
+      ]
+    }
+  ],
+  "computed_style": [
+    {
+      "key": "login:default:390:light",
+      "selector": ".btn-primary",
+      "property": "background-color",
+      "value": "oklch(0.6 0.2 30)",
+      "nearest_token": "color.brand.500",
+      "delta": 0.05
+    }
+  ],
+  "diffs": [
+    {
+      "key": "login:default:390:light",
+      "region": "header",
+      "mismatch_px": 1200,
+      "ratio_pct": 1.4,
+      "budget_pct": 0.5,
+      "dimension_mismatch": false,
+      "diff_image": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/diff-login-default-390-light-header.png"
+    },
+    {
+      "key": "login:default:390:light",
+      "region": "form",
+      "mismatch_px": 10,
+      "ratio_pct": 0.1,
+      "budget_pct": 0.5,
+      "dimension_mismatch": false
+    }
+  ],
+  "findings": [
+    {
+      "tool": "axe",
+      "rule_id": "axe/color-contrast",
+      "category": "accessibility",
+      "title": "Elements must meet contrast",
+      "location": {
+        "path": "src/app/login/page.tsx"
+      },
+      "evidence": {
+        "type": "file",
+        "ref": ".vtc/evidence/T-1/gates/20261013T110000Z-round-aaaaaaaaaaaa/visual/report.json"
+      }
+    }
+  ],
+  "written_at": "2026-10-13T11:00:00.000Z"
+}

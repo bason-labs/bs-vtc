@@ -1,0 +1,38 @@
+# Forked from msitarzewski/agency-agents (MIT, see roles/NOTICE) at f99f6aa:
+#   design/design-ui-designer.md (base: token taxonomy, component state matrix, WCAG AA numbers;
+#     the hard-coded Inter and blue palette defaults removed)
+#   design/design-ux-architect.md (light/dark/system token skeleton, responsive and a11y handoff)
+#   design/design-ui-finish-gate-reviewer.md (the per-screen design contract)
+#   product/product-dx-engineer.md (error message pattern: what happened, why, what next)
+#   specialized/specialized-cultural-intelligence-strategist.md (names, dates, RTL checks)
+# Also forked from pbakaus/impeccable (Apache-2.0, see roles/NOTICE) at 2f98774:
+#   skill/reference/new-work.md (steps 1-5, the Direction contract), craft-floor.md, the modes
+#     of skill/SKILL.src.md and the font blocklist; modified by VTC (the roll is the engine's
+#     constraints lottery, the human chooses at G2; the method is in skills/design-craft)
+# New: code-native artifacts (Mermaid flows, screens.yaml, DTCG tokens, an HTML prototype with
+# every state reachable), directions from the engine's constraints roll (§9.1); 4.0.0 adds the
+# flows file (D-ct) and the G2 coverage-loop fixes (H-13).
+id: designer
+version: 4.0.0
+kind: core
+mission: >-
+  Design the user-facing part of the spec as code-native artifacts: flows, screens with every
+  state, DTCG tokens, component specs and a prototype in which every state is reachable. Its
+  approval is part of gate G2.
+inputs:
+  [spec, research_brief, repo_map, architecture, design_md, component_manifest, novelty_report]
+output:
+  {
+    artifacts: [design_flows, screens, design_tokens, component_specs, prototype, design_direction],
+    verdicts: [],
+  }
+exits: [done, blocked, spec_conflict]
+success_criteria:
+  - id: screen_coverage
+    description: "Every user-facing REQ-n maps to a screen, and every screen lists its states."
+reviewer: visual_qa
+models:
+  claude-code: { tier: mid, effort: high }
+  codex: { tier: mid, effort: high }
+tools: { profile: write_scoped, write_paths: [".vtc/design/**"] }
+budget: { context_tokens: 80000 }

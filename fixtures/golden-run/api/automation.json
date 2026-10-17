@@ -1,0 +1,122 @@
+{
+  "issues": true,
+  "prs": true,
+  "upstream": false,
+  "upstream_repo": "bason-labs/bs-vtc",
+  "evidence_hosting": "branch",
+  "notes": ["upstream reports are off for this project (project.yaml)"],
+  "items": [
+    {
+      "target": {
+        "kind": "upstream",
+        "repo": "bason-labs/bs-vtc"
+      },
+      "kind": "tool",
+      "fingerprint": "5555666677778888",
+      "issue": {
+        "number": 50,
+        "url": "https://github.com/bason-labs/bs-vtc/issues/50",
+        "state": "open"
+      },
+      "pr": {
+        "number": 51,
+        "url": "https://github.com/bason-labs/bs-vtc/pull/51",
+        "state": "draft",
+        "evidence": "complete"
+      },
+      "first_at": "2026-10-14T10:10:00.000Z",
+      "last_at": "2026-10-14T10:12:00.000Z"
+    },
+    {
+      "target": {
+        "kind": "project",
+        "repo": "acme/invoices"
+      },
+      "kind": "ci_failure",
+      "fingerprint": "0123456789abcdef",
+      "issue": {
+        "number": 12,
+        "url": "https://github.com/acme/invoices/issues/12",
+        "state": "closed"
+      },
+      "pr": {
+        "number": 13,
+        "url": "https://github.com/acme/invoices/pull/13",
+        "state": "merged",
+        "evidence": "complete"
+      },
+      "first_at": "2026-10-14T08:01:00.000Z",
+      "last_at": "2026-10-14T10:05:00.000Z"
+    },
+    {
+      "target": {
+        "kind": "upstream",
+        "repo": "bason-labs/bs-vtc"
+      },
+      "kind": "lookback",
+      "fingerprint": "1111222233334444",
+      "issue": null,
+      "pr": {
+        "number": 42,
+        "url": "https://github.com/bason-labs/bs-vtc/pull/42",
+        "state": "closed",
+        "evidence": "partial"
+      },
+      "first_at": "2026-10-14T09:33:00.000Z",
+      "last_at": "2026-10-14T09:34:00.000Z"
+    },
+    {
+      "target": {
+        "kind": "upstream",
+        "repo": "bason-labs/bs-vtc"
+      },
+      "kind": "defect",
+      "fingerprint": "fedcba9876543210",
+      "issue": {
+        "number": 41,
+        "url": "https://github.com/bason-labs/bs-vtc/issues/41",
+        "state": "closed"
+      },
+      "pr": null,
+      "first_at": "2026-10-14T09:31:00.000Z",
+      "last_at": "2026-10-14T09:32:00.000Z"
+    }
+  ],
+  "skipped": [
+    {
+      "at": "2026-10-14T10:40:00.000Z",
+      "reason": "error",
+      "kind": "defect",
+      "detail": "automation could not handle a defect fact of run golden-auto: gh failed: HTTP 502 (token [REDACTED:github_token])"
+    },
+    {
+      "at": "2026-10-14T10:30:00.000Z",
+      "reason": "paused",
+      "detail": "vtc pause: no automatic action until vtc resume"
+    },
+    {
+      "at": "2026-10-14T10:20:00.000Z",
+      "reason": "privacy",
+      "kind": "cost",
+      "detail": "the upstream report named a project path; nothing was sent"
+    },
+    {
+      "at": "2026-10-14T09:37:00.000Z",
+      "reason": "trial_cap",
+      "kind": "lookback",
+      "detail": "the replay of proposal p-3 waits for the next RETRO: the per-RETRO cap of 24 trials is reached (12 more would run)"
+    },
+    {
+      "at": "2026-10-14T09:36:00.000Z",
+      "reason": "plugin_locked",
+      "kind": "lookback",
+      "detail": "replay trial a-14 did not run its arm's own plugin (the arm plugin did not load: a managed-settings lock kept the installed plugin), so it measured another prompt copy"
+    },
+    {
+      "at": "2026-10-14T09:35:00.000Z",
+      "reason": "rate_limit",
+      "kind": "finding",
+      "detail": "5 new issues were opened in acme/invoices today (AUTOMATION_LIMITS.newIssuesPerDay)"
+    }
+  ]
+}

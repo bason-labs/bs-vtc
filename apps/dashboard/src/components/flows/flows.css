@@ -1,0 +1,111 @@
+/* The flow canvas (§17), copied from bs-job-agents components/flows/flows.css: React Flow themed
+   with the Deep Sea tokens, the running ring on nodes and flowing dashes on edges. VTC adds the
+   looping, parked and waiting-for-limit (interrupted) states. Imported by FlowCanvas.tsx only. */
+
+.vtc-flow {
+  --xy-background-color: transparent;
+  --xy-edge-stroke: var(--border);
+  --xy-handle-background-color: var(--surface-3);
+  --xy-handle-border-color: transparent;
+  --xy-minimap-background-color: var(--surface);
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--bg) 65%, transparent);
+  --xy-minimap-node-background-color: var(--surface-3);
+  --xy-minimap-node-stroke-color: transparent;
+}
+
+.vtc-flow .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+.vtc-flow .react-flow__handle {
+  border: 0;
+  pointer-events: none;
+}
+
+.vtc-flow .react-flow__attribution {
+  background: transparent;
+  color: var(--muted-fg);
+}
+
+@keyframes vtc-ring {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent),
+      var(--shadow-glow);
+  }
+  50% {
+    box-shadow:
+      0 0 0 6px transparent,
+      0 0 30px -2px color-mix(in oklab, var(--accent) 60%, transparent);
+  }
+}
+
+@keyframes vtc-ring-warn {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--warn) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+.vtc-node-running {
+  animation: vtc-ring 1.8s ease-in-out infinite;
+  border-color: var(--accent) !important;
+}
+
+.vtc-node-looping {
+  animation: vtc-ring-warn 1.8s ease-in-out infinite;
+  border-color: var(--warn) !important;
+}
+
+/* WorkflowNode `interrupted` (stopped by a usage limit, waiting for the auto-resume) is drawn with
+   bs-job-agents' waiting_limit style and labelled "Waiting for limit" (spine §5 reading 34, D-n). */
+.vtc-node-waiting-limit {
+  border-color: var(--warn) !important;
+  border-style: dashed !important;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0 8px,
+    color-mix(in oklab, var(--warn) 8%, transparent) 8px 16px
+  );
+}
+
+.vtc-node-parked {
+  border-color: var(--danger) !important;
+}
+
+@keyframes vtc-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.vtc-edge-running {
+  stroke-dasharray: 6 6;
+  animation: vtc-dash 0.8s linear infinite;
+}
+
+/* Minimap nodes by state (SVG fill attributes cannot use var(), classes can). */
+.vtc-flow .react-flow__minimap-node.vtc-mm {
+  fill: var(--surface-3);
+  stroke: none;
+}
+.vtc-flow .react-flow__minimap-node.vtc-mm-passed,
+.vtc-flow .react-flow__minimap-node.vtc-mm-done {
+  fill: var(--ok);
+}
+.vtc-flow .react-flow__minimap-node.vtc-mm-running {
+  fill: var(--accent);
+}
+.vtc-flow .react-flow__minimap-node.vtc-mm-parked {
+  fill: var(--danger);
+}
+.vtc-flow .react-flow__minimap-node.vtc-mm-looping,
+.vtc-flow .react-flow__minimap-node.vtc-mm-interrupted {
+  fill: var(--warn);
+}
