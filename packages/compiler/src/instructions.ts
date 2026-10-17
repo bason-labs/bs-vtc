@@ -233,13 +233,32 @@ const list = (items: readonly string[]): string => (items.length === 0 ? "none" 
  * What each profile may do, worded as instructions rather than as guarantees: on Codex a
  * write-scoped agent runs in `workspace-write`, which does not itself block a shell, and on both
  * hosts the write paths are not a host-level deny (spine §7: per-path deny is a spike item).
+ *
+ * Per host, because the hosts read files differently. Claude Code has file tools (`Read`, `Grep`,
+ * `Glob`), so a role there runs no shell command. Codex has none: its only way to read a file is
+ * a shell command, so "run no shell command" left a Codex role unable to read its own pack (the
+ * owner's 2026-10-17 run: the BA parked three times asking for a file reader). A Codex role reads
+ * and searches through read-only commands; its sandbox (`read-only`, or `workspace-write` with the
+ * network off) is what holds the line, and the engine's write-scope check covers the writes.
  */
-const TOOL_LINES: Readonly<Record<EffectiveRoleContract["tools"]["profile"], string>> = {
-  read_only: "read-only: read and search files; write no file and run no shell command",
-  write_scoped:
-    "read and search files; write files only inside the Write scope of your task pack; run no shell command",
-  code_sandboxed:
-    "files and shell in a sandboxed worktree; write only inside the Write scope of your task pack",
+const TOOL_LINES: Readonly<
+  Record<HostId, Readonly<Record<EffectiveRoleContract["tools"]["profile"], string>>>
+> = {
+  "claude-code": {
+    read_only: "read-only: read and search files; write no file and run no shell command",
+    write_scoped:
+      "read and search files; write files only inside the Write scope of your task pack; run no shell command",
+    code_sandboxed:
+      "files and shell in a sandboxed worktree; write only inside the Write scope of your task pack",
+  },
+  codex: {
+    read_only:
+      "read-only: read and search files with read-only shell commands (`cat`, `sed -n`, `rg`, `ls`, `git show`, `git log`); write no file, and run no command that changes a file, installs anything or uses the network",
+    write_scoped:
+      "read and search files with read-only shell commands (`cat`, `sed -n`, `rg`, `ls`, `git show`, `git log`); write files only inside the Write scope of your task pack; run no other command (nothing that builds, tests, installs or uses the network)",
+    code_sandboxed:
+      "files and shell in a sandboxed worktree; write only inside the Write scope of your task pack",
+  },
 };
 
 /**
@@ -317,7 +336,7 @@ export const renderContract = (
     ...contract.exits.map((exit) => `  - \`${exit}\`: ${EXIT_MEANINGS[exit]}`),
     `- Verdicts: ${list(contract.output.verdicts)}`,
     `- Output artifact types: ${list(contract.output.artifacts)}`,
-    `- Tools: ${TOOL_LINES[contract.tools.profile]}`,
+    `- Tools: ${TOOL_LINES[host][contract.tools.profile]}`,
     ...(contract.tools.profile === "write_scoped"
       ? [`- Write paths (role.yaml): ${list(contract.tools.write_paths)}`]
       : []),

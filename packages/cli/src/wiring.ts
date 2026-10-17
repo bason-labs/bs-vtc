@@ -403,13 +403,14 @@ export const connectHumanToRepoEngine = async (
   cwd: string,
   vtcHome: string,
   what: string,
+  since: string = ADOPT_SINCE,
 ): Promise<EngineClient> => {
   if (!interactiveTerminal())
     throw new Error(`to ${what} you confirm it yourself: run it in an interactive terminal`);
   const repoRoot = await requireRepoRoot(cwd);
   requireVtcProject(repoRoot);
   const discovery = await ensureDaemon({ vtcHome, repoRoot, selfCommand: runtime().selfCommand });
-  if (!contractsAtLeast(discovery.contracts_version, ADOPT_SINCE))
+  if (!contractsAtLeast(discovery.contracts_version, since))
     throw new Error(
       `the running engine speaks contracts ${discovery.contracts_version}: run vtc engine --stop in the repo, then try again`,
     );
@@ -436,6 +437,6 @@ export const createCommandContext = (
     cwd,
     vtcHome,
     engine: () => (client ??= connect().then(guardHumanOnly)),
-    humanEngine: (what) => connectHumanToRepoEngine(cwd, vtcHome, what),
+    humanEngine: (what, since) => connectHumanToRepoEngine(cwd, vtcHome, what, since),
   };
 };

@@ -43,6 +43,7 @@ export type ToolHost = Pick<
   | "approve"
   | "changeRequest"
   | "consult"
+  | "cancel"
   | "pause"
   | "resume"
   | "rejectMalformedSubmit"
@@ -118,6 +119,8 @@ const invoke = async (
       return host.changeRequest(input as Parameters<ToolHost["changeRequest"]>[0], call);
     case "consult":
       return host.consult(input as Parameters<ToolHost["consult"]>[0], call);
+    case "cancel":
+      return host.cancel(input as Parameters<ToolHost["cancel"]>[0], call);
     case "pause":
       return host.pause(input as Parameters<ToolHost["pause"]>[0]);
     case "resume":

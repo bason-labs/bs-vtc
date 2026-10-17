@@ -117,9 +117,16 @@ export const ENGINE_MCP_TOOLS = [
   {
     name: "consult",
     purpose:
-      "Consult an advisor at the human's request: the engine dispatches it like a role (logged, priced, budgeted) and returns the spawn_role action.",
+      "Consult an advisor at the human's request: the engine dispatches it like a role (logged, priced, budgeted) and returns the spawn_role action, or, where the Lead's roles run headless (a Codex Lead), launches it itself and relays its answer in a later NextResult.notices.",
     input: "ConsultInput",
     output: "ConsultResult",
+  },
+  {
+    name: "cancel",
+    purpose:
+      "End a run the human no longer wants (human only): stop its role runs, turn off its automatic merges and finish it as aborted, so the repo can start another run.",
+    input: "RunScopedInput",
+    output: "CancelResult",
   },
   {
     name: "pause",
@@ -187,6 +194,8 @@ export const HUMAN_ONLY_TOOLS = [
   "approve",
   "answer",
   "change_request",
+  // 5.13.0 (spine §5 reading 268): ending a run is the human's decision too
+  "cancel",
 ] as const satisfies readonly EngineMcpToolName[];
 export type HumanOnlyToolName = (typeof HUMAN_ONLY_TOOLS)[number];
 
@@ -240,6 +249,13 @@ export const StartInputSchema = z.strictObject({
    * the human to describe them or attach the files (spine §5 reading 262). New in 5.12.0.
    */
   attachments: z.array(AttachmentPathSchema).max(ATTACHMENTS.max).optional(),
+  /**
+   * Autopilot for this run (spine §5 reading 271; `ProjectConfig.autopilot`): the engine answers
+   * the questions it may decide with their recommended option and approves G1 and G2, so the
+   * human's one review is the PR. `false` turns it off for this run when the project has it on.
+   * Absent: the project's setting. New in 5.14.0.
+   */
+  autopilot: z.boolean().optional(),
 });
 export type StartInput = z.infer<typeof StartInputSchema>;
 
@@ -547,11 +563,49 @@ export const ConsultInputSchema = z.strictObject({
 });
 export type ConsultInput = z.infer<typeof ConsultInputSchema>;
 
-export const ConsultResultSchema = z.strictObject({
+/** A consult the Lead runs in its own session: the `spawn_role` to spawn (4.1.0). */
+export const InSessionConsultResultSchema = z.strictObject({
   run: RunIdSchema,
   action: SpawnRoleActionSchema,
 });
+
+/**
+ * A consult the engine launched itself (spine §5 reading 267): where the run's Lead host runs its
+ * roles headless (a Codex Lead, `ROLE_DISPATCH_BY_LEAD_HOST`), the advisor runs as an
+ * engine-launched headless run on that host, like every other role. No action comes back: the
+ * engine relays the advisor's answer (or why it failed) once, in a later `NextResult.notices`,
+ * with the path of its full result. New in 5.13.0.
+ */
+export const LaunchedConsultResultSchema = z.strictObject({
+  run: RunIdSchema,
+  launched: z.strictObject({ action_id: SlugSchema, host: HostIdSchema }),
+});
+
+/** The output of `consult`: in-session, or launched headless (5.13.0). */
+export const ConsultResultSchema = z.union([
+  InSessionConsultResultSchema,
+  LaunchedConsultResultSchema,
+]);
 export type ConsultResult = z.infer<typeof ConsultResultSchema>;
+
+/**
+ * `cancel` (spine §5 reading 268): the human ends a run started by mistake or no longer wanted.
+ * The engine stops the run's headless role runs, turns off every automatic merge it enabled and
+ * finishes the run (`run.finished`, outcome `aborted`, actor `human`), so the repo may `start`
+ * another. Its open escalations end with it. Worktrees and branches the run made stay for the
+ * human (`worktrees_left`). A human-only tool (`HUMAN_ONLY_TOOLS`). New in 5.13.0.
+ */
+export const CancelResultSchema = z.strictObject({
+  run: RunIdSchema,
+  phase: PhaseSchema,
+  /** Headless role runs the engine stopped. */
+  stopped_runs: z.int().nonnegative(),
+  /** Open escalations that ended with the run. */
+  closed_escalations: z.int().nonnegative(),
+  /** Task worktrees (repo-relative) the run leaves for the human to keep or remove. */
+  worktrees_left: z.array(RelPathSchema).max(200),
+});
+export type CancelResult = z.infer<typeof CancelResultSchema>;
 
 export const RunControlResultSchema = z.strictObject({
   run: RunIdSchema,
@@ -610,6 +664,11 @@ export const StatusResultSchema = z.strictObject({
   usage: UsageReportSchema,
   /** Role runs the engine launched itself and that are still running (AD-25). New in 4.5.0. */
   headless_runs: z.array(HeadlessRunSummarySchema).optional(),
+  /**
+   * The run is on autopilot (`run.started.autopilot`): how many questions and gates the engine
+   * decided for the human so far. Absent: not on autopilot. New in 5.14.0.
+   */
+  autopilot: z.strictObject({ decisions: z.int().nonnegative() }).optional(),
 });
 export type StatusResult = z.infer<typeof StatusResultSchema>;
 

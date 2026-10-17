@@ -16,3 +16,6 @@ coverage/
 *.tsbuildinfo
 # Claude Code runtime state of a local session (not repo content)
 .claude/scheduled_tasks.lock
+# what vtc install codex writes into a checkout it runs in (the Codex skills, agents and engine bridge)
+.agents/
+.codex/

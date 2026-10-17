@@ -112,6 +112,14 @@
     {
       "version": "5.12.0",
       "schemas_sha256": "1ebd679ce441b969f5fd1bbb2e4ea234442fbf7a480dbb93849f4bda94bb3679"
+    },
+    {
+      "version": "5.13.0",
+      "schemas_sha256": "eec612919dd35c317042199441f9fdc834291757481787d5260b773e5e2eb020"
+    },
+    {
+      "version": "5.14.0",
+      "schemas_sha256": "b33b55610b1a6c7b0bee911fc755f419870d10d6af42f6df549c7fb6121fd390"
     }
   ]
 }

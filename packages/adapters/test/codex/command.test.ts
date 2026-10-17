@@ -50,7 +50,7 @@ const BRIDGE_ARGS = [
   "--config",
   "mcp_servers.vtc.enabled_tools=[]",
   "--config",
-  'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request"]',
+  'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request", "cancel"]',
 ];
 /**
  * Codex's own web search (`web_search`, codex-cli 0.162.1), set explicitly on every role run:
@@ -90,7 +90,7 @@ const BRIDGE_SETTINGS = {
     command: "vtc",
     args: ["engine", "--mcp", "--host", "codex"],
     enabled_tools: [],
-    disabled_tools: ["approve", "answer", "change_request"],
+    disabled_tools: ["approve", "answer", "change_request", "cancel"],
   },
 };
 
@@ -716,7 +716,7 @@ describe("Codex headlessCommand", () => {
 
   it("keeps the human-only engine tools out of every role run, fresh or resumed, and enables only the role's engine tools (D-an)", () => {
     // `approval_policy="never"` lets every MCP call through unasked, and a role bridge's hello
-    // looks like the Lead's: only the bridge filter keeps approve/answer/change_request out.
+    // looks like the Lead's: only the bridge filter keeps approve/answer/change_request/cancel out.
     // The keys were read back on codex-cli 0.162.1 through app-server `mcpServerStatus/list`.
     const adapter = createCodexAdapter({ vtcHome: VTC_HOME });
     const researcher: RoleTools = {
@@ -727,7 +727,7 @@ describe("Codex headlessCommand", () => {
       for (const tools of [READ_ONLY, WRITE_SCOPED, ENGINEER, researcher]) {
         const args = adapter.headlessCommand(request({ sandbox: profile(tools) }), session).args;
         const at = args.indexOf(
-          'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request"]',
+          'mcp_servers.vtc.disabled_tools=["approve", "answer", "change_request", "cancel"]',
         );
         expect(args[at - 1]).toBe("--config");
         expect(at).toBeGreaterThan(args.indexOf(session === undefined ? "exec" : "resume"));

@@ -36,6 +36,7 @@ import {
   workdir,
   type Harness,
   type SpawnAction,
+  inSession,
 } from "../helpers/engine-harness.js";
 
 // Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
@@ -85,13 +86,15 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     const h = createHarness();
     const { run } = await start(h);
     only(await next(h), "repo_cartographer");
-    const out = await h.engine.consult(
-      {
-        advisor: "advisor_client_liaison",
-        question: "Summarise where the run stands for the client.",
-        inputs: [{ type: "run_status", path: `.vtc/runs/${run}/request.md` }],
-      },
-      CLAUDE,
+    const out = inSession(
+      await h.engine.consult(
+        {
+          advisor: "advisor_client_liaison",
+          question: "Summarise where the run stands for the client.",
+          inputs: [{ type: "run_status", path: `.vtc/runs/${run}/request.md` }],
+        },
+        CLAUDE,
+      ),
     );
     expect(out.run).toBe(run);
     const action = out.action;
@@ -130,9 +133,11 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     await expect(
       h.engine.consult({ advisor: "ba", question: "Rewrite the spec", inputs: [] }, CLAUDE),
     ).rejects.toThrow(/not an advisor/);
-    const { action } = await h.engine.consult(
-      { advisor: "advisor_estimator", question: "Why so expensive?", inputs: [] },
-      CLAUDE,
+    const { action } = inSession(
+      await h.engine.consult(
+        { advisor: "advisor_estimator", question: "Why so expensive?", inputs: [] },
+        CLAUDE,
+      ),
     );
     writeFile(workdir(action), "src/cheaper.ts", "export const x = 1;\n");
     const out = await submitResult(h, action, { exit: "done" });
@@ -145,12 +150,12 @@ describe("consult: advisors through the engine (spine §5 readings 25, 30)", () 
     await start(h);
     const ask = () =>
       h.engine.consult({ advisor: "advisor_estimator", question: "Spend?", inputs: [] }, CLAUDE);
-    expect((await submitResult(h, (await ask()).action, { exit: "done" }, 0.1)).accepted).toBe(
-      true,
-    );
-    expect((await submitResult(h, (await ask()).action, { exit: "done" }, 0.1)).accepted).toBe(
-      true,
-    );
+    expect(
+      (await submitResult(h, inSession(await ask()).action, { exit: "done" }, 0.1)).accepted,
+    ).toBe(true);
+    expect(
+      (await submitResult(h, inSession(await ask()).action, { exit: "done" }, 0.1)).accepted,
+    ).toBe(true);
     await expect(ask()).rejects.toThrow(/advisor budget is spent \(\$0\.20 of \$0\.15/);
     await h.release();
   });

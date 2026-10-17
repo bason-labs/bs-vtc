@@ -12,7 +12,7 @@
       "ok": true,
       "mode": "live",
       "engine_version": "0.4.0",
-      "contracts_version": "5.12.0",
+      "contracts_version": "5.14.0",
       "prototype_url": null
     },
     "/api/runs": {

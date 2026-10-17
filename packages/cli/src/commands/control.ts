@@ -1,10 +1,10 @@
 /**
- * The control commands `vtc status`, `vtc pause` and `vtc resume` (AD-19 rule 4): MCP clients of
+ * The control commands `vtc status`, `vtc pause`, `vtc resume` and `vtc cancel` (AD-19 rule 4): MCP clients of
  * the repo's daemon socket through `ctx.engine()`, never HTTP. `--run <id>` names a run; the
  * engine acts on the active one otherwise. `--json` prints the tool's output as is. `pause` and
  * `resume` with no run to act on still set or clear the automation kill switch and exit 0.
  */
-import type { ControlResult, StatusResult, UsageReport } from "@vtc/shared";
+import type { CancelResult, ControlResult, StatusResult, UsageReport } from "@vtc/shared";
 import type { CommandContext, CommandSpec } from "./types.js";
 import { EXIT, guarded, parseFlags } from "./util.js";
 
@@ -54,6 +54,11 @@ export const formatStatus = (status: StatusResult): string[] => {
         `  parked ${p.task}: ${p.reason}${p.risk_rule === undefined ? "" : ` (${p.risk_rule})`}`,
     ),
     ...status.features.map((f) => `Feature ${f.id}: ${f.status}`),
+    ...(status.autopilot === undefined
+      ? []
+      : [
+          `Autopilot: on (${String(status.autopilot.decisions)} decision${status.autopilot.decisions === 1 ? "" : "s"} taken for you, listed in the PR)`,
+        ]),
     `Open escalations: ${String(status.open_escalations)}`,
     budgetLine(status.budget),
     ...usageLines(status.usage),
@@ -180,5 +185,53 @@ const resumeCommand: CommandSpec = {
     }),
 };
 
+/** A `cancel` result as text: what stopped, and the worktrees left for the human. */
+export const formatCancel = (result: CancelResult): string[] => [
+  `Run ${result.run} cancelled (phase ${result.phase}): ${String(result.stopped_runs)} role run(s) stopped, ${String(result.closed_escalations)} open escalation(s) closed. The repo can start a new run.`,
+  ...(result.worktrees_left.length === 0
+    ? []
+    : [
+        `Worktrees left for you (keep what is worth keeping, then git worktree remove): ${result.worktrees_left.join(", ")}`,
+      ]),
+];
+
+/** The first contracts version whose engine has the `cancel` tool. */
+const CANCEL_SINCE = "5.13.0";
+
+/**
+ * `vtc cancel [--run <id>]` (spine §5 reading 268): ends a run started by mistake or no longer
+ * wanted, as aborted. A human decision (`cancel` is a human-only tool), so it goes only over the
+ * human connection, after the terminal confirmation.
+ */
+const cancelCommand: CommandSpec = {
+  name: "cancel",
+  summary:
+    "End a run started by mistake (you confirm at the terminal); the repo can then start another",
+  run: (args, ctx) =>
+    guarded("cancel", ctx, async () => {
+      const flags = runFlags(args);
+      if (ctx.humanEngine === undefined)
+        throw new Error("cancelling a run needs an interactive terminal: run it yourself in one");
+      const client = await ctx.humanEngine(
+        `cancel ${flags.run === undefined ? "the current run" : `run ${flags.run}`} (it ends as aborted; its worktrees and branches stay)`,
+        CANCEL_SINCE,
+      );
+      let result: CancelResult;
+      try {
+        result = await client.call("cancel", flags.run === undefined ? {} : { run: flags.run });
+      } catch (error) {
+        throw new Error(toolErrorMessage(error), { cause: error });
+      } finally {
+        await client.close();
+      }
+      for (const line of flags.json === true
+        ? [JSON.stringify(result, null, 2)]
+        : formatCancel(result))
+        ctx.io.out(line);
+      return EXIT.ok;
+    }),
+};
+
 export const pause = control("pause", "paused", "Kill switch: stop dispatching and merging");
+export const cancel = cancelCommand;
 export const resume = resumeCommand;

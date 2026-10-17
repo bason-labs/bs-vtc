@@ -175,16 +175,19 @@ const driveReplayTrials = async (k: Kernel, h: RunHandle, lead: HostId): Promise
 export const drive = async (k: Kernel, h: RunHandle): Promise<void> => {
   const state = h.state;
   if (state.run.finished_at !== undefined || state.run.paused || limitWait(k, h) !== null) return;
+  // autopilot decides what it may first, so the next phase's steps start now (reading 271)
+  await k.autopilotStep(h);
   const lead = k.liveLeadHost(state.id);
   let purpose: DispatchPurpose;
   let host: HostId;
   if (lead !== undefined) {
     purpose = "role";
     host = lead;
-  } else if (k.unattended.has(state.id) || state.automation !== null) {
-    // an automatic run with no live Lead is unattended by nature (spine §5 reading 212(6)): the
-    // engine drives it headless only where the project allows unattended runs
-    // (`headless_allowed`, AD-25); otherwise it waits for the next Lead session
+  } else if (k.unattended.has(state.id) || state.automation !== null || state.autopilot) {
+    // an automatic run with no live Lead is unattended by nature (spine §5 reading 212(6)), and
+    // so is an autopilot run (reading 271): the engine drives it headless only where the project
+    // allows unattended runs (`headless_allowed`, AD-25); otherwise it waits for the next Lead
+    // session
     purpose = "auto_resume";
     host = state.limit?.host ?? k.hostFor({ host: null });
   } else {

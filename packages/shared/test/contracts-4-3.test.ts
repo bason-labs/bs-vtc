@@ -324,7 +324,7 @@ describe("the Lead session's Claude sandbox (D-an)", () => {
 describe("the human channel (D-an)", () => {
   const hello = { v: 1, client: "cli", host: null, contracts_version: "4.3.0" } as const;
   it("names the human-only tools, all of them engine tools", () => {
-    expect([...HUMAN_ONLY_TOOLS]).toEqual(["approve", "answer", "change_request"]);
+    expect([...HUMAN_ONLY_TOOLS]).toEqual(["approve", "answer", "change_request", "cancel"]);
     const names: readonly string[] = ENGINE_MCP_TOOLS.map((t) => t.name);
     for (const tool of HUMAN_ONLY_TOOLS) expect(names).toContain(tool);
     expect(isHumanOnlyTool("approve")).toBe(true);

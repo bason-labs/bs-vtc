@@ -3,6 +3,66 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## v0.2.5 (2026-10-17)
+
+- **Autopilot: hand VTC the task, review the PR.** Start a run with `/vtc start --autopilot "…"`
+  (Claude Code: `/vtc:vtc start --autopilot "…"`; Codex: `$vtc start --autopilot "…"`), or put
+  `autopilot: true` in `.vtc/project.yaml` for every run. VTC then answers the roles' questions
+  with their recommended option and approves the specification and design itself, and the
+  Lead keeps going instead of stopping to report that it is waiting. The PR lists every decision
+  VTC took and the files it approved, so you review them all there. It still stops for what it
+  must never decide alone: spending more than the budget, a security or dependency rule, a fix
+  that keeps failing, an expired login, or an answer that would drop or waive work. It never
+  merges into your main branch: the PR waits for you. `vtc status` shows "Autopilot: on" and how
+  many decisions it took.
+- **No more "who should have caught it?" question.** The Lead now suggests the answer next to
+  each question (usually "none"), and you only correct it if you disagree.
+- **`vtc update` updates VTC in one command.** It finds the newest release, asks you, downloads
+  and checks it against `SHA256SUMS`, waits if a role is still running (`--wait`), stops the
+  engines, swaps the binary (keeping the old one as `.vtc-<old>.bak`) and refreshes the Claude Code
+  and Codex plugins in your repos. Then open a new chat. `--check` only reports; `vtc doctor`
+  says when an update is available (checked at most once a day).
+
+## v0.2.4 (2026-10-17)
+
+- **A quick fix's design step gets the specification.** A quick fix approves the requirements and
+  the design together on one screen, so its specification is not approved yet while the Architect
+  and Security work. They were sent no specification at all and stopped to ask for one. They now
+  get the Business Analyst's specification; its open questions still wait for you on that screen.
+- **Roles may cite their own instructions file.** Each role cited the task pack it was given, and
+  VTC rejected the result because that file is outside the role's working folder, so every design
+  role ran twice. Such a citation now counts, and roles are told to cite files by their path
+  in the working folder.
+
+## v0.2.3 (2026-10-17)
+
+- **Advisors work when your Lead is Codex.** Asking the Lead for an advisor (the incident
+  debugger, the estimator and the others) failed every time under Codex: VTC handed the advisor
+  back to the Lead to run inside its own chat session, which VTC never allows on Codex. Now the
+  advisor runs in the background as a headless Codex run, like every other role, and the Lead
+  tells you its answer as soon as it comes back (the whole answer is kept in
+  `.vtc/state/results/`). It still counts against the run's advisor budget. Nothing changes with
+  a Claude Code Lead.
+- **`vtc cancel` ends a run started by mistake.** A repo runs one VTC run at a time, and until now
+  a run could only be paused, never ended, so a run started in the wrong repository blocked the
+  next one. `/vtc cancel` (Claude Code: `/vtc:vtc cancel`; Codex: `$vtc cancel`) asks you to
+  confirm in the chat; `vtc cancel` asks at the terminal. The run ends as aborted, its role runs
+  stop, its automatic merges are turned off and its open questions close; its worktrees and
+  branches stay for you to keep or remove. A role can never cancel a run.
+
+## v0.2.2 (2026-10-17)
+
+- **Codex roles can read your code again.** v0.2.1 gave Codex roles their full instructions, and
+  those told a read-only role to "run no shell command". Claude Code has file tools for that;
+  Codex does not, so a Codex role could not open its own task pack and parked asking for a file
+  reader. A Codex role now reads and searches with read-only shell commands (`cat`, `sed -n`,
+  `rg`, `ls`, `git show`), inside its sandbox (read-only, network off); it still writes only inside
+  its Write scope. Claude Code roles are unchanged.
+- **VTC's daily scan of its own dependencies works.** It wrote its report where the sandbox's
+  check phase may not write (since v0.2.0 that phase has its own empty home), so every scan failed
+  and showed "automation could not scan VTC's own dependencies". The report now stays in the
+  scan's own folder.
+
 ## v0.2.1 (2026-10-17)
 
 - **Codex roles know what to return.** A role run by `codex exec` now gets its whole compiled

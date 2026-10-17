@@ -356,5 +356,15 @@ export * from "./json-schema.js";
  * `ChangeRequestInput.attachments`, `run.started.attachments`,
  * `change_request.opened.attachments`, `ATTACHMENTS`, `runAttachmentPath` and
  * `PACK_INPUT_TYPES.attachments`: image attachments of a request. Additive.
+ *
+ * 5.13.0 (MINOR): the owner's Codex runs (spine §5 readings 267, 268). `ConsultResult` is either
+ * the in-session `{run, action}` or `{run, launched}`: a Codex Lead's advisor runs headless and
+ * its answer comes back in `NextResult.notices`. The `cancel` tool (`CancelResult`, a human-only
+ * tool) ends a run as aborted. Additive for every caller that parses `{run, action}`.
+ *
+ * 5.14.0 (MINOR): autopilot (spine §5 reading 271). `ProjectConfig.autopilot`,
+ * `StartInput.autopilot` and `run.started.autopilot` put a run on autopilot; the engine's own
+ * decisions carry `autopilot: true` on `escalation.answered` and `gate.approved` (actor `engine`),
+ * and `StatusResult.autopilot` counts them. Additive.
  */
-export const CONTRACTS_VERSION = "5.12.0";
+export const CONTRACTS_VERSION = "5.14.0";

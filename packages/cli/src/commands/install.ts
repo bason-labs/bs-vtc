@@ -65,6 +65,7 @@ import {
 } from "../session-sandbox.js";
 import { autoResumeTimer, defaultTimerHost, type TimerHost, type TimerSpec } from "../timer.js";
 import { ensureInstallToken } from "../token.js";
+import { rememberCodexProject } from "../update.js";
 import { VERSION } from "../version.js";
 import type { AdapterFactory } from "../wiring.js";
 import type { CommandContext, CommandSpec } from "./types.js";
@@ -304,6 +305,13 @@ export const createInstallCommand = (
             ...(host.data === "claude-code" ? { statusline } : {}),
           });
           ctx.io.out(`Installed the VTC plugin for ${host.data}.`);
+          // `vtc update` installs it again here with the new binary
+          if (host.data === "codex" && installScope === "project" && repoRoot !== null)
+            try {
+              rememberCodexProject(ctx.vtcHome, repoRoot);
+            } catch {
+              // only `vtc update` misses this repo; `vtc update --repo` names it
+            }
           for (const path of result.written) ctx.io.out(`  wrote ${path}`);
           for (const note of result.notes) ctx.io.out(`  note: ${note}`);
         } finally {

@@ -6,6 +6,7 @@ import {
   ArtifactContentSchema,
   ChangeRequestInputSchema,
   ChangeRequestResultSchema,
+  CancelResultSchema,
   ConsultInputSchema,
   ConsultResultSchema,
   DesignReviewCommentInputSchema,
@@ -290,6 +291,8 @@ export const CONTRACT_SCHEMAS = {
   DesignCoverageChecked: DesignCoverageCheckedSchema,
   DesignFlowsFile: DesignFlowsFileSchema,
   RoutingReplayResult: RoutingReplayResultSchema,
+  // ---- contracts 5.13.0 (advisors on a Codex Lead, cancel; spine §5 readings 267-268)
+  CancelResult: CancelResultSchema,
 } as const;
 export type ContractName = keyof typeof CONTRACT_SCHEMAS;
 

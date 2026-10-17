@@ -928,6 +928,7 @@ const readingLine = (k: Kernel, h: RunHandle, step: StepSpec): string => {
     `Reading: keep your context under ${budget === undefined ? "what the work needs" : `${String(Math.round(budget / 1000))}k tokens`}.`,
     "Your pack lists every input there is: do not look for other inputs (a research brief, a repo map), other dispatches' packs or VTC's own files.",
     "Find code with `rg -n` and read only the line ranges you need, never whole large files.",
+    "Cite files by their path relative to your working directory.",
     ...(quickSpec
       ? [
           "This is a quick fix: write a short specification, only the requirements the request asks for, and read code only to state today's behaviour.",
@@ -1004,7 +1005,13 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
   if (task === undefined && ["specify", "design", "plan"].includes(state.run.phase)) {
     const effective = contract === undefined ? undefined : resolveRoleMode(contract, step.mode);
     const declared = effective?.ok === true ? effective.contract.inputs : [];
-    for (const role of DISCOVER_ROLES) {
+    // reading 269: a quick fix's spec is frozen only at its combined G1+G2 screen (§6.2), so its
+    // DESIGN roles read the BA's submitted spec, which the frozen-artifact list below lacks
+    const unfrozenSpec =
+      state.run.phase === "design" &&
+      state.run.track === "quick_fix" &&
+      state.run.gates.G1.frozen.length === 0;
+    for (const role of unfrozenSpec ? [...DISCOVER_ROLES, "ba"] : DISCOVER_ROLES) {
       for (const a of lastSubmittedArtifacts(state, role))
         if (declared.includes(a.type)) inputs.push({ type: a.type, path: a.path });
     }

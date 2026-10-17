@@ -190,6 +190,8 @@ export const humanLabels = (events: readonly VtcEvent[]): HumanLabel[] => {
       });
     } else if (isEventOfType(event, "escalation.answered")) {
       const data = readEventData(event);
+      // autopilot's choice is the engine's, not a human's label (spine §5 reading 271)
+      if (data.autopilot === true) continue;
       const where = opened.get(data.escalation) ?? {};
       labels.push({
         run: event.run,

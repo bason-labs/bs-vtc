@@ -522,6 +522,11 @@ export const launchHeadless = async (
    * still gives it only on a host whose web search is safe (`HostCapabilities.safeHostWeb`).
    */
   hostWeb = true,
+  /**
+   * A caller that answers the human itself (`consult`, spine §5 reading 267): a refusal is handed
+   * to it instead of parking the step or deferring it, so nothing in the phase flow changes.
+   */
+  onRefused?: (reason: string) => void,
 ): Promise<boolean> => {
   const adapter = k.deps.adapters[host];
   const contract = k.deps.roles.get(step.role);
@@ -533,12 +538,16 @@ export const launchHeadless = async (
   // cross-family slot is skipped, never parked)
   const refusal = headlessPlatformRefusal(k, step, host);
   if (refusal !== null) {
-    if (purpose !== "cross_family_review") refuseInSession(k, h, step, refusal);
+    if (onRefused !== undefined) onRefused(refusal);
+    else if (purpose !== "cross_family_review") refuseInSession(k, h, step, refusal);
     return false;
   }
   // §11: a pool whose budget the in-flight runs already hold launches nothing until they end
   const budget = headlessBudgetCap(k, h, step, share);
-  if (budget !== null && budget.capUsd < 0.01 && !budgetUsedUp(h, step)) return false;
+  if (budget !== null && budget.capUsd < 0.01 && !budgetUsedUp(h, step)) {
+    onRefused?.("the run's budget is held by the role runs in flight; ask again once they end");
+    return false;
+  }
   const check = await headlessPreflight(k, h, step, host, purpose);
   k.emit(h, {
     type: "headless.preflight",
@@ -548,11 +557,15 @@ export const launchHeadless = async (
     data: check,
   });
   if (!check.ok) {
-    preflightFailed(k, h, step, check);
+    if (onRefused !== undefined) onRefused(check.detail ?? "the headless preflight failed");
+    else preflightFailed(k, h, step, check);
     return false;
   }
   const prepared = await dispatchPrepared(k, h, step, host, "headless");
-  if (prepared === null) return false;
+  if (prepared === null) {
+    onRefused?.("its worktree could not be prepared");
+    return false;
+  }
   const { action, cwd, model, roleCore } = prepared;
   const startedAt = k.now().getTime();
   const roleRun = h.state.roleRuns.get(action.action_id);
@@ -560,6 +573,7 @@ export const launchHeadless = async (
     if (prepared.pluginDir !== undefined)
       rmSync(prepared.pluginDir, { recursive: true, force: true });
     await finishHeadless(k, h, action.action_id, spawnError(message), startedAt);
+    onRefused?.(message);
     return false;
   };
   if (roleRun === undefined) return fail("the dispatch was not recorded");
@@ -599,7 +613,7 @@ export const launchHeadless = async (
   const problem = roleSandboxProblem(sandbox);
   if (problem !== null) {
     await fail(problem);
-    refuseInSession(k, h, step, problem);
+    if (onRefused === undefined) refuseInSession(k, h, step, problem);
     return false;
   }
   // what the host enforced goes to Lookback with the trial (`ReplayResult.isolation`)

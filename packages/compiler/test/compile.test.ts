@@ -198,6 +198,17 @@ describe("compilePlugins: agent instructions", () => {
     expect(claude("vtc-engineer")).not.toContain("run no shell command");
   });
 
+  it("lets a Codex role read through read-only shell commands: Codex has no file tools", () => {
+    const codex = (name: string): string =>
+      file(output, "codex", `vtc/prompts/${name}/headless.md`);
+    for (const name of ["vtc-qa-judge", "vtc-qa-author", "vtc-lens-db"]) {
+      expect(codex(name)).not.toContain("run no shell command");
+      expect(codex(name)).toContain("read-only shell commands");
+    }
+    expect(codex("vtc-qa-judge")).toContain("- Tools: read-only:");
+    expect(codex("vtc-qa-author")).toContain("only inside the Write scope");
+  });
+
   it("sets no per-agent MCP table in a Codex role agent: Codex would ignore it (reading 82)", () => {
     for (const name of ["vtc-qa-author", "vtc-engineer", "vtc-lens-db"]) {
       const toml = parseToml(file(output, "codex", `agents/${name}.toml`));

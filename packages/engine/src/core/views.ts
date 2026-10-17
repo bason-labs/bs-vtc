@@ -3,6 +3,7 @@
  * `escalations` tools, built from a {@link RunState} only. Live mode and snapshot mode use the
  * same functions, so the dashboard sees the same shapes either way (AD-5 rule 7).
  */
+import { autopilotDecisions } from "./autopilot.js";
 import {
   EVENT_PAGE_LIMIT,
   HOST_IDS,
@@ -93,6 +94,7 @@ export const statusView = (
     open_escalations: openEscalations(state).length,
     budget: runBudget(state),
     usage: usageReportView(usage, state),
+    ...(state.autopilot ? { autopilot: { decisions: autopilotDecisions(state).length } } : {}),
   };
 };
 

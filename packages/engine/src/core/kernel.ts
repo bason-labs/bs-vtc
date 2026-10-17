@@ -45,9 +45,22 @@ import type { RoleRegistry } from "./roles.js";
 import type { TierRoute } from "./routing.js";
 import type { RunState } from "./state.js";
 
+/**
+ * `next`'s hold on an autopilot run's `wait` (reading 271): under the Codex MCP tool timeout (60 s
+ * by default), so the Lead can call `next` again in the same turn instead of asking the human to
+ * say continue.
+ */
+export const AUTOPILOT_NEXT_WAIT_MS = 45_000;
+
 export interface EngineCoreDeps {
   /** Absolute repo root. */
   readonly repoRoot: string;
+  /**
+   * How long `next` holds an autopilot run's `wait` while the engine's own work is under way
+   * (headless role runs, engine jobs), returning as soon as the run changes (spine §5 reading
+   * 271). Absent: {@link AUTOPILOT_NEXT_WAIT_MS}; 0 answers at once.
+   */
+  readonly nextWaitMs?: number;
   /**
    * Absolute VTC home (`~/.vtc`): hidden tests, and the engine's private directory for this repo
    * (`guard.ts`: the write ledger, dispatch records, a held git change), which no role can write.
@@ -577,6 +590,11 @@ export interface Kernel {
    * a Lead session calls `next` again.
    */
   readonly unattended: Set<string>;
+  /**
+   * Autopilot between the Lead's calls (spine §5 reading 271): answers the escalations it may and
+   * approves the gate awaiting a decision. Whether it decided anything. Callers hold the lock.
+   */
+  autopilotStep(handle: RunHandle): Promise<boolean>;
   /** The prompt-version selector the daemon wired (`Engine.setPromptPins`), or `null`. */
   promptPins(): PromptPins | null;
   /** Lookback at RETRO as the daemon wired it (`Engine.setLookbackRetro`), or `null`. */

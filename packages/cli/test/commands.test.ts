@@ -18,12 +18,20 @@ import {
   type StatusResult,
 } from "@vtc/shared";
 import { createDiskAssetBundle } from "../src/assets.js";
+import { readProjects } from "../src/update.js";
 import {
   createDashboardCommand,
   dashboardUrl,
   defaultDashboardDeps,
 } from "../src/commands/dashboard.js";
-import { pause, resume, status, formatStatus, toolErrorMessage } from "../src/commands/control.js";
+import {
+  cancel,
+  pause,
+  resume,
+  status,
+  formatStatus,
+  toolErrorMessage,
+} from "../src/commands/control.js";
 import { createDoctorCommand, defaultDoctorEnv } from "../src/commands/doctor.js";
 import { command as init, defaultProjectConfig } from "../src/commands/init.js";
 import {
@@ -168,6 +176,7 @@ describe("vtc install", () => {
       installDeps({ factories: { codex: factory, "claude-code": factory } }, "/h"),
     );
     expect(await cmd.run(["--host", "codex", "--scope", "user"], ctx)).toBe(0);
+    expect(readProjects(vtcHome)).toEqual([]);
     expect(requests).toEqual([
       // the VTC home goes with the request, so VTC-owned host files sit where the deny lists point
       { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user", vtcHome },
@@ -184,6 +193,8 @@ describe("vtc install", () => {
     // (D-ah): Codex in the project, Claude Code for the user
     expect(await cmd.run(["codex"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "project" });
+    // a project-scope Codex install is remembered, so `vtc update` installs it again there
+    expect(readProjects(vtcHome)).toEqual([repo]);
     // Codex plugin registration is the adapter's (AD-16 rule 4, reading 94): the cli itself
     // writes no marketplace, plugin copy or config.toml into the repo
     expect(existsSync(join(repo, ".agents"))).toBe(false);
@@ -441,6 +452,49 @@ describe("vtc status / pause / resume (AD-19 rule 4)", () => {
     expect(err.join("\n")).toMatch(/--adopt needs --run/);
   });
 
+  it("vtc cancel goes over the human connection only, and needs a 5.13.0 engine (reading 268)", async () => {
+    const plain: string[] = [];
+    const asked: { what: string; since: string | undefined }[] = [];
+    const { ctx, out, err } = capture("/w", "/h", () => Promise.resolve(fakeClient(plain)));
+    // without a human connection (no terminal), nothing is sent
+    expect(await cancel.run([], ctx)).toBe(1);
+    expect(err.join("\n")).toMatch(/interactive terminal/);
+    expect(plain).toEqual([]);
+    const human: string[] = [];
+    const withHuman = {
+      ...ctx,
+      humanEngine: (what: string, since?: string) => {
+        asked.push({ what, since });
+        return Promise.resolve({
+          call: (tool: string, input: unknown) => {
+            human.push(`${tool} ${JSON.stringify(input)}`);
+            return Promise.resolve({
+              run: "r9",
+              phase: "specify",
+              stopped_runs: 1,
+              closed_escalations: 4,
+              worktrees_left: [".vtc/state/worktrees/T-1"],
+            } as never);
+          },
+          close: () => Promise.resolve(),
+        } as EngineClient);
+      },
+    };
+    expect(await cancel.run(["--run", "r9"], withHuman)).toBe(0);
+    expect(asked).toEqual([
+      {
+        what: "cancel run r9 (it ends as aborted; its worktrees and branches stay)",
+        since: "5.13.0",
+      },
+    ]);
+    expect(human).toEqual(['cancel {"run":"r9"}']);
+    expect(out.join("\n")).toMatch(
+      /Run r9 cancelled \(phase specify\): 1 role run\(s\) stopped, 4 open escalation\(s\) closed/,
+    );
+    expect(out.join("\n")).toContain(".vtc/state/worktrees/T-1");
+    expect(plain).toEqual([]);
+  });
+
   it("vtc pause / resume without a run exit 0 and say the kill switch state (reading 227 (2))", async () => {
     const answers: Record<string, ControlResult> = {
       pause: { run: null, automation_paused: true },
@@ -493,6 +547,12 @@ describe("vtc status / pause / resume (AD-19 rule 4)", () => {
       usage: { hosts: [], interrupted_tasks: [], auto_resume_at: null },
     });
     expect(lines.slice(-2)).toEqual(["Usage:", "  unknown"]);
+  });
+
+  it("says when the run is on autopilot and how many decisions it took (reading 271)", () => {
+    const lines = formatStatus({ ...statusResult, autopilot: { decisions: 3 } });
+    expect(lines).toContain("Autopilot: on (3 decisions taken for you, listed in the PR)");
+    expect(formatStatus(statusResult).some((l) => l.startsWith("Autopilot"))).toBe(false);
   });
 
   it("reports engine errors as one readable line", async () => {

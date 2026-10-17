@@ -4802,6 +4802,86 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       Tests: `events.test.ts` (Codex limit reset), `owner-run.test.ts` (attachments),
       `contracts-5-12.test.ts`, `test-tmpdir.test.ts`.
 
+267.  **A Codex Lead's advisor runs headless; its answer comes back as a notice** (§5.4, AD-17
+      rule 5, D-an; amends readings 25 and 79; contracts 5.13.0). _Lead decision 2026-10-17,
+      pending human review._ The owner's second Codex run asked for the incident debugger and
+      `consult` refused every time: it returned only a `spawn_role` for the Lead to run in its
+      own session, and a Codex session cannot be confined (D-an, `CODEX_IN_SESSION_REFUSED_REASON`),
+      so advisors never ran under a Codex Lead, although every other role does as an
+      engine-launched headless run (H-1). (1) `consult` asks `planDispatch("role", …)` with the
+      run's Lead host, as `dispatchNow` does; where it says `headless` the advisor runs through
+      `launchHeadless` on that host with the same pack (the human's question first), dispatch
+      record, own worktree, advisor-budget check and prompt SHA as in-session, and `consult`
+      returns `{run, launched: {action_id, host}}` instead of an action (`ConsultResult` is now a
+      union; `{run, action}` is unchanged for a Claude Lead). (2) The answer reaches the Lead as a
+      relayed notice (`NextResult.notices`, once): the advisor's summary, cut to the notice's
+      2000 characters, and the path of its whole result (`.vtc/state/results/<action>.json`); a
+      rejected result or a failure is relayed with its reason. A run that could not start is not
+      relayed: `launchHeadless` hands the refusal (platform rule, preflight, budget pool,
+      worktree, spawn) to `consult` through its new `onRefused`, which throws it as `conflict`,
+      and nothing parks or escalates in the phase flow. (3) `consult` claims the Lead like `next`.
+      The Lead skill says a launched advisor answers in a later `next`'s notices. Tests:
+      `contracts-5-13.test.ts`.
+268.  **`cancel` ends a run** (§6.8, §15, D-an; contracts 5.13.0). _Lead decision 2026-10-17,
+      pending human review._ The owner started a run in the wrong repository and could only
+      leave it parked: one run per repo, and no tool ended one. `cancel` (`RunScopedInput` →
+      `CancelResult`) finishes the run as `run.finished` outcome `aborted` with actor `human`
+      (no new event type; `aborted` already meant a run that ended without its work), so the
+      repo may `start` another; its open escalations end with it (escalations are listed for the
+      active run only). Then, as `pause`, its headless runs are killed (AD-25: no orphans) and every
+      automatic merge VTC enabled for it is turned off. Worktrees and branches stay: one may hold
+      work worth keeping, and the result lists the task worktrees (`worktrees_left`). It is a
+      human-only tool (`HUMAN_ONLY_TOOLS`), so a role session never reaches it (the Codex role
+      bridge's `disabled_tools`, the Claude role deny list, `assertHumanChannel`): the Lead calls it
+      after the human confirms in the chat, or `vtc cancel [--run <id>]` asks at an interactive
+      terminal and sends the install token only after a yes, to an engine of contracts 5.13.0 or
+      later (`humanEngine(what, since)`). Tests: `contracts-5-13.test.ts`, the cli's
+      `commands.test.ts`.
+269.  **A quick fix's DESIGN roles read the BA's spec before it is frozen** (§6.2, §6.3 step 1,
+      AD-14 rule 5). _Lead decision 2026-10-17, pending human review._ A quick fix shows G1 and
+      G2 on one screen, so its spec is frozen only there; DESIGN packs listed only frozen G1
+      and G2 artifacts plus the DISCOVER roles' outputs, so the owner's quick fix sent the
+      Architect and Security's threat model packs with no spec, and both parked asking for one.
+      While a quick fix is in DESIGN with nothing frozen at G1, a task-less step's pack also
+      lists the BA's last submitted artifacts its contract declares (the spec); the worktree
+      already had the file (`ROLE_INPUT_DIRS`). The spec's open questions stay in the escalation
+      queue and are shown at the combined screen, unchanged. Tests: `quick-fix-design.test.ts`.
+270.  **A role may cite its own pack** (§4.2 step 3, AD-8 rule 2). _Lead decision 2026-10-17,
+      pending human review._ A dispatch names its pack by the absolute path in the user's
+      checkout, outside the role's worktree; roles read it there and cited it, and the claim
+      check, which reads the worktree and refuses absolute paths, rejected every first result
+      of the owner's DESIGN roles. `EvidenceContext.packRoot` (the user's checkout) resolves a
+      `file` or `file_line` citation of a path under `.vtc/state/packs/`, absolute under that
+      root or relative, against the pack itself; any other absolute path still fails. The
+      prompt also says to cite files by their path relative to the working directory. Tests:
+      `quick-fix-design.test.ts`.
+271.  **Autopilot: the human's one review is the PR** (§6.2, §6.5, AD-27 rule 2). _Lead decision
+      2026-10-17 on the owner's request, pending human review._ The owner asked to hand VTC a
+      task or a bug and review only the result; every quick fix stopped for the BA's open
+      questions, for a separate "who should have caught it" question and for the combined
+      G1+G2 screen. Contracts 5.14.0: `autopilot` on `start` and in `.vtc/project.yaml`
+      (absent: off; `start`'s value wins) is recorded on `run.started`. On such a run the
+      engine itself (actor `engine`, `autopilot: true`) (1) answers an open escalation with its
+      recommended option, only for reasons `spec_question`, `blocked` and `spec_conflict` that a
+      role raised (a spec question from any role), only when that option's effect is `clarify`,
+      `hint`, `retry` or `replan`, at most twice per role and scope and 12 times per run, with
+      `who_should_have_caught: none`, which Lookback's human labels skip; (2) approves G1, G2 or
+      the combined screen once no escalation is open, with the rules an automatic run's
+      approval keeps (no unverified fact, the category standard for UI directions). Everything
+      else stays the human's: budgets, risk rules, caps and stuck loops, gate infrastructure and
+      logins, change requests, an option that waives, drops or decides a change. It runs at
+      most at merge Level 2 like an automatic run (D-bw): it never merges into the default
+      branch. The PR description lists every autopilot decision and the files each gate froze;
+      `status` counts them (`StatusResult.autopilot`). `drive` decides them too, so a Codex
+      Lead's headless roles go on between the Lead's turns, and an autopilot run with no live
+      Lead is driven like an automatic run where `headless_allowed`. `next` on an autopilot run
+      whose only action is a wait on the engine's own work (headless runs, engine jobs) holds
+      for up to 45 s (`AUTOPILOT_NEXT_WAIT_MS`, under the Codex MCP tool timeout) and answers on
+      the run's next event, and the Lead skill tells the Lead to call `next` again rather than
+      end its turn. For every run the Lead now proposes the attribution with each escalation
+      instead of asking it as a separate question. Tests: `autopilot.test.ts`,
+      `contracts-5-14.test.ts`.
+
 ## 6. Change process for this spine
 
 - Changing an AD, adding one, or changing a frozen contract (AD-3) needs an architecture review
