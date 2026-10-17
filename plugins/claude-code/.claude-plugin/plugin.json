@@ -1,6 +1,6 @@
 {
   "name": "vtc",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "VTC: a local, gated multi-agent software delivery team driven by the vtc engine. Works with Claude Code.",
   "keywords": ["agents", "delivery", "verification", "multi-agent"]
 }

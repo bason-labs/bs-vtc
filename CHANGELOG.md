@@ -3,6 +3,19 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## v0.2.2 (2026-10-17)
+
+- **Codex roles can read your code again.** v0.2.1 gave Codex roles their full instructions, and
+  those told a read-only role to "run no shell command". Claude Code has file tools for that;
+  Codex does not, so a Codex role could not open its own task pack and parked asking for a file
+  reader. A Codex role now reads and searches with read-only shell commands (`cat`, `sed -n`,
+  `rg`, `ls`, `git show`), inside its sandbox (read-only, network off); it still writes only inside
+  its Write scope. Claude Code roles are unchanged.
+- **VTC's daily scan of its own dependencies works.** It wrote its report where the sandbox's
+  check phase may not write (since v0.2.0 that phase has its own empty home), so every scan failed
+  and showed "automation could not scan VTC's own dependencies". The report now stays in the
+  scan's own folder.
+
 ## v0.2.1 (2026-10-17)
 
 - **Codex roles know what to return.** A role run by `codex exec` now gets its whole compiled

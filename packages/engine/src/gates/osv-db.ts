@@ -247,7 +247,9 @@ export const scanLockfileAdvisories = async (request: OsvScanRequest): Promise<O
   try {
     const name = request.lockfileName ?? "pnpm-lock.yaml";
     writeFileSync(join(dir, name), request.lockfile, { mode: 0o600 });
-    const output = join(jail.homeDir(), "osv-scan.json");
+    // In the scan's own checkout: the verify phase runs with its own empty HOME, so
+    // `jail.homeDir()` (the install phase's) is not writable here (spine §5 reading 252).
+    const output = join(dir, "osv-scan.json");
     const exec: ExecResult = await jail.run({
       phase: "verify",
       checkout: dir,
