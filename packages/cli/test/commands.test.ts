@@ -18,6 +18,7 @@ import {
   type StatusResult,
 } from "@vtc/shared";
 import { createDiskAssetBundle } from "../src/assets.js";
+import { readProjects } from "../src/update.js";
 import {
   createDashboardCommand,
   dashboardUrl,
@@ -175,6 +176,7 @@ describe("vtc install", () => {
       installDeps({ factories: { codex: factory, "claude-code": factory } }, "/h"),
     );
     expect(await cmd.run(["--host", "codex", "--scope", "user"], ctx)).toBe(0);
+    expect(readProjects(vtcHome)).toEqual([]);
     expect(requests).toEqual([
       // the VTC home goes with the request, so VTC-owned host files sit where the deny lists point
       { projectRoot: repo, home: "/h", pluginDir: "/plugins/codex", scope: "user", vtcHome },
@@ -191,6 +193,8 @@ describe("vtc install", () => {
     // (D-ah): Codex in the project, Claude Code for the user
     expect(await cmd.run(["codex"], ctx)).toBe(0);
     expect(requests.at(-1)).toMatchObject({ pluginDir: "/plugins/codex", scope: "project" });
+    // a project-scope Codex install is remembered, so `vtc update` installs it again there
+    expect(readProjects(vtcHome)).toEqual([repo]);
     // Codex plugin registration is the adapter's (AD-16 rule 4, reading 94): the cli itself
     // writes no marketplace, plugin copy or config.toml into the repo
     expect(existsSync(join(repo, ".agents"))).toBe(false);
