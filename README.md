@@ -49,6 +49,7 @@ vtc install codex                 # the Codex plugin
 vtc install claude-code           # the Claude Code plugin
 vtc doctor --download --install-browser   # pinned scanners and the screenshot browser
 vtc install --auto-resume         # optional: continue runs after a usage limit resets
+vtc update                        # later: get the newest VTC in one command
 ```
 
 Restart Claude Code and Codex afterwards.

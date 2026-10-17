@@ -17,6 +17,11 @@ any release may change behaviour. Role prompt changes have their own log in `rol
   many decisions it took.
 - **No more "who should have caught it?" question.** The Lead now suggests the answer next to
   each question (usually "none"), and you only correct it if you disagree.
+- **`vtc update` updates VTC in one command.** It finds the newest release, asks you, downloads
+  and checks it against `SHA256SUMS`, waits if a role is still running (`--wait`), stops the
+  engines, swaps the binary (keeping the old one as `.vtc-<old>.bak`) and refreshes the Claude Code
+  and Codex plugins in your repos. Then open a new chat. `--check` only reports; `vtc doctor`
+  says when an update is available (checked at most once a day).
 
 ## v0.2.4 (2026-10-17)
 
