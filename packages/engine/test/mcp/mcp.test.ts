@@ -112,6 +112,7 @@ describe("tool surface (AD-4)", () => {
     approve: { gates: [], decision: "maybe" },
     change_request: { artifact: "interface_contract", summary: "x", detail: "y" },
     consult: { advisor: "advisor_estimator" },
+    cancel: { run: "" },
     pause: { run: "" },
     resume: { nope: 1 },
   };

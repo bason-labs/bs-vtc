@@ -49,6 +49,7 @@ import {
   worktreeOf,
   type Harness,
   type SpawnAction,
+  inSession,
 } from "../helpers/engine-harness.js";
 
 // Whole engine flows on a real repo spawn a few hundred git processes per test: under turbo's
@@ -346,7 +347,7 @@ describe(
         h.engine.consult({ advisor: "advisor_estimator", question: "How long?", inputs: [] }, call);
       await expect(ask(sandboxed("off"))).rejects.toThrow(/deny rules are not on/);
       await expect(ask(sandboxed(undefined))).rejects.toMatchObject({ code: "conflict" });
-      expect((await ask(CLAUDE)).action.role).toBe("advisor_estimator");
+      expect(inSession(await ask(CLAUDE)).action.role).toBe("advisor_estimator");
       await h.release();
     });
     it("with no Lead session, a caller that cannot be the Lead waits: nothing parks", async () => {
@@ -359,9 +360,11 @@ describe(
       expect(NO_LEAD_WAIT_REASON).toMatch(/no Lead session holds this run/);
       // a bridge session bound to a role action cannot claim it either
       const role: CallContext = { host: "claude-code", session: "S-role", client: "bridge" };
-      const { action } = await h.engine.consult(
-        { advisor: "advisor_estimator", question: "x?", inputs: [] },
-        CLAUDE,
+      const { action } = inSession(
+        await h.engine.consult(
+          { advisor: "advisor_estimator", question: "x?", inputs: [] },
+          CLAUDE,
+        ),
       );
       expect((await submitResult(h, action, { exit: "done" }, 0.01, role)).accepted).toBe(true);
       expect(spawns(await next(h, role))).toEqual([]);
@@ -566,7 +569,7 @@ describe(
       await start(h);
       const ask = () =>
         h.engine.consult({ advisor: "advisor_estimator", question: "Spend?", inputs: [] }, CLAUDE);
-      const first = (await ask()).action;
+      const first = inSession(await ask()).action;
       expect(
         (await submitResult(h, first, { exit: "done" }, 0.2, CLAUDE, SESSION_DEFAULT_MODEL))
           .accepted,
@@ -577,9 +580,11 @@ describe(
     it("counts a failed run's reported cost too (a failed advisor run spends its budget)", async () => {
       const h = createHarness({ project: { budgets: { advisor_usd: 0.15 } } });
       await start(h);
-      const { action } = await h.engine.consult(
-        { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
-        CLAUDE,
+      const { action } = inSession(
+        await h.engine.consult(
+          { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
+          CLAUDE,
+        ),
       );
       const failed = await h.engine.submit(
         SubmitInputSchema.parse({
@@ -753,9 +758,11 @@ describe(
           project: { budgets: { advisor_usd: 0.15 } },
         });
         await start(h);
-        const { action } = await h.engine.consult(
-          { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
-          CLAUDE,
+        const { action } = inSession(
+          await h.engine.consult(
+            { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
+            CLAUDE,
+          ),
         );
         await h.engine.submit(SubmitInputSchema.parse(input(action.action_id)), CLAUDE);
         await h.engine.settle();
@@ -802,9 +809,11 @@ describe(
     it("a limit-hit advisor run's reported cost spends the advisor budget", async () => {
       const h = createHarness({ project: { budgets: { advisor_usd: 0.15 } } });
       await start(h);
-      const { action } = await h.engine.consult(
-        { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
-        CLAUDE,
+      const { action } = inSession(
+        await h.engine.consult(
+          { advisor: "advisor_estimator", question: "Spend?", inputs: [] },
+          CLAUDE,
+        ),
       );
       await h.engine.submit(
         SubmitInputSchema.parse({

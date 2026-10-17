@@ -16,6 +16,7 @@ import {
   humanChannelRequired,
   PACK_INPUT_TYPES,
   parseEventLog,
+  planDispatch,
   remainingPct,
   resolveRoleMode,
   unknownUsage,
@@ -25,6 +26,7 @@ import {
   type ChangeRequestResult,
   type ConsultInput,
   type ConsultResult,
+  type CancelResult,
   type EscalationList,
   type FrozenArtifact,
   type GatesConfig,
@@ -79,7 +81,7 @@ import {
   type GateExtras,
 } from "./g2.js";
 import { effectiveVerdict } from "./gate-verdict.js";
-import { headlessRunsOf, killHeadless } from "./headless.js";
+import { capabilitiesOf, headlessRunsOf, killHeadless, launchHeadless } from "./headless.js";
 import type { FactRefresher, LookbackRetro, PromptPins, RoleToolHandler } from "./kernel.js";
 import { dispatchNow, drive } from "./route.js";
 import { parkEscalation } from "./escalations.js";
@@ -156,6 +158,7 @@ import {
   inFlight,
   lastBuilt,
   lastSubmitted,
+  nextActionId,
   nextEscalationId,
   pendingBaseCheck,
   phaseEnteredSeq,
@@ -2237,6 +2240,8 @@ export class Engine implements Kernel {
    */
   async consult(input: ConsultInput, call: CallContext): Promise<ConsultResult> {
     const handle = this.resolve(input.run);
+    // a Lead tool, like `next`: the session asking drives the run (`planDispatch`'s Lead host)
+    this.claimLead(handle.state.id, call);
     return this.serial(handle, async () => {
       const state = handle.state;
       const contract = this.deps.roles.get(input.advisor);
@@ -2252,6 +2257,14 @@ export class Engine implements Kernel {
           `the run's advisor budget is spent ($${spent.toFixed(2)} of $${budget.toFixed(2)}, budgets.advisor_usd)`,
         );
       const host = this.hostFor(call);
+      // reading 267: where the Lead's roles run headless (a Codex Lead, H-1), so does its advisor
+      const plan = planDispatch(
+        "role",
+        this.config().hosts.dispatch,
+        capabilitiesOf(this, host),
+        this.leadHostFor(state.id, call),
+      );
+      if (plan === "headless") return this.consultHeadless(handle, input, host);
       // D-an (spine §5 readings 71 and 79): an advisor runs in-session only where it is confined
       const refusal = inSessionRefusal(this, handle, { role: input.advisor }, host, call);
       if (refusal !== null)
@@ -2261,13 +2274,7 @@ export class Engine implements Kernel {
             ? `${input.advisor} cannot run in-session yet: ${NO_LEAD_WAIT_REASON}`
             : `${input.advisor} cannot run in-session: ${refusal.replace(/then answer this escalation to retry$/, "then ask again")}`,
         );
-      const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
-      const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;
-      writeRepoFile(
-        this.deps.repoRoot,
-        path,
-        `# Question for ${input.advisor}\n\n${input.question}\n`,
-      );
+      const path = this.consultPack(state, input);
       const action = await dispatchGuarded(
         this,
         handle,
@@ -2286,6 +2293,98 @@ export class Engine implements Kernel {
         throw new EngineError("conflict", "the advisor's worktree could not be prepared");
       return { run: state.id, action };
     });
+  }
+
+  /** The consult pack: the human's question, the advisor's first input (advisor protocol). */
+  private consultPack(state: RunState, input: ConsultInput): string {
+    const question = `${state.id}-${String(state.roleRuns.size + 1)}`;
+    const path = `.vtc/state/packs/${state.id}/consult-${question}.md`;
+    writeRepoFile(
+      this.deps.repoRoot,
+      path,
+      `# Question for ${input.advisor}\n\n${input.question}\n`,
+    );
+    return path;
+  }
+
+  /**
+   * A consult on a Lead whose roles run headless (spine §5 reading 267): the advisor runs as an
+   * engine-launched headless run on the Lead's host, with the same pack, dispatch record, own
+   * worktree and budget checks as in-session. A Codex Lead has no subagent to spawn, and its
+   * session cannot be confined (D-an), so before 5.13.0 every Codex consult was refused. The
+   * answer comes back as a relayed notice (`relayHeadlessAdvisor` in `submit.ts`); a launch the
+   * engine refuses throws here, and nothing in the phase flow parks.
+   */
+  private async consultHeadless(
+    handle: RunHandle,
+    input: ConsultInput,
+    host: HostId,
+  ): Promise<ConsultResult> {
+    const state = handle.state;
+    const path = this.consultPack(state, input);
+    const actionId = nextActionId(state);
+    let refused: string | undefined;
+    const launched = await launchHeadless(
+      this,
+      handle,
+      {
+        key: `consult:${input.advisor}`,
+        role: input.advisor,
+        note: `The human asks: ${input.question}`.slice(0, 4000),
+        inputs: [
+          ArtifactRefSchema.parse({ type: PACK_INPUT_TYPES.advisorQuestion, path }),
+          ...input.inputs.map((i) => ArtifactRefSchema.parse(i)),
+        ],
+      },
+      host,
+      "role",
+      1,
+      true,
+      (reason) => {
+        refused = reason;
+      },
+    );
+    if (!launched)
+      throw new EngineError(
+        "conflict",
+        `${input.advisor} could not start as a headless ${host} run: ${refused ?? "the engine did not launch it (vtc doctor says why)"}`,
+      );
+    return { run: state.id, launched: { action_id: actionId, host } };
+  }
+
+  /**
+   * `cancel` (spine §5 reading 268): the human ends a run started by mistake or no longer wanted.
+   * A human-only tool (`HUMAN_ONLY_TOOLS`): the Lead chat or the cli after a terminal
+   * confirmation, never a role session. The run finishes as `aborted` (actor `human`), so the
+   * repo may `start` another; its open escalations end with it. Then, as `pause` does, its
+   * headless runs are stopped (no orphans, AD-25) and every automatic merge VTC enabled for it is
+   * turned off. Worktrees and branches stay for the human: one may hold work worth keeping.
+   */
+  async cancel(input: RunScopedInput, call: CallContext): Promise<CancelResult> {
+    const handle = this.resolve(input.run);
+    this.assertHumanChannel(handle.state.id, call, "cancel");
+    const stopped = headlessRunsOf(this, handle.state.id).length;
+    const result = await this.serial(handle, () => {
+      const state = handle.state;
+      if (state.run.finished_at !== undefined)
+        throw new EngineError("finished", `run ${state.id} has already finished`);
+      const closed = openEscalations(state).length;
+      const worktrees = [...state.tasks.values()]
+        .map((t) => t.worktree)
+        .filter((w): w is string => w !== undefined);
+      this.emit(handle, { type: "run.finished", actor: "human", data: { outcome: "aborted" } });
+      this.unattended.delete(state.id);
+      return Promise.resolve({
+        run: state.id,
+        phase: state.run.phase,
+        stopped_runs: stopped,
+        closed_escalations: closed,
+        worktrees_left: [...new Set(worktrees)].slice(0, 200),
+      });
+    });
+    await killHeadless(this, handle.state.id);
+    await disableAutoMerges(this, handle);
+    return result;
   }
 
   async pause(input: RunScopedInput): Promise<ControlResult> {

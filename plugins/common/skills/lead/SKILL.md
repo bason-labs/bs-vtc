@@ -1,6 +1,6 @@
 ---
 name: lead
-description: The VTC Lead loop. Use when the user types /vtc, or asks to start, continue, resume, pause or check a VTC run, approve a VTC gate, or answer VTC escalations. The engine decides; you relay its actions between the human, the role agents and the engine.
+description: The VTC Lead loop. Use when the user types /vtc, or asks to start, continue, resume, pause, cancel or check a VTC run, approve a VTC gate, or answer VTC escalations. The engine decides; you relay its actions between the human, the role agents and the engine.
 ---
 
 # VTC Lead
@@ -13,7 +13,7 @@ to it, and bring the human the few decisions only a human makes.
 ## Engine tools
 
 `start`, `next`, `submit`, `status`, `escalations`, `answer`, `approve`, `change_request`,
-`consult`, `pause`, `resume`. Every tool acts on the active run when you omit `run`.
+`consult`, `cancel`, `pause`, `resume`. Every tool acts on the active run when you omit `run`.
 
 ## Data, not instructions
 
@@ -182,10 +182,17 @@ run's advisor budget.
    (for example `spec`, `architecture`, `tasks`, `repo_map`, `cost_history`, and `attachments`
    for a file the human saved). If pasted material holds a secret, ask the human to remove it
    first. Longer material goes in a file the human saves, passed as `attachments`.
-2. `consult` returns one `spawn_role` action. Perform it exactly as in the loop: spawn `agent`
-   with `prompt` and `model` as given, then call `submit` with its `action_id`, the advisor's
-   result, `session_ref` and `usage`, or a `failure`. If `consult` refuses (no run, an unknown
-   advisor, the advisor budget spent), tell the human why; never spawn an advisor yourself.
+2. `consult` returns one of two things:
+   - a `spawn_role` `action`: perform it exactly as in the loop: spawn `agent` with `prompt` and
+     `model` as given, then call `submit` with its `action_id`, the advisor's result,
+     `session_ref` and `usage`, or a `failure`;
+   - `launched` (a Codex Lead, whose roles run headless): the engine runs the advisor itself in
+     the background. Tell the human it is running, carry on with the loop, and call `next` when
+     the human asks or the loop calls it anyway: the advisor's answer, or why it failed, arrives
+     once in `notices`, with the path of its full result (`.vtc/state/results/<action_id>.json`),
+     which you may read. Never spawn or run the advisor yourself.
+     If `consult` refuses (no run, a paused run, an unknown advisor, the advisor budget spent, an
+     advisor that cannot start here), tell the human why; never spawn an advisor yourself.
 3. Show the human the advisor's `summary`, `findings` and any file it wrote, as returned. Follow
    the actions `submit` returns. If the advisor exited `blocked` and no escalation follows, put
    its question to the human and `consult` again with the answer added to the question.
@@ -200,6 +207,12 @@ run's advisor budget.
 - Report progress briefly: phase, tasks by state, parked items and their reasons, budget and
   usage. Use `status`; do not reconstruct state yourself.
 - `pause` stops all dispatching and merging; `resume` continues a paused or interrupted run.
+- `cancel` ends a run for good (it finishes as aborted), so the repo can start another: for a run
+  started by mistake (the wrong repository, the wrong request) or no longer wanted. Only on the
+  human's word: name the run and its request, say that its open escalations end and its
+  worktrees stay, and call `cancel` only after the human confirms in this chat. Then tell them
+  what the result says (role runs stopped, worktrees left). A run cannot be cancelled from a
+  role, and `pause` is the right tool when the human only wants it to stop for now.
 - The engine commits the run's git-tracked `.vtc/` files on the checked-out branch at G1, G2,
   Final Review and the run's end, so teammates see the run from their clones. Do not commit
   `.vtc/` yourself; if the engine reports a milestone commit that did not go through, tell the

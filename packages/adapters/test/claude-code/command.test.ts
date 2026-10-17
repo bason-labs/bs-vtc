@@ -64,7 +64,7 @@ const profile = (...args: Parameters<typeof profileRequest>) =>
   createClaudeCodeAdapter(HOMES).sandboxProfile(profileRequest(...args));
 
 /**
- * Every human-only engine tool (approve, answer, change_request; D-an, spine §5 reading 71) under
+ * Every human-only engine tool (approve, answer, change_request, cancel; D-an, spine §5 reading 71) under
  * both names a role run could reach it by: the plugin's server and the `--mcp-config` bridge.
  */
 const HUMAN_ONLY_DENIED = [
@@ -74,6 +74,8 @@ const HUMAN_ONLY_DENIED = [
   "mcp__vtc__answer",
   "mcp__plugin_vtc_vtc__change_request",
   "mcp__vtc__change_request",
+  "mcp__plugin_vtc_vtc__cancel",
+  "mcp__vtc__cancel",
 ];
 /**
  * Denied to every role without `host_web` (H-3): the host web tools; and to every role: the

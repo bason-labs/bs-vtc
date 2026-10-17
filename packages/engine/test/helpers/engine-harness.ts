@@ -35,6 +35,7 @@ import {
   type SessionRef,
   type SpawnRoleRequest,
   type UsageSnapshot,
+  type ConsultResult,
   type LeadAction,
   type PullRequestRef,
   type RoleContract,
@@ -761,6 +762,13 @@ export const only = (actions: readonly LeadAction[], role: string): SpawnAction 
   if (found.length !== 1)
     throw new Error(`expected one ${role} spawn, got ${JSON.stringify(actions)}`);
   return found[0]!;
+};
+
+/** A consult the Lead runs in its own session (a Claude Lead): its `spawn_role` (5.13.0 union). */
+export const inSession = (out: ConsultResult): { run: string; action: SpawnAction } => {
+  if (!("action" in out))
+    throw new Error(`expected an in-session consult, got ${JSON.stringify(out)}`);
+  return out;
 };
 
 export const worktreeOf = (h: Harness, task: string): string =>

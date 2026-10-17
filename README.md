@@ -71,16 +71,19 @@ a run starts from the committed `.vtc/project.yaml` and `.vtc/gates.yml`.
 
 Open Claude Code or Codex **in the project folder** and talk to the Lead:
 
-| You want to                    | Claude Code                               | Codex                       |
-| ------------------------------ | ----------------------------------------- | --------------------------- |
-| Fix a bug / small change       | `/vtc start "Fix: autoplay skips song 2"` | `$vtc start "Fix: ..."`     |
-| Build a feature                | `/vtc start "Add playlist sharing"`       | `$vtc start "Add ..."`      |
-| Continue after a break         | `/vtc continue`                           | `$vtc continue`             |
-| See where things are           | `/vtc status`                             | `$vtc status`               |
-| Answer what is waiting for you | `/vtc escalations`                        | `$vtc escalations`          |
-| Change something mid-run       | `/vtc change "Use tabs, not a modal"`     | `$vtc change "..."`         |
-| Stop / restart everything      | `/vtc pause`, `/vtc resume`               | `$vtc pause`, `$vtc resume` |
+| You want to                    | Claude Code                                    | Codex                       |
+| ------------------------------ | ---------------------------------------------- | --------------------------- |
+| Fix a bug / small change       | `/vtc:vtc start "Fix: autoplay skips song 2"`  | `$vtc start "Fix: ..."`     |
+| Build a feature                | `/vtc:vtc start "Add playlist sharing"`        | `$vtc start "Add ..."`      |
+| Continue after a break         | `/vtc:vtc continue`                            | `$vtc continue`             |
+| See where things are           | `/vtc:vtc status`                              | `$vtc status`               |
+| Answer what is waiting for you | `/vtc:vtc escalations`                         | `$vtc escalations`          |
+| Change something mid-run       | `/vtc:vtc change "Use tabs, not a modal"`      | `$vtc change "..."`         |
+| Ask an advisor                 | `/vtc:vtc advise "Why does /tv keep loading?"` | `$vtc advise "..."`         |
+| Stop / restart everything      | `/vtc:vtc pause`, `/vtc:vtc resume`            | `$vtc pause`, `$vtc resume` |
+| End a run started by mistake   | `/vtc:vtc cancel`                              | `$vtc cancel`               |
 
+Claude Code shows plugin commands as `<plugin>:<command>`, so `/vtc` appears as `/vtc:vtc`.
 In Codex, `$vtc` calls the plugin's `vtc` skill (type `$` and pick it from the list). You can
 also just say "use vtc to fix ...".
 
@@ -89,7 +92,8 @@ which; you can change it. Then it runs the loop and stops for you at G1, G2, and
 needs a decision. Attach screenshots as files and the Lead passes them to the roles that need
 them (kept private in `.vtc/state/`).
 
-From a terminal at any time: `vtc status`, `vtc dashboard`, `vtc pause`, `vtc resume`.
+From a terminal at any time: `vtc status`, `vtc dashboard`, `vtc pause`, `vtc resume`,
+`vtc cancel` (it asks you to confirm). A repo runs one VTC run at a time.
 
 ### Which host runs the roles?
 

@@ -677,7 +677,7 @@ describe("the human channel (D-an, reading 71)", () => {
     const { ctx } = capture("/w", "/h", () => Promise.resolve(inner));
     const client = await ctx.engine();
     for (const tool of HUMAN_ONLY_TOOLS)
-      await expect(client.call(tool, {} as never)).rejects.toThrow(humanChannelRequired(tool));
+      await expect(client.call(tool, {})).rejects.toThrow(humanChannelRequired(tool));
     await client.call("status", {});
     expect(calls).toEqual(["status"]);
     expect(guardHumanOnly(inner)).not.toBe(inner);

@@ -3,6 +3,22 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## v0.2.3 (2026-10-17)
+
+- **Advisors work when your Lead is Codex.** Asking the Lead for an advisor (the incident
+  debugger, the estimator and the others) failed every time under Codex: VTC handed the advisor
+  back to the Lead to run inside its own chat session, which VTC never allows on Codex. Now the
+  advisor runs in the background as a headless Codex run, like every other role, and the Lead
+  tells you its answer as soon as it comes back (the whole answer is kept in
+  `.vtc/state/results/`). It still counts against the run's advisor budget. Nothing changes with
+  a Claude Code Lead.
+- **`vtc cancel` ends a run started by mistake.** A repo runs one VTC run at a time, and until now
+  a run could only be paused, never ended, so a run started in the wrong repository blocked the
+  next one. `/vtc cancel` (Claude Code: `/vtc:vtc cancel`; Codex: `$vtc cancel`) asks you to
+  confirm in the chat; `vtc cancel` asks at the terminal. The run ends as aborted, its role runs
+  stop, its automatic merges are turned off and its open questions close; its worktrees and
+  branches stay for you to keep or remove. A role can never cancel a run.
+
 ## v0.2.2 (2026-10-17)
 
 - **Codex roles can read your code again.** v0.2.1 gave Codex roles their full instructions, and

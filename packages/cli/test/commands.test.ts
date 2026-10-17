@@ -23,7 +23,14 @@ import {
   dashboardUrl,
   defaultDashboardDeps,
 } from "../src/commands/dashboard.js";
-import { pause, resume, status, formatStatus, toolErrorMessage } from "../src/commands/control.js";
+import {
+  cancel,
+  pause,
+  resume,
+  status,
+  formatStatus,
+  toolErrorMessage,
+} from "../src/commands/control.js";
 import { createDoctorCommand, defaultDoctorEnv } from "../src/commands/doctor.js";
 import { command as init, defaultProjectConfig } from "../src/commands/init.js";
 import {
@@ -439,6 +446,49 @@ describe("vtc status / pause / resume (AD-19 rule 4)", () => {
     expect(human).toEqual(['resume {"run":"r9","adopt":true}', "close"]);
     expect(plain).toEqual([]);
     expect(err.join("\n")).toMatch(/--adopt needs --run/);
+  });
+
+  it("vtc cancel goes over the human connection only, and needs a 5.13.0 engine (reading 268)", async () => {
+    const plain: string[] = [];
+    const asked: { what: string; since: string | undefined }[] = [];
+    const { ctx, out, err } = capture("/w", "/h", () => Promise.resolve(fakeClient(plain)));
+    // without a human connection (no terminal), nothing is sent
+    expect(await cancel.run([], ctx)).toBe(1);
+    expect(err.join("\n")).toMatch(/interactive terminal/);
+    expect(plain).toEqual([]);
+    const human: string[] = [];
+    const withHuman = {
+      ...ctx,
+      humanEngine: (what: string, since?: string) => {
+        asked.push({ what, since });
+        return Promise.resolve({
+          call: (tool: string, input: unknown) => {
+            human.push(`${tool} ${JSON.stringify(input)}`);
+            return Promise.resolve({
+              run: "r9",
+              phase: "specify",
+              stopped_runs: 1,
+              closed_escalations: 4,
+              worktrees_left: [".vtc/state/worktrees/T-1"],
+            } as never);
+          },
+          close: () => Promise.resolve(),
+        } as EngineClient);
+      },
+    };
+    expect(await cancel.run(["--run", "r9"], withHuman)).toBe(0);
+    expect(asked).toEqual([
+      {
+        what: "cancel run r9 (it ends as aborted; its worktrees and branches stay)",
+        since: "5.13.0",
+      },
+    ]);
+    expect(human).toEqual(['cancel {"run":"r9"}']);
+    expect(out.join("\n")).toMatch(
+      /Run r9 cancelled \(phase specify\): 1 role run\(s\) stopped, 4 open escalation\(s\) closed/,
+    );
+    expect(out.join("\n")).toContain(".vtc/state/worktrees/T-1");
+    expect(plain).toEqual([]);
   });
 
   it("vtc pause / resume without a run exit 0 and say the kill switch state (reading 227 (2))", async () => {

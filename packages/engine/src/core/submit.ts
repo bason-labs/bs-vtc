@@ -92,7 +92,7 @@ import {
   usedTaskIds,
 } from "./queries.js";
 import { frozenSpecItems } from "./read-model.js";
-import { saveResult } from "./results.js";
+import { RESULTS_DIR, saveResult } from "./results.js";
 import { writePathsOf } from "./roles.js";
 import { completedReviews, evidenceContext, isReviewer, startTriage } from "./review.js";
 import { specRequirementIds } from "./spec.js";
@@ -1600,6 +1600,39 @@ export const closeRefusedRun = async (
 export type FailureWording = "engine" | "reported";
 
 /** Handles a `submit`. Callers run it inside the run's lock. */
+/**
+ * A headless advisor's outcome, relayed to the run's Lead once (`NextResult.notices`, spine §5
+ * reading 267): a Codex Lead's consult launches no subagent whose reply it reads, so the answer
+ * (its summary, cut to the notice's length, and where the whole result is), a rejection or a
+ * failure comes back here. A run that failed to start is not relayed: `consult` already said why.
+ */
+const relayHeadlessAdvisor = (
+  k: Kernel,
+  h: RunHandle,
+  run: RoleRunRecord,
+  submitted: SubmitInput,
+  rejected?: string,
+): void => {
+  if (run.dispatch !== "headless" || k.deps.roles.get(run.role)?.kind !== "advisor") return;
+  const who = `Advisor ${run.role} (${run.action_id})`;
+  if (submitted.kind === "failure") {
+    const outcome = submitted.outcome;
+    if (outcome.kind === "error" && outcome.cause === "spawn") return;
+    const why = outcome.kind === "error" ? outcome.message : outcome.kind;
+    k.relay(h.state.id, `${who} did not answer (${why}). Ask again with consult.`);
+    return;
+  }
+  if (rejected !== undefined) {
+    k.relay(h.state.id, `${who} answered, but the engine rejected its result: ${rejected}`);
+    return;
+  }
+  const result = submitted.result;
+  k.relay(
+    h.state.id,
+    `${who} answered (exit ${result.exit}; full result in ${RESULTS_DIR}/${run.action_id}.json): ${result.summary}`,
+  );
+};
+
 export const handleSubmit = async (
   k: Kernel,
   h: RunHandle,
@@ -1645,6 +1678,7 @@ export const handleSubmit = async (
   };
   if (input.kind === "failure") {
     handleFailure(k, h, run, input.outcome, worded, priced.budgetUsd, commandShapes);
+    relayHeadlessAdvisor(k, h, run, input);
     await close(false);
     // a limit interrupts every run in flight: theirs are checked now too
     await sweepDispatches(k, h);
@@ -1662,8 +1696,13 @@ export const handleSubmit = async (
     if (rollback !== null) await k.deps.workspace.discard(rollback.worktree, rollback.head);
   }
   await close(outcome.kind === "reject" && outcome.keepWorktree === true);
-  if (writes.issues.length > 0)
+  if (writes.issues.length > 0) {
+    relayHeadlessAdvisor(k, h, run, input, writes.issues.join("; "));
     return { accepted: false, rejection: rejection("write_scope", writes.issues) };
+  }
+  if (outcome.kind === "reject")
+    relayHeadlessAdvisor(k, h, run, input, outcome.rejection.issues.join("; "));
+  else relayHeadlessAdvisor(k, h, run, input);
   if (outcome.kind === "reject") {
     const task = run.task;
     if (outcome.findings !== undefined && task !== undefined) {

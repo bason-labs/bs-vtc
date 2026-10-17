@@ -25,8 +25,10 @@ export interface CommandContext {
    * A connection that proves a human (spine §5 readings 71 and 88): it asks `what` at the
    * terminal first and sends the install token only after a yes. Throws without an interactive
    * terminal or on a no. Absent where there is no terminal to ask (tests, the binary's own uses).
+   * `since`: the lowest contracts version the running engine must speak for the call (a tool it
+   * may not have, e.g. `cancel` from 5.13.0); checked before the human is asked.
    */
-  readonly humanEngine?: (what: string) => Promise<EngineClient>;
+  readonly humanEngine?: (what: string, since?: string) => Promise<EngineClient>;
 }
 
 export interface CommandSpec {
