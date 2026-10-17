@@ -103,6 +103,8 @@ import {
 } from "../model-refusals.js";
 import { checkPrices, priceTablesOf, type HostPriceTable } from "../prices.js";
 import { exec } from "../process.js";
+import { availableUpdate } from "../update.js";
+import { VERSION } from "../version.js";
 import { printable } from "../human-gesture.js";
 import { findRepoRoot, isVtcProject } from "../repo.js";
 import {
@@ -162,6 +164,11 @@ export interface DoctorCommandEnv extends DoctorEnv {
   readonly osv?: OsvEnv;
   /** `~/.vtc/config.yaml` (D-ak). */
   readonly userConfig?: () => UserConfigRead;
+  /**
+   * A release newer than this vtc (`update.ts`, checked at most daily), or `null`: up to date,
+   * offline, no gh. Never a failed check.
+   */
+  readonly update?: () => Promise<string | null>;
   /** The running engine of the repo doctor runs in, or `null` (no repo, no daemon). */
   readonly engine?: () => Promise<DoctorCheck | null>;
   /** The visual stack's browser pin (AD-24). */
@@ -299,6 +306,8 @@ export const defaultDoctorEnv = (ctx: CommandContext): DoctorCommandEnv => {
       download: downloadOsvDatabase,
     },
     userConfig: () => readUserConfig(ctx.vtcHome),
+    update: () =>
+      availableUpdate({ exec, vtcHome: ctx.vtcHome, current: VERSION, now: () => new Date() }),
     engine: async () => {
       const repoRoot = await findRepoRoot(ctx.cwd);
       return repoRoot === null
@@ -510,6 +519,13 @@ export const createDoctorCommand = (
           checks.push(await checkOsvDatabase(e.osv, e.scanners.vtcHome, store, mode));
         }
       }
+      const update = e.update === undefined ? null : await e.update().catch(() => null);
+      if (update !== null)
+        checks.push({
+          name: "update",
+          status: "info",
+          detail: `update available: v${update} (run vtc update)`,
+        });
       for (const c of checks) ctx.io.out(`${MARK[c.status]}  ${c.name.padEnd(12)} ${c.detail}`);
       const failed = checks.filter((c) => c.status === "fail").length;
       ctx.io.out(failed === 0 ? "vtc is ready." : `${String(failed)} check(s) failed.`);

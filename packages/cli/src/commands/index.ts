@@ -19,6 +19,7 @@ import { command as resume } from "./resume.js";
 import { command as status } from "./status.js";
 import { command as statuslineTee } from "./statusline-tee.js";
 import type { CommandSpec } from "./types.js";
+import { command as update } from "./update.js";
 import { command as version } from "./version.js";
 
 export type { CommandSpec } from "./types.js";
@@ -33,6 +34,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   status,
   install,
   doctor,
+  update,
   config,
   lookback,
   automation,
