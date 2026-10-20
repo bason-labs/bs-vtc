@@ -19,6 +19,7 @@ import {
   ENGINE_MCP_TOOLS,
   jsonSchemaFor,
   ROLE_MCP_TOOLS,
+  SessionRefSchema,
   stripNulls,
   type ContractName,
   type EngineMcpToolName,
@@ -173,11 +174,14 @@ export const callTool = async (
   if (!parsed.success) {
     const issues = issuesOf(parsed.error);
     if (tool.name === "submit" && isRecord(args) && typeof args.action_id === "string") {
+      // the session the run used still resumes on the re-dispatch, when it is well formed
+      const session = SessionRefSchema.safeParse(args.session_ref);
       const rejected = await host.rejectMalformedSubmit(
         typeof args.run === "string" ? args.run : undefined,
         args.action_id,
         issues,
         call,
+        session.success ? session.data : undefined,
       );
       if (rejected !== null) return { ...toolText(rejected), structuredContent: rejected };
     }
