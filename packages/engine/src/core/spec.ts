@@ -14,10 +14,14 @@ export interface SpecItem {
 }
 
 const HEADING = /^#{1,6}\s+((?:REQ|SEC)-[1-9]\d*)\b[\s:.-]*(.*)$/;
-// The id may be followed by an annotation (`**REQ-4** (revised r2) If …`). Bold ids need no
-// separator; a plain id needs one, so prose like `REQ-1 to REQ-7` defines nothing.
-const ITEM =
-  /^\s*(?:[-*+]\s+)?(?:\*\*((?:REQ|SEC)-[1-9]\d*(?:\.AC-[1-9]\d*)?)\*\*\s*(?:\([^)]*\))?\s*[:.)-]?|((?:REQ|SEC)-[1-9]\d*(?:\.AC-[1-9]\d*)?)(?:\*\*)?\s*(?:\([^)]*\))?\s*[:.)-])\s*(.+)$/;
+// The id may be followed by an annotation (`**REQ-4** (revised r2) If …`). A bold id closes its
+// bold (a separator may sit inside it: `**REQ-1:** …`) or takes a separator (`**REQ-1: Title**`);
+// a plain id needs a separator, so prose like `REQ-1 to REQ-7` defines nothing.
+const ID = "(?:REQ|SEC)-[1-9]\\d*(?:\\.AC-[1-9]\\d*)?";
+const NOTE = "\\s*(?:\\([^)]*\\))?\\s*";
+const ITEM = new RegExp(
+  `^\\s*(?:[-*+]\\s+)?(?:\\*\\*(${ID})(?:[:.)-]?\\*\\*${NOTE}[:.)-]?|${NOTE}[:.)-])|(${ID})(?:\\*\\*)?${NOTE}[:.)-])\\s*(.+)$`,
+);
 
 /** Every REQ/SEC and AC the spec defines, in document order, first definition wins. */
 export const parseSpecItems = (text: string): SpecItem[] => {
@@ -33,7 +37,7 @@ export const parseSpecItems = (text: string): SpecItem[] => {
     const item = ITEM.exec(raw);
     const itemId = item?.[1] ?? item?.[2];
     if (itemId !== undefined && item?.[3] !== undefined) {
-      if (!items.has(itemId)) items.set(itemId, item[3].trim());
+      if (!items.has(itemId)) items.set(itemId, item[3].replace(/\*\*\s*$/, "").trim());
       continue;
     }
     // The first prose line under a heading becomes the requirement's text.

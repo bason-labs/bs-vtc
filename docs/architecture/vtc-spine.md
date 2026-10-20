@@ -4899,7 +4899,8 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       (`REQ-7.AC-1`) was not a requirement at all. `parseSpecItems` now accepts an optional
       parenthesised annotation after the id (kept out of the requirement's text), a bold id
       without a separator, and defines every `REQ-n`/`SEC-n` prefix of an AC no line defines,
-      before its first AC, with its id as text. A plain id still needs a separator, so prose
+      before its first AC, with its id as text. A line that starts with a bold id (`**REQ-1:** …`,
+      `**REQ-1: Title**`, `**REQ-1** …`) defines that requirement. A plain id still needs a separator, so prose
       such as `REQ-1 to REQ-7` defines nothing. Tests: `spec-parse.test.ts`.
 
 ## 6. Change process for this spine

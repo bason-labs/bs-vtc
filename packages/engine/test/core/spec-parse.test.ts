@@ -26,4 +26,29 @@ describe("parseSpecItems (fault 9: the owner's revised spec)", () => {
     const ids = specRequirementIds(parseSpecItems("This run only reads (REQ-1 to REQ-7, REQ-21 to REQ-25).\n**REQ-1** Read."));
     expect(ids).toEqual(["REQ-1"]);
   });
+  it("keeps the older bold forms and prose headings", () => {
+    const items = parseSpecItems(
+      [
+        "**REQ-1:** Colon inside the bold.",
+        "**REQ-2.** Dot inside the bold.",
+        "**REQ-3: A title**",
+        "## REQ-4",
+        "The system shall do four.",
+      ].join("\n"),
+    );
+    expect(specRequirementIds(items)).toEqual(["REQ-1", "REQ-2", "REQ-3", "REQ-4"]);
+    expect(items.map((i) => i.text)).toEqual([
+      "Colon inside the bold.",
+      "Dot inside the bold.",
+      "A title",
+      "The system shall do four.",
+    ]);
+  });
+  it("lets an AC come before its requirement's own line, and ignores mid-sentence ids", () => {
+    const items = parseSpecItems(
+      "- REQ-5.AC-1: Given a, When b, Then c.\n**REQ-5** The system shall five.\nThe plan covers REQ-9: x.",
+    );
+    expect(items.map((i) => i.id)).toEqual(["REQ-5.AC-1", "REQ-5"]);
+    expect(items[1]?.text).toBe("The system shall five.");
+  });
 });
