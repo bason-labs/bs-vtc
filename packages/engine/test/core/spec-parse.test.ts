@@ -14,16 +14,23 @@ const SPEC = [
 
 describe("parseSpecItems (fault 9: the owner's revised spec)", () => {
   it("finds bold ids with an annotation, plain bold ids, headings and AC-implied REQs", () => {
-    expect(specRequirementIds(parseSpecItems(SPEC))).toEqual(
-      ["REQ-1", "REQ-2", "REQ-4", "REQ-21", "REQ-7", "REQ-30"],
-    );
+    expect(specRequirementIds(parseSpecItems(SPEC))).toEqual([
+      "REQ-1",
+      "REQ-2",
+      "REQ-4",
+      "REQ-21",
+      "REQ-7",
+      "REQ-30",
+    ]);
   });
   it("keeps the requirement's text without the annotation", () => {
     const req4 = parseSpecItems(SPEC).find((i) => i.id === "REQ-4");
     expect(req4?.text).toBe("If a source has no API, then the system shall use the browser.");
   });
   it("does not invent ids from prose mentions", () => {
-    const ids = specRequirementIds(parseSpecItems("This run only reads (REQ-1 to REQ-7, REQ-21 to REQ-25).\n**REQ-1** Read."));
+    const ids = specRequirementIds(
+      parseSpecItems("This run only reads (REQ-1 to REQ-7, REQ-21 to REQ-25).\n**REQ-1** Read."),
+    );
     expect(ids).toEqual(["REQ-1"]);
   });
   it("keeps the older bold forms and prose headings", () => {

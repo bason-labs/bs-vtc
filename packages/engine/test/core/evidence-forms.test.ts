@@ -21,8 +21,8 @@ describe("evidence forms", () => {
       packRoot: repoRoot,
       head: null,
       specIds: ["REQ-23", "REQ-23.AC-1"],
-      git: { readFileAtCommit: async () => undefined },
-      commitExists: async () => false,
+      git: { readFileAtCommit: () => Promise.resolve(undefined) },
+      commitExists: () => Promise.resolve(false),
     };
     expect(await resolves(ctx, { type: "spec_ref", ref: ".vtc/spec/spec.md#REQ-23" })).toBe(true);
     expect(await resolves(ctx, { type: "spec_ref", ref: "REQ-23" })).toBe(true);
