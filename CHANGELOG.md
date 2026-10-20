@@ -3,6 +3,24 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
+## Unreleased
+
+- **The Security agent can write its threat model.** In the design step it could not save its
+  threat model file, so the step failed. It may now write that one file and nothing else.
+- **Empty fields in an agent's answer no longer fail it.** An agent that left an optional field
+  empty (`null`) had its whole answer rejected. Those fields are now treated as not filled in.
+- **More ways of writing a requirement are recognised.** Requirements written as
+  `**REQ-4** (revised)`, with the separator inside the bold, with a bold title, or named only by
+  their acceptance criteria are now found in the specification.
+- **References the agents really write are accepted.** A reference to the specification by file
+  path and anchor, and a role's own instructions given by a relative path, no longer get a result
+  rejected.
+- **Headless Codex agents get the design and research methods.** The method skills a role's prompt
+  names are now available to it when it runs headless, as they are under Claude Code.
+- **A rejected answer is fixed in the same agent session.** Instead of starting a new session and
+  re-reading everything, the agent that was rejected is asked to fix its answer where it is, which
+  costs less.
+
 ## v0.2.5 (2026-10-17)
 
 - **Autopilot: hand VTC the task, review the PR.** Start a run with `/vtc start --autopilot "…"`
