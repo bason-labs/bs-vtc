@@ -5,7 +5,8 @@
  *
  * Recognised lines: a heading `## REQ-2 Title` (the requirement) and an item
  * `- REQ-2.AC-1: Given … When … Then …` (an acceptance criterion); `SEC-n` likewise. A bold id
- * may carry an annotation (`**REQ-4** (revised r2) …`), and a REQ that only its ACs name still counts.
+ * may carry an annotation (`**REQ-4** (revised r2) …`); one that withdraws it (`(removed r2)`,
+ * `(deferred)`) defines nothing. A REQ that only its ACs name still counts.
  */
 
 export interface SpecItem {
@@ -19,6 +20,9 @@ const HEADING = /^#{1,6}\s+((?:REQ|SEC)-[1-9]\d*)\b[\s:.-]*(.*)$/;
 // a plain id needs a separator, so prose like `REQ-1 to REQ-7` defines nothing.
 const ID = "(?:REQ|SEC)-[1-9]\\d*(?:\\.AC-[1-9]\\d*)?";
 const NOTE = "\\s*(?:\\([^)]*\\))?\\s*";
+// An annotation that withdraws the item (`**REQ-9** (removed r2) …`) defines nothing, so a
+// requirement the spec dropped cannot block PLAN coverage.
+const WITHDRAWN = /\([^)]*\b(?:removed|deleted|dropped|deferred|out of scope)\b[^)]*\)/i;
 const ITEM = new RegExp(
   `^\\s*(?:[-*+]\\s+)?(?:\\*\\*(${ID})(?:[:.)-]?\\*\\*${NOTE}[:.)-]?|${NOTE}[:.)-])|(${ID})(?:\\*\\*)?${NOTE}[:.)-])\\s*(.+)$`,
 );
@@ -37,7 +41,9 @@ export const parseSpecItems = (text: string): SpecItem[] => {
     const item = ITEM.exec(raw);
     const itemId = item?.[1] ?? item?.[2];
     if (itemId !== undefined && item?.[3] !== undefined) {
-      if (!items.has(itemId)) items.set(itemId, item[3].replace(/\*\*\s*$/, "").trim());
+      const head = item[0].slice(0, item[0].length - item[3].length);
+      if (!items.has(itemId) && !WITHDRAWN.test(head))
+        items.set(itemId, item[3].replace(/\*\*\s*$/, "").trim());
       continue;
     }
     // The first prose line under a heading becomes the requirement's text.

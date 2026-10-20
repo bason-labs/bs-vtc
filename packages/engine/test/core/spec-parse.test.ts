@@ -58,4 +58,25 @@ describe("parseSpecItems (fault 9: the owner's revised spec)", () => {
     expect(items.map((i) => i.id)).toEqual(["REQ-5.AC-1", "REQ-5"]);
     expect(items[1]?.text).toBe("The system shall five.");
   });
+  it("does not define a requirement its annotation removes or defers", () => {
+    const items = parseSpecItems(
+      [
+        "**REQ-9** (removed r2) The system shall export to CSV.",
+        "- **REQ-10** (deferred): The system shall send email.",
+        "**REQ-11** (Out of scope in r2) The system shall print.",
+        "- **REQ-12** (DROPPED) The system shall fax.",
+        "**REQ-13** (deleted r3): The system shall beep.",
+      ].join("\n"),
+    );
+    expect(specRequirementIds(items)).toEqual([]);
+  });
+  it("still defines a requirement its annotation revises or adds", () => {
+    const items = parseSpecItems(
+      [
+        "**REQ-1** (revised r2) The system shall read.",
+        "- **REQ-2** (added r2): The system shall write.",
+      ].join("\n"),
+    );
+    expect(specRequirementIds(items)).toEqual(["REQ-1", "REQ-2"]);
+  });
 });

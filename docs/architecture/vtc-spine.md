@@ -4895,13 +4895,16 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
 273.  **The spec parser finds every requirement** (§5.2, §6.1 PLAN coverage). _Lead decision
       2026-10-20, pending human review._ The Planner was rejected with "covers unknown REQ-4"
       although the owner's revised spec defined `**REQ-4** (revised r2) …`: the parser took no
-      annotation between a bold id and its text, and a REQ that only its ACs named
-      (`REQ-7.AC-1`) was not a requirement at all. `parseSpecItems` now accepts an optional
-      parenthesised annotation after the id (kept out of the requirement's text), a bold id
-      without a separator, and defines every `REQ-n`/`SEC-n` prefix of an AC no line defines,
-      before its first AC, with its id as text. A line that starts with a bold id (`**REQ-1:** …`,
-      `**REQ-1: Title**`, `**REQ-1** …`) defines that requirement. A plain id still needs a separator, so prose
-      such as `REQ-1 to REQ-7` defines nothing. Tests: `spec-parse.test.ts`.
+      annotation between a bold id and its text, and a REQ that only its ACs named (`REQ-7.AC-1`)
+      was not a requirement at all. `parseSpecItems` now accepts an optional parenthesised
+      annotation after the id (kept out of the requirement's text), a bold id without a separator,
+      and defines every `REQ-n`/`SEC-n` prefix of an AC no line defines, before its first AC, with
+      its id as text. A line that starts with a bold id (`**REQ-1:** …`, `**REQ-1: Title**`,
+      `**REQ-1** …`) defines that requirement. A plain id still needs a separator, so prose such as
+      `REQ-1 to REQ-7` defines nothing. An annotation that withdraws the item (one naming it
+      removed, deleted, dropped, deferred or out of scope, in any case, as `**REQ-9** (removed r2)`
+      or `- **REQ-9** (deferred):`) defines nothing, so a requirement the spec dropped cannot block
+      PLAN coverage; `(revised r2)` and `(added r2)` still define. Tests: `spec-parse.test.ts`.
 274.  **Evidence in the forms roles write** (§4.2 step 3, AD-8 rule 2). _Lead decision
       2026-10-20, pending human review._ The claim check refused what roles naturally cite:
       `spec_ref .vtc/spec/spec.md#REQ-23`, `spec_ref .vtc/spec/spec.md:39`, a bare
