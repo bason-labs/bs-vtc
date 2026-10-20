@@ -7,8 +7,8 @@ import { describe, expect, it } from "vitest";
 import { CONTRACTS_VERSION, EVENT_PAYLOAD_SCHEMAS } from "../src/index.js";
 
 describe("contracts 5.15.0", () => {
-  it("is MINOR over 5.14.0", () => {
-    expect(CONTRACTS_VERSION.split(".")[0]).toBe("5");
+  it("is 5.15.0, MINOR over 5.14.0", () => {
+    expect(CONTRACTS_VERSION).toBe("5.15.0");
   });
 
   it("role.rejected names the rejected run's session, or none", () => {
