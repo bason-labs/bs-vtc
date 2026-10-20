@@ -3,7 +3,7 @@
 All notable changes to `vtc` are listed here. Versions follow semver; while the version is 0.x,
 any release may change behaviour. Role prompt changes have their own log in `roles/CHANGELOG.md`.
 
-## Unreleased
+## v0.2.6 (2026-10-20)
 
 - **The Security agent can write its threat model.** In the design step it could not save its
   threat model, so the step failed. It may now write files under `.vtc/architecture/threat-model/`

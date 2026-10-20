@@ -36,9 +36,9 @@ Download the archive for your platform from
 [Releases](https://github.com/bason-labs/bs-vtc/releases), check it, and put `vtc` on your PATH:
 
 ```sh
-gh release download v0.2.1 -R bason-labs/bs-vtc -p 'vtc-0.2.1-darwin-arm64.tar.gz' -p SHA256SUMS
+gh release download v0.2.6 -R bason-labs/bs-vtc -p 'vtc-0.2.6-darwin-arm64.tar.gz' -p SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing
-tar -xzf vtc-0.2.1-darwin-arm64.tar.gz && mv vtc ~/.local/bin/
+tar -xzf vtc-0.2.6-darwin-arm64.tar.gz && mv vtc ~/.local/bin/
 vtc version
 ```
 
