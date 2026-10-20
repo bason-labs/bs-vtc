@@ -4892,6 +4892,15 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       null". `submit` now reads `null` in `args.result` as absent, as headless structured output
       already is (`stripNulls`, exported from `@vtc/shared`); the rest of the arguments are
       untouched. Tests: `pack-inputs.test.ts`, `mcp.test.ts`.
+273.  **The spec parser finds every requirement** (§5.2, §6.1 PLAN coverage). _Lead decision
+      2026-10-20, pending human review._ The Planner was rejected with "covers unknown REQ-4"
+      although the owner's revised spec defined `**REQ-4** (revised r2) …`: the parser took no
+      annotation between a bold id and its text, and a REQ that only its ACs named
+      (`REQ-7.AC-1`) was not a requirement at all. `parseSpecItems` now accepts an optional
+      parenthesised annotation after the id (kept out of the requirement's text), a bold id
+      without a separator, and defines every `REQ-n`/`SEC-n` prefix of an AC no line defines,
+      before its first AC, with its id as text. A plain id still needs a separator, so prose
+      such as `REQ-1 to REQ-7` defines nothing. Tests: `spec-parse.test.ts`.
 
 ## 6. Change process for this spine
 
