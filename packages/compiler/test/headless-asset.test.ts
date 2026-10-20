@@ -52,6 +52,12 @@ describe("headless instructions asset", () => {
   );
 });
 
+// owner-run fault 6: a Codex BA (write_scoped) has no file tools, so its prompt must say how to read
+it("on codex the BA's headless prompt tells it to read with read-only shell commands", () => {
+  const text = emitted("codex", rolePromptAssetPath("vtc-ba", "headless")) ?? "";
+  expect(text).toContain("read and search files with read-only shell commands");
+});
+
 describe("the Lead passes a request's images (spine §5 reading 262)", () => {
   const lead = readSources(ROOT).files.find(
     (f) => f.path === "plugins/common/skills/lead/SKILL.md",
