@@ -19,6 +19,8 @@ import {
   ENGINE_MCP_TOOLS,
   jsonSchemaFor,
   ROLE_MCP_TOOLS,
+  SessionRefSchema,
+  stripNulls,
   type ContractName,
   type EngineMcpToolName,
   type RoleMcpToolName,
@@ -161,15 +163,25 @@ export const callTool = async (
   }
   const tool = ENGINE_MCP_TOOLS.find((t) => t.name === name);
   if (tool === undefined) return toolError(`unknown tool ${name}`);
-  const parsed = CONTRACT_SCHEMAS[tool.input].safeParse(args ?? {});
+  // a subagent's RoleResult reaches `submit` as the role wrote it, and the dispatch tells it to
+  // write `null` for a field the dispatch does not have: read that as absent, as a headless
+  // run's structured output is (`fromStructuredOutput`)
+  const submitted =
+    tool.name === "submit" && isRecord(args) && isRecord(args.result)
+      ? { ...args, result: stripNulls(args.result) }
+      : args;
+  const parsed = CONTRACT_SCHEMAS[tool.input].safeParse(submitted ?? {});
   if (!parsed.success) {
     const issues = issuesOf(parsed.error);
     if (tool.name === "submit" && isRecord(args) && typeof args.action_id === "string") {
+      // the session the run used still resumes on the re-dispatch, when it is well formed
+      const session = SessionRefSchema.safeParse(args.session_ref);
       const rejected = await host.rejectMalformedSubmit(
         typeof args.run === "string" ? args.run : undefined,
         args.action_id,
         issues,
         call,
+        session.success ? session.data : undefined,
       );
       if (rejected !== null) return { ...toolText(rejected), structuredContent: rejected };
     }

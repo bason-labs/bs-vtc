@@ -171,6 +171,22 @@ export const writeTaskPack = (repoRoot: string, pack: TaskPackInput): string => 
   return path;
 };
 
+/** Where a headless run reads a method skill its plugin-less host cannot load (reading 275). */
+export const methodSkillDir = (name: string): string => `.vtc/state/skills/${name}`;
+
+/**
+ * Writes one method skill's files under {@link methodSkillDir} (gitignored with the packs,
+ * AD-14 rule 5) and returns the path of its `SKILL.md`, relative to the repo.
+ */
+export const writeMethodSkill = (
+  repoRoot: string,
+  skill: { readonly name: string; readonly files: readonly { path: string; text: string }[] },
+): string => {
+  const dir = methodSkillDir(skill.name);
+  for (const file of skill.files) write(repoRoot, `${dir}/${file.path}`, file.text);
+  return `${dir}/SKILL.md`;
+};
+
 const ZERO_TOKENS: TokenUsage = { in: 0, out: 0, cache_r: 0, cache_w: 0 };
 
 const addTokens = (a: TokenUsage, b: TokenUsage | null): TokenUsage =>

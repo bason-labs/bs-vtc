@@ -27,6 +27,7 @@ import {
   type HostId,
   type ModelTier,
   type Phase,
+  type RejectReason,
   type ResolvedModel,
   type SessionRef,
   type SpawnRoleAction,
@@ -62,7 +63,7 @@ import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch } from "./loop.js";
 import { modelFallbackFor } from "./model-fallback.js";
 import { routeTier, type TierChange, type TierRoute } from "./routing.js";
-import { writeTaskPack } from "./projections.js";
+import { writeMethodSkill, writeTaskPack } from "./projections.js";
 import {
   awaitingReopenRebase,
   inFlight,
@@ -233,12 +234,11 @@ const lastDispatchSeq = (h: RunHandle, task: string, role: string): number =>
     .filter((r) => r.role === role)
     .reduce((max, r) => Math.max(max, r.seq), 0);
 
-/** Rejection issues of the step's last run, so the re-dispatch can fix them. */
-const rejectionNote = (
-  h: RunHandle,
-  filter: { role: string; mode?: string; task?: string; subject?: string },
-): string | undefined => {
-  const last = [...h.state.roleRuns.values()]
+type StepFilter = { role: string; mode?: string; task?: string; subject?: string };
+
+/** The step's last run, whatever its status. */
+const lastRunOf = (h: RunHandle, filter: StepFilter) =>
+  [...h.state.roleRuns.values()]
     .filter(
       (r) =>
         r.role === filter.role &&
@@ -247,6 +247,10 @@ const rejectionNote = (
         r.subject === filter.subject,
     )
     .at(-1);
+
+/** Rejection issues of the step's last run, so the re-dispatch can fix them. */
+const rejectionNote = (h: RunHandle, filter: StepFilter): string | undefined => {
+  const last = lastRunOf(h, filter);
   if (last?.status !== "rejected" || last.rejection === undefined) return undefined;
   // a rejected Engineer or QA author result is discarded from the task worktree (submit.ts)
   const discarded =
@@ -255,6 +259,31 @@ const rejectionNote = (
       ? " Its changes were discarded from the worktree: redo them within scope."
       : "";
   return `Your previous result was rejected (${last.rejection.reason}): ${last.rejection.issues.join("; ")}${discarded}`;
+};
+
+/** Rejections for the result's form: the run did its work, only what it handed in was wrong. */
+const FORMAT_REJECTIONS: ReadonlySet<string> = new Set([
+  "schema",
+  "claim_check",
+  "dispatch_mismatch",
+  "undeclared_output",
+  "undeclared_mode",
+  "undeclared_exit",
+  "undeclared_verdict",
+] satisfies RejectReason[]);
+
+/**
+ * The host session of the step's last run when the engine rejected its result for its form
+ * (spine §5 reading 276): the re-dispatch fixes the result in that session instead of paying for
+ * the whole run again. `undefined` for any other last run, or a rejected one that named no
+ * session (the re-dispatch starts fresh). A resume the step already has (an interrupted session,
+ * a later round's) wins.
+ */
+export const rejectionResume = (h: RunHandle, filter: StepFilter): SessionRef | undefined => {
+  const last = lastRunOf(h, filter);
+  if (last?.status !== "rejected" || last.rejection === undefined) return undefined;
+  if (!FORMAT_REJECTIONS.has(last.rejection.reason)) return undefined;
+  return last.sessionRef ?? undefined;
 };
 
 const interruptedSession = (
@@ -384,6 +413,7 @@ export const architectTriageStep = (
     if (rejected === undefined) return "done";
   }
   const note = [rejected, rejectionNote(h, filter)].filter((n) => n !== undefined).join("\n");
+  const resume = rejectionResume(h, filter);
   const ask =
     task.arch_triage === "extends"
       ? `Per-task triage (§8.4): ${taskId} extends the approved spine. Write a one-page design note for it under .vtc/architecture/notes/${taskId}.md (artifact design_note): which components it touches and how it stays inside the spine.`
@@ -392,6 +422,7 @@ export const architectTriageStep = (
     key: `triage:${taskId}`,
     ...filter,
     note: [ask, ...(note === "" ? [] : [note])].join("\n"),
+    ...(resume === undefined ? {} : { resume }),
   };
 };
 
@@ -466,12 +497,14 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
           : undefined);
       // the human's hint after QA got stuck goes to QA author (parking.ts resumeTarget)
       const answer = freshAnswer(h, taskId, lastDispatchSeq(h, taskId, "qa"));
+      const resume = rejectionResume(h, step);
       steps.push({
         key: `qa:${taskId}`,
         ...step,
         ...routed(routeStep(k, h, step, host)),
         ...(note === undefined ? {} : { note }),
         ...(answer === undefined ? {} : { answer }),
+        ...(resume === undefined ? {} : { resume }),
       });
     }
     return steps;
@@ -518,9 +551,11 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       plan.freshSession &&
       (plan.steps <= 1 ||
         routeStep(k, h, engineerStep, host, "escalation", plan.steps - 1).tier !== route.tier);
+    // reading 276: a result rejected for its form is fixed in the session that wrote it
     const resume =
       interruptedSession(h, { role: "engineer", task: taskId }) ??
-      (fresh || round === 1 ? undefined : task.session_ref);
+      (fresh || round === 1 ? undefined : task.session_ref) ??
+      rejectionResume(h, engineerStep);
     const answer = freshAnswer(h, taskId, lastDispatchSeq(h, taskId, "engineer"));
     const note = rejectionNote(h, { role: "engineer", task: taskId });
     steps.push({
@@ -623,11 +658,13 @@ const taskSteps = (k: Kernel, h: RunHandle, taskId: string, host: HostId): StepS
       const note = [judge?.note, rejectionNote(h, filter)]
         .filter((n) => n !== undefined)
         .join("\n");
+      const resume = rejectionResume(h, filter);
       steps.push({
         key: `review:${taskId}:${slot.id}`,
         ...filter,
         ...routed(route),
         ...(note === "" ? {} : { note }),
+        ...(resume === undefined ? {} : { resume }),
         ...(judge === undefined ? {} : { inputs: judge.inputs }),
         ...(slot.crossFamily === true && cross !== undefined ? { host: cross } : {}),
       });
@@ -687,11 +724,13 @@ export const pendingSteps = (k: Kernel, h: RunHandle, host: HostId): StepSpec[] 
         .filter((n) => n !== undefined)
         .join("\n");
       const answer = phaseAnswer(h, phase, role);
+      const resume = rejectionResume(h, filter);
       return [
         {
           key: `phase:${role}`,
           ...filter,
           ...(combined === "" ? {} : { note: combined }),
+          ...(resume === undefined ? {} : { resume }),
           ...(answer === undefined ? {} : { answer }),
           ...(coverageGaps === undefined ? {} : { coverageGaps }),
           ...(rerolled === undefined || rerolled.inputs.length === 0
@@ -964,7 +1003,8 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
             ...(gates?.tests.acceptance_globs ?? DEFAULT_ACCEPTANCE_GLOBS),
             `${HIDDEN_TESTS.stagingDir}/${step.task ?? ""}/**`,
           ]
-        : (contract?.tools.write_paths ?? []);
+        : // the mode's tools: security design writes the threat model, security verify nothing
+          (effectiveContract(k, step)?.tools.write_paths ?? []);
   const inputs: TaskPackInput["inputs"] = [...(step.inputs ?? [])];
   const frontHalf = task === undefined && ["discover", "specify"].includes(state.run.phase);
   if (frontHalf) {
@@ -1465,11 +1505,24 @@ export const dispatchStep = (
     task === undefined
       ? []
       : k.deps.plugins.skillsFor(host, [...task.stack_packs, task.discipline]);
+  // reading 275: a headless run has no plugin skills (`codex exec` turns plugins off), so the
+  // method skills its role's prompt names are written to the checkout and named here
+  const roleText = (
+    dispatch === "headless" ? (parts ?? k.deps.plugins.promptParts?.(agent, host)) : undefined
+  )?.compiled;
+  const methodSkills =
+    roleText === undefined
+      ? []
+      : (k.deps.plugins.methodSkills?.(host, roleText.headless ?? roleText.locked) ?? []).map(
+          (skill) =>
+            `Skill \`${skill.name}\`: read ${join(k.deps.repoRoot, writeMethodSkill(k.deps.repoRoot, skill))} and the references it names`,
+        );
   const prompt = [
     `VTC dispatch ${actionId}: you are ${agent} (${model.model === undefined ? "the session's model" : `model ${model.model}`}, effort ${model.effort}).`,
     `Work in: ${cwd}`,
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
+    ...methodSkills,
     readingLine(k, h, step),
     ...(step.note === undefined ? [] : [step.note]),
     `Finish with exactly one RoleResult JSON object as your final message: ${resultFields(step, task?.feature, effectiveContract(k, step))}. ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,

@@ -79,6 +79,10 @@ describe("pack inputs by declared artifact type (AD-14 rule 5)", () => {
     const [architect, security] = spawns(design);
     expect(architect?.role).toBe("architect");
     expect(security).toMatchObject({ role: "security", mode: "design" });
+    // the design mode's write paths, not the role's (none): the threat model must be writable
+    expect(readFileSync(join(h.repo, security!.pack), "utf8")).toContain(
+      "## Write scope\n\n- .vtc/architecture/threat-model/**\n",
+    );
     // two at a time (the default concurrency): the Designer once Security is done
     const designer = only(await threatModel(h, security!), "designer");
     for (const role of [architect!, designer]) {

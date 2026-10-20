@@ -32,6 +32,20 @@ export interface PluginCatalog {
    * catalog without it runs every agent's compiled prompt.
    */
   promptParts?(agent: string, host: HostId): PromptParts | undefined;
+  /**
+   * The method skills (`kind: "skill"`, no pack) whose name `prompt` names in backticks, each
+   * with every plugin file under its `skills/<name>/` directory, paths relative to it (spine §5
+   * reading 275): what a headless run with plugins off cannot load itself. A skill the bundle
+   * carries no `SKILL.md` for is left out. Optional: a catalog without it gives a headless run none.
+   */
+  methodSkills?(host: HostId, prompt: string): MethodSkill[];
+}
+
+/** What {@link PluginCatalog.methodSkills} returns for one skill. */
+export interface MethodSkill {
+  readonly name: string;
+  /** `SKILL.md` and `references/**`, relative to the skill's directory. */
+  readonly files: readonly { readonly path: string; readonly text: string }[];
 }
 
 /** What {@link PluginCatalog.promptParts} returns. */
@@ -152,6 +166,25 @@ export const createPluginCatalog = (
         editableInPack,
         ...(compiled === undefined ? {} : { compiled }),
       };
+    },
+    methodSkills: (host, prompt) => {
+      if (assets === null) return [];
+      const namespace = `plugin:${host}` as const;
+      const paths = assets.list(namespace);
+      return (manifests[host]?.skills ?? [])
+        .filter((s) => s.kind === "skill" && s.pack === null)
+        .filter((s) => prompt.includes("`" + s.name + "`"))
+        .map((s) => {
+          const dir = `skills/${s.name}/`;
+          const files = paths.flatMap((path) => {
+            const bytes = path.startsWith(dir) ? assets.read(namespace, path) : undefined;
+            return bytes === undefined
+              ? []
+              : [{ path: path.slice(dir.length), text: Buffer.from(bytes).toString("utf8") }];
+          });
+          return { name: s.name, files };
+        })
+        .filter((skill) => skill.files.some((f) => f.path === "SKILL.md"));
     },
   };
 };

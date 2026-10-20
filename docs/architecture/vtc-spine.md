@@ -4881,6 +4881,70 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       end its turn. For every run the Lead now proposes the attribution with each escalation
       instead of asking it as a separate question. Tests: `autopilot.test.ts`,
       `contracts-5-14.test.ts`.
+272.  **A mode's write scope and a null field** (§6.3 step 1, AD-4). _Lead decision 2026-10-20,
+      pending human review._ The owner's runs showed two faults in what a role is told and what
+      it may send back. The pack's "Write scope" came from the role's contract, so Security's
+      design mode, whose contract has no write paths, was told it could write nothing and
+      parked asking for the threat-model directory. It now comes from the dispatched mode's
+      contract (`effectiveContract`): design writes `.vtc/architecture/threat-model/**`, verify
+      nothing. And a subagent's `RoleResult` reaches `submit` with `null` for each field the
+      dispatch does not have (`mode`, `task`, `feature`), which the schema refused as "received
+      null". `submit` now reads `null` in `args.result` as absent, as headless structured output
+      already is (`stripNulls`, exported from `@vtc/shared`); the rest of the arguments are
+      untouched. Tests: `pack-inputs.test.ts`, `mcp.test.ts`.
+273.  **The spec parser finds every requirement** (§5.2, §6.1 PLAN coverage). _Lead decision
+      2026-10-20, pending human review._ The Planner was rejected with "covers unknown REQ-4"
+      although the owner's revised spec defined `**REQ-4** (revised r2) …`: the parser took no
+      annotation between a bold id and its text, and a REQ that only its ACs named (`REQ-7.AC-1`)
+      was not a requirement at all. `parseSpecItems` now accepts an optional parenthesised
+      annotation after the id (kept out of the requirement's text), a bold id without a separator,
+      and defines every `REQ-n`/`SEC-n` prefix of an AC no line defines, before its first AC, with
+      its id as text. A line that starts with a bold id (`**REQ-1:** …`, `**REQ-1: Title**`,
+      `**REQ-1** …`) defines that requirement. A plain id still needs a separator, so prose such as
+      `REQ-1 to REQ-7` defines nothing. An annotation that withdraws the item (one naming it
+      removed, deleted, dropped, deferred or out of scope, in any case, as `**REQ-9** (removed r2)`
+      or `- **REQ-9** (deferred):`) defines nothing, so a requirement the spec dropped cannot block
+      PLAN coverage; `(revised r2)` and `(added r2)` still define. Tests: `spec-parse.test.ts`.
+274.  **Evidence in the forms roles write** (§4.2 step 3, AD-8 rule 2). _Lead decision
+      2026-10-20, pending human review._ The claim check refused what roles naturally cite:
+      `spec_ref .vtc/spec/spec.md#REQ-23`, `spec_ref .vtc/spec/spec.md:39`, a bare
+      `spec_ref .vtc/spec/spec.md`, and a role's own pack as `../../packs/a-14.md:39`. A
+      `spec_ref` now resolves as an id (unchanged), as `<path>#<id>` when the id is in the
+      frozen spec (the path is ignored), or as a `.vtc/spec/` file that exists, bare or with
+      `:<line>` within its length; with no spec ids known it is still not checked. A `file` or
+      `file_line` ref of the exact form `(../)+packs/a-<n>.md` resolves only against
+      `.vtc/state/packs/a-<n>.md` under `packRoot`; no other `..` ref resolves. Tests:
+      `evidence-forms.test.ts`.
+275.  **A headless role reads its method skills from the checkout** (§5.3, AD-14 rule 5). _Lead
+      decision 2026-10-20, pending human review._ A headless Codex Designer stopped with "the task
+      requires design-craft, but that skill is unavailable": `codex exec` runs with plugins off
+      (`CODEX_ROLE_FEATURES_OFF`), and the method skills live in the plugin. For a headless dispatch
+      the engine now takes the method skills (`kind: "skill"`, no pack) whose name the role's
+      compiled prompt names in backticks (`PluginCatalog.methodSkills`, optional like
+      `promptParts`), writes each one's plugin files (`SKILL.md`, `references/**`) to
+      `.vtc/state/skills/<name>/` in the owner's checkout, gitignored with the packs, and adds one
+      line per skill to the dispatch prompt, of the form
+      ``Skill `<name>`: read <abs>/SKILL.md and the references it names``. A skill the bundle
+      carries no `SKILL.md` for is left out. Subagent dispatches are unchanged, since their host
+      loads plugin skills. The Architect's and the Research Analyst's prompts name `research-fetch`
+      and `research-facts` in backticks, so a headless one gets them as well. Tests:
+      `headless-skills.test.ts`, `compiled-roles.test.ts` (on the real compiled prompts).
+276.  **A format rejection is fixed in the same session** (§4.2 step 3, §11, AD-3; contracts
+      5.15.0). _Lead decision 2026-10-20, pending human review._ In the owner's runs every result
+      the engine rejected for its form was retried as a brand-new run with `resume: null`, at the
+      full price of the work already done (a BA retry cost about $1.40 each). Contracts 5.15.0:
+      `role.rejected.session_ref` is the host session the rejected run used (`submit`'s
+      `session_ref`, which a headless run's outcome fills as on `role.submitted`), absent when it
+      named none. A `submit` the schema refuses carries it too: the MCP server reads its
+      `session_ref` on its own and the engine puts it on the `schema` rejection when it is well
+      formed. When the step's last run was rejected for `schema`, `claim_check`,
+      `dispatch_mismatch`, `undeclared_output`, `undeclared_mode`, `undeclared_exit` or
+      `undeclared_verdict`, its re-dispatch (`rejectionResume`, next to `rejectionNote`: a phase
+      role, the Architect's triage, QA author, the Engineer and a reviewer) resumes that session
+      with the rejection note; any other reason (`write_scope` among them), or no session,
+      dispatches fresh. A resume the step already has (an interrupted session, a later round's task
+      session) wins. A session on another host is never resumed. Tests: `rejection-resume.test.ts`,
+      `contracts-5-15.test.ts`.
 
 ## 6. Change process for this spine
 

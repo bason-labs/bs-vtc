@@ -26,7 +26,7 @@ import {
   TIER_EFFORT_WITHOUT_MODEL,
   WAVE3_HOME_WRITE_DENY,
 } from "@vtc/shared";
-import { codexSandboxProfile } from "../../src/codex/command.js";
+import { codexHeadlessCommand, codexSandboxProfile } from "../../src/codex/command.js";
 import { ADAPTER_FACTORIES, createCodexAdapter } from "../../src/index.js";
 import { codexFakeSpawner } from "../support/fake-spawner.js";
 import { fixtureLines } from "../support/fixtures.js";
@@ -932,5 +932,15 @@ describe.skipIf(process.platform === "win32")("Codex scratch directory", () => {
     const link = join(scratch(), "link");
     symlinkSync(scratch(), link);
     await expect(spawnWith(link)).rejects.toThrow(/not a private directory/);
+  });
+});
+
+describe("codexHeadlessCommand keeps the shell on for a write-scoped role (fault 6)", () => {
+  it("never turns the shell tool off for a BA: the role reads and searches by shell, Codex has no file tools", () => {
+    const args = codexHeadlessCommand(request({ role: "ba", sandbox: profile(WRITE_SCOPED) }), {
+      scratchDir: "x",
+    }).args;
+    expect(args).not.toContain("features.shell_tool=false");
+    expect(args.join(" ")).not.toMatch(/shell_tool/u);
   });
 });

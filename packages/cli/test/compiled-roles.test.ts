@@ -14,6 +14,7 @@ import {
   CONTRACTS_VERSION,
   HOST_IDS,
   promptShaFor,
+  rolePromptAssetPath,
   type AssetBundle,
   type AssetNamespace,
   type HostId,
@@ -118,4 +119,33 @@ describe("the compiled plugins load into the engine (AD-14 rule 6)", () => {
       }
     }
   });
+});
+
+describe("a headless role gets the method skills its compiled prompt names (reading 275)", () => {
+  const skillsOf = (host: HostId, role: string): string[] => {
+    const prompt = bundle([host]).read(
+      `plugin:${host}`,
+      rolePromptAssetPath(agentNameFor(role), "headless"),
+    );
+    expect(prompt, `${host}: ${role}`).toBeDefined();
+    const catalog = core.pluginCatalogFrom(bundle([host]));
+    const text = Buffer.from(prompt ?? new Uint8Array()).toString("utf8");
+    return (catalog.methodSkills?.(host, text) ?? []).map((s) => s.name);
+  };
+
+  it.each(HOST_IDS)("on %s the Designer gets design-craft", (host) => {
+    expect(skillsOf(host, "designer")).toContain("design-craft");
+  });
+
+  it.each(HOST_IDS)(
+    "on %s the Architect and the Research Analyst get the research skills",
+    (host) => {
+      for (const role of ["architect", "research_analyst"]) {
+        expect(skillsOf(host, role), role).toEqual(
+          expect.arrayContaining(["research-fetch", "research-facts"]),
+        );
+      }
+      expect(skillsOf(host, "architect")).toContain("architect");
+    },
+  );
 });

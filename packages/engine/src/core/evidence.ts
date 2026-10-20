@@ -40,11 +40,23 @@ const splitLine = (ref: string): { path: string; line: number; end: number } | n
 const safe = (path: string): boolean =>
   path !== "" && !path.startsWith("/") && !path.includes("\\") && !path.split("/").includes("..");
 
-/** A pack the role cites, by its absolute or checkout-relative path (reading 270). */
+/** `../../packs/a-14.md`: a role's own pack as seen from its worktree (reading 274). */
+const RELATIVE_PACK = /^(?:\.\.\/)+packs\/(a-\d+\.md)$/;
+
+/**
+ * A pack the role cites, by its absolute or checkout-relative path (reading 270), or by the
+ * relative path from its worktree to the pack (reading 274, the only `..` form that resolves).
+ */
 const packText = (ctx: EvidenceContext, path: string): string | undefined => {
   if (ctx.packRoot === undefined) return undefined;
   const root = `${ctx.packRoot}/`;
-  const rel = path.startsWith(root) ? path.slice(root.length) : path;
+  const relative = RELATIVE_PACK.exec(path)?.[1];
+  const rel =
+    relative !== undefined
+      ? `${PACKS_DIR}${relative}`
+      : path.startsWith(root)
+        ? path.slice(root.length)
+        : path;
   if (!rel.startsWith(PACKS_DIR) || !safe(rel)) return undefined;
   const abs = join(ctx.packRoot, rel);
   return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
@@ -63,6 +75,22 @@ const fileText = async (ctx: EvidenceContext, path: string): Promise<string | un
 };
 
 const lineCount = (text: string): number => text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+
+/**
+ * A spec ref in the forms roles write (reading 274): an id, `<path>#<id>` (the path is ignored),
+ * or a `.vtc/spec/` file, bare or with `:<line>`.
+ */
+const specRefResolves = async (ctx: EvidenceContext, ref: string): Promise<boolean> => {
+  if (ctx.specIds.length === 0) return true;
+  if (ctx.specIds.includes(ref)) return true;
+  const hash = ref.indexOf("#");
+  if (hash >= 0) return ctx.specIds.includes(ref.slice(hash + 1));
+  const at = splitLine(ref);
+  const path = at?.path ?? ref;
+  if (!path.startsWith(".vtc/spec/") || !safe(path)) return false;
+  const text = await fileText(ctx, path);
+  return text !== undefined && (at === null || lineCount(text) >= at.end);
+};
 
 /** True when one piece of evidence resolves. */
 export const resolves = async (ctx: EvidenceContext, evidence: Evidence): Promise<boolean> => {
@@ -94,7 +122,7 @@ export const resolves = async (ctx: EvidenceContext, evidence: Evidence): Promis
       return (await ctx.commitExists(base)) && ctx.commitExists(head);
     }
     case "spec_ref":
-      return ctx.specIds.length === 0 || ctx.specIds.includes(evidence.ref);
+      return specRefResolves(ctx, evidence.ref);
     case "fact": {
       const facts = join(ctx.repoRoot, ".vtc/research/facts.jsonl");
       if (!existsSync(facts)) return false;

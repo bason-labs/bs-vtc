@@ -45,6 +45,7 @@ import {
   type HumanOnlyToolName,
   type ResumeInput,
   type RunScopedInput,
+  type SessionRef,
   type SessionSandboxState,
   type StartInput,
   type StartResult,
@@ -1918,13 +1919,16 @@ export class Engine implements Kernel {
 
   /**
    * A `submit` whose input failed the schema (AD-4 Check): logged as `role.rejected` `schema`
-   * when it names an open action, so the step is re-dispatched; `null` when it names none.
+   * when it names an open action, so the step is re-dispatched; `null` when it names none. The
+   * `session` it named, when well formed, is on the event, so the re-dispatch resumes it (spine §5
+   * reading 276).
    */
   async rejectMalformedSubmit(
     runId: string | undefined,
     actionId: string,
     issues: readonly string[],
     call: CallContext,
+    session?: SessionRef,
   ): Promise<SubmitResult | null> {
     let handle: RunHandle;
     try {
@@ -1949,6 +1953,7 @@ export class Engine implements Kernel {
           action_id: actionId,
           ...rejection,
           ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
+          ...(session === undefined ? {} : { session_ref: session }),
         },
       });
       return {
