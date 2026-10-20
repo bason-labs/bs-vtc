@@ -442,7 +442,8 @@ export const jsonSchemas = (options: JsonSchemaOptions = {}): Record<ContractNam
     ]),
   ) as Record<ContractName, JsonSchema>;
 
-const stripNulls = (value: unknown): unknown => {
+/** Drops every `null` member, deeply: in these contracts `null` means "absent". */
+export const stripNulls = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(stripNulls);
   if (!isRecord(value)) return value;
   return Object.fromEntries(

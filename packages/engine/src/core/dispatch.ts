@@ -964,7 +964,8 @@ const packFor = (k: Kernel, h: RunHandle, step: StepSpec, actionId: string): Tas
             ...(gates?.tests.acceptance_globs ?? DEFAULT_ACCEPTANCE_GLOBS),
             `${HIDDEN_TESTS.stagingDir}/${step.task ?? ""}/**`,
           ]
-        : (contract?.tools.write_paths ?? []);
+        : // the mode's tools: security design writes the threat model, security verify nothing
+          (effectiveContract(k, step)?.tools.write_paths ?? []);
   const inputs: TaskPackInput["inputs"] = [...(step.inputs ?? [])];
   const frontHalf = task === undefined && ["discover", "specify"].includes(state.run.phase);
   if (frontHalf) {

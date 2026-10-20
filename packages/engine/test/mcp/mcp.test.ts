@@ -174,6 +174,27 @@ describe("tool surface (AD-4)", () => {
       ),
     );
     expect(malformed).toMatchObject({ accepted: false, rejection: { reason: "schema" } });
+    // the dispatch tells a role to write `null` for the fields it does not have: that is absent
+    const redispatched = (malformed as { actions: { action_id?: string }[] }).actions[0];
+    const nulls = await callTool(
+      h.engine,
+      "submit",
+      {
+        kind: "result",
+        action_id: redispatched?.action_id,
+        result: {
+          role: "repo_cartographer",
+          mode: null,
+          task: null,
+          feature: null,
+          exit: "done",
+          summary: "x",
+        },
+      },
+      CLAUDE,
+    );
+    expect(JSON.stringify(nulls)).not.toContain("received null");
+    expect(parsed(nulls)).not.toMatchObject({ rejection: { reason: "schema" } });
     expect(parsed(await callTool(h.engine, "pause", {}, CLAUDE))).toMatchObject({ paused: true });
     expect(parsed(await callTool(h.engine, "resume", {}, CLAUDE))).toMatchObject({ paused: false });
     const approve = await callTool(

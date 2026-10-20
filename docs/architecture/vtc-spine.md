@@ -4881,6 +4881,17 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       end its turn. For every run the Lead now proposes the attribution with each escalation
       instead of asking it as a separate question. Tests: `autopilot.test.ts`,
       `contracts-5-14.test.ts`.
+272.  **A mode's write scope and a null field** (§6.3 step 1, AD-4). _Lead decision 2026-10-20,
+      pending human review._ The owner's runs showed two faults in what a role is told and what
+      it may send back. The pack's "Write scope" came from the role's contract, so Security's
+      design mode, whose contract has no write paths, was told it could write nothing and
+      parked asking for the threat-model directory. It now comes from the dispatched mode's
+      contract (`effectiveContract`): design writes `.vtc/architecture/threat-model/**`, verify
+      nothing. And a subagent's `RoleResult` reaches `submit` with `null` for each field the
+      dispatch does not have (`mode`, `task`, `feature`), which the schema refused as "received
+      null". `submit` now reads `null` in `args.result` as absent, as headless structured output
+      already is (`stripNulls`, exported from `@vtc/shared`); the rest of the arguments are
+      untouched. Tests: `pack-inputs.test.ts`, `mcp.test.ts`.
 
 ## 6. Change process for this spine
 
