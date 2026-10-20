@@ -4902,6 +4902,16 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       before its first AC, with its id as text. A line that starts with a bold id (`**REQ-1:** …`,
       `**REQ-1: Title**`, `**REQ-1** …`) defines that requirement. A plain id still needs a separator, so prose
       such as `REQ-1 to REQ-7` defines nothing. Tests: `spec-parse.test.ts`.
+274.  **Evidence in the forms roles write** (§4.2 step 3, AD-8 rule 2). _Lead decision
+      2026-10-20, pending human review._ The claim check refused what roles naturally cite:
+      `spec_ref .vtc/spec/spec.md#REQ-23`, `spec_ref .vtc/spec/spec.md:39`, a bare
+      `spec_ref .vtc/spec/spec.md`, and a role's own pack as `../../packs/a-14.md:39`. A
+      `spec_ref` now resolves as an id (unchanged), as `<path>#<id>` when the id is in the
+      frozen spec (the path is ignored), or as a `.vtc/spec/` file that exists, bare or with
+      `:<line>` within its length; with no spec ids known it is still not checked. A `file` or
+      `file_line` ref of the exact form `(../)+packs/a-<n>.md` resolves only against
+      `.vtc/state/packs/a-<n>.md` under `packRoot`; no other `..` ref resolves. Tests:
+      `evidence-forms.test.ts`.
 
 ## 6. Change process for this spine
 
