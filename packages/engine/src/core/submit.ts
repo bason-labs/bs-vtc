@@ -385,6 +385,7 @@ const logRejection = (
   usage: RunUsage | undefined,
   budgetUsd: number | null,
   commandShapes: readonly CommandShape[],
+  session: SessionRef | undefined,
 ): void => {
   const shapes = countCommandShapes(commandShapes);
   k.emit(h, {
@@ -407,6 +408,8 @@ const logRejection = (
       ...(shapes.length === 0 ? {} : { command_shapes: shapes }),
       // H-12 (reading 249): an unknown cost counted at the host's price ceiling, on the event
       ...closingBudget(usage?.cost_usd ?? null, budgetUsd),
+      // reading 276: the re-dispatch after a format rejection resumes the session the run used
+      ...(session === undefined ? {} : { session_ref: session }),
     },
   });
   recordSpend(k, h, run, budgetUsd);
@@ -1690,7 +1693,16 @@ export const handleSubmit = async (
       ? reject("write_scope", writes.issues)
       : await evaluate(k, h, run, input.result);
   if (outcome.kind === "reject") {
-    logRejection(k, h, run, outcome.rejection, input.usage, priced.budgetUsd, commandShapes);
+    logRejection(
+      k,
+      h,
+      run,
+      outcome.rejection,
+      input.usage,
+      priced.budgetUsd,
+      commandShapes,
+      input.session_ref,
+    );
     // A rejected result leaves nothing in the task worktree (committed or not), so the next role
     // there is never charged with it (spine §5 reading 86).
     if (rollback !== null) await k.deps.workspace.discard(rollback.worktree, rollback.head);

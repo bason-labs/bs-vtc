@@ -120,6 +120,10 @@
     {
       "version": "5.14.0",
       "schemas_sha256": "b33b55610b1a6c7b0bee911fc755f419870d10d6af42f6df549c7fb6121fd390"
+    },
+    {
+      "version": "5.15.0",
+      "schemas_sha256": "dfd7c95735d160cf7420e3a69555a782d62f3a78f67f80fff617af767a03ae1e"
     }
   ]
 }

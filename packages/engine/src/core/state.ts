@@ -511,6 +511,7 @@ export const applyEvent = (state: RunState, event: VtcEvent): void => {
       run.status = "rejected";
       run.closedSeq = event.seq;
       run.rejection = { reason: data.reason, issues: data.issues };
+      if (data.session_ref !== undefined) run.sessionRef = data.session_ref;
       run.tokens = event.tokens ?? null;
       run.costUsd = event.cost_usd ?? null;
       run.budgetUsd = run.costUsd ?? data.budget_usd ?? null;

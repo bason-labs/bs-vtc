@@ -366,5 +366,9 @@ export * from "./json-schema.js";
  * `StartInput.autopilot` and `run.started.autopilot` put a run on autopilot; the engine's own
  * decisions carry `autopilot: true` on `escalation.answered` and `gate.approved` (actor `engine`),
  * and `StatusResult.autopilot` counts them. Additive.
+ *
+ * 5.15.0 (MINOR): a format rejection is fixed in the same session (spine §5 reading 276).
+ * `role.rejected.session_ref`: the host session the rejected run used, which the re-dispatch
+ * after a schema, claim_check, dispatch_mismatch or undeclared_* rejection resumes. Additive.
  */
-export const CONTRACTS_VERSION = "5.14.0";
+export const CONTRACTS_VERSION = "5.15.0";

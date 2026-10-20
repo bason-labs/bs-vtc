@@ -1,5 +1,5 @@
 {
-  "contracts_version": "5.14.0",
+  "contracts_version": "5.15.0",
   "schemas": {
     "Run": {
       "$id": "https://vtc.local/schemas/Run.json",
@@ -4500,6 +4500,28 @@
               "type": "number",
               "minimum": 0,
               "maximum": 1000000
+            },
+            "session_ref": {
+              "type": "object",
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "enum": [
+                    "claude-code",
+                    "codex"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "host",
+                "id"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [

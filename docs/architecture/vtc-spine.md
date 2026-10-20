@@ -4924,6 +4924,20 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       ``Skill `<name>`: read <abs>/SKILL.md and the references it names``. A skill the bundle
       carries no `SKILL.md` for is left out. Subagent dispatches are unchanged, since their host
       loads plugin skills. Tests: `headless-skills.test.ts`.
+276.  **A format rejection is fixed in the same session** (§4.2 step 3, §11, AD-3; contracts
+      5.15.0). _Lead decision 2026-10-20, pending human review._ In the owner's runs every result
+      the engine rejected for its form was retried as a brand-new run with `resume: null`, at
+      the full price of the work already done (a BA retry cost about $1.40 each). Contracts
+      5.15.0: `role.rejected.session_ref` is the host session the rejected run used (`submit`'s
+      `session_ref`, which a headless run's outcome fills as on `role.submitted`), absent when it
+      named none. When the step's last run was rejected for `schema`, `claim_check`,
+      `dispatch_mismatch`, `undeclared_output`, `undeclared_mode`, `undeclared_exit` or
+      `undeclared_verdict`, its re-dispatch (`rejectionResume`, next to `rejectionNote`: a phase
+      role, the Architect's triage, QA author, the Engineer and a reviewer) resumes that session
+      with the rejection note; any other reason (`write_scope` among them), or no session,
+      dispatches fresh. A resume the step already has (an interrupted session, a later round's
+      task session) wins. A session on another host is never resumed. Tests:
+      `rejection-resume.test.ts`, `contracts-5-15.test.ts`.
 
 ## 6. Change process for this spine
 

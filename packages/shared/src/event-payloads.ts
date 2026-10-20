@@ -486,6 +486,12 @@ export const EVENT_PAYLOAD_SCHEMAS = {
      * known price counts its tokens at its host's price ceiling. New in 5.8.0.
      */
     budget_usd: z.number().nonnegative().max(1_000_000).optional(),
+    /**
+     * The host session the rejected run used, as on `role.submitted`: the re-dispatch after a
+     * rejection for the result's form resumes it (spine §5 reading 276). Absent: the run named
+     * none, and the re-dispatch starts fresh. New in 5.15.0.
+     */
+    session_ref: SessionRefSchema.optional(),
   }),
   "role.failed": z.strictObject({
     action_id: SlugSchema,
