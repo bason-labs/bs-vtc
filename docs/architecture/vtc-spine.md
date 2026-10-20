@@ -4912,6 +4912,18 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       `file_line` ref of the exact form `(../)+packs/a-<n>.md` resolves only against
       `.vtc/state/packs/a-<n>.md` under `packRoot`; no other `..` ref resolves. Tests:
       `evidence-forms.test.ts`.
+275.  **A headless role reads its method skills from the checkout** (§5.3, AD-14 rule 5). _Lead
+      decision 2026-10-20, pending human review._ A headless Codex Designer stopped with "the
+      task requires design-craft, but that skill is unavailable": `codex exec` runs with plugins
+      off (`CODEX_ROLE_FEATURES_OFF`), and the method skills live in the plugin. For a headless
+      dispatch the engine now takes the method skills (`kind: "skill"`, no pack) whose name the
+      role's compiled prompt names in backticks (`PluginCatalog.methodSkills`, optional like
+      `promptParts`), writes each one's plugin files (`SKILL.md`, `references/**`) to
+      `.vtc/state/skills/<name>/` in the owner's checkout, gitignored with the packs, and adds one
+      line per skill to the dispatch prompt, of the form
+      ``Skill `<name>`: read <abs>/SKILL.md and the references it names``. A skill the bundle
+      carries no `SKILL.md` for is left out. Subagent dispatches are unchanged, since their host
+      loads plugin skills. Tests: `headless-skills.test.ts`.
 
 ## 6. Change process for this spine
 

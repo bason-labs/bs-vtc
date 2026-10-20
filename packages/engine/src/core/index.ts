@@ -103,6 +103,7 @@ export {
   pluginManifest,
   PluginManifestError,
   type PluginCatalog,
+  type MethodSkill,
   type PromptParts,
 } from "./plugins.js";
 export {

@@ -62,7 +62,7 @@ import { effectiveVerdict } from "./gate-verdict.js";
 import { engineerDispatch } from "./loop.js";
 import { modelFallbackFor } from "./model-fallback.js";
 import { routeTier, type TierChange, type TierRoute } from "./routing.js";
-import { writeTaskPack } from "./projections.js";
+import { writeMethodSkill, writeTaskPack } from "./projections.js";
 import {
   awaitingReopenRebase,
   inFlight,
@@ -1466,11 +1466,24 @@ export const dispatchStep = (
     task === undefined
       ? []
       : k.deps.plugins.skillsFor(host, [...task.stack_packs, task.discipline]);
+  // reading 275: a headless run has no plugin skills (`codex exec` turns plugins off), so the
+  // method skills its role's prompt names are written to the checkout and named here
+  const roleText = (
+    dispatch === "headless" ? (parts ?? k.deps.plugins.promptParts?.(agent, host)) : undefined
+  )?.compiled;
+  const methodSkills =
+    roleText === undefined
+      ? []
+      : (k.deps.plugins.methodSkills?.(host, roleText.headless ?? roleText.locked) ?? []).map(
+          (skill) =>
+            `Skill \`${skill.name}\`: read ${join(k.deps.repoRoot, writeMethodSkill(k.deps.repoRoot, skill))} and the references it names`,
+        );
   const prompt = [
     `VTC dispatch ${actionId}: you are ${agent} (${model.model === undefined ? "the session's model" : `model ${model.model}`}, effort ${model.effort}).`,
     `Work in: ${cwd}`,
     `Read your task pack: ${join(k.deps.repoRoot, pack)}`,
     ...(skills.length === 0 ? [] : [`Use these skills: ${skills.join(", ")}`]),
+    ...methodSkills,
     readingLine(k, h, step),
     ...(step.note === undefined ? [] : [step.note]),
     `Finish with exactly one RoleResult JSON object as your final message: ${resultFields(step, task?.feature, effectiveContract(k, step))}. ${dispatch === "subagent" ? `The Lead submits it with action_id ${actionId}.` : `The engine records it as action ${actionId}.`}`,
