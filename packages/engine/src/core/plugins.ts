@@ -173,7 +173,7 @@ export const createPluginCatalog = (
       const paths = assets.list(namespace);
       return (manifests[host]?.skills ?? [])
         .filter((s) => s.kind === "skill" && s.pack === null)
-        .filter((s) => new RegExp("`" + s.name + "`").test(prompt))
+        .filter((s) => prompt.includes("`" + s.name + "`"))
         .map((s) => {
           const dir = `skills/${s.name}/`;
           const files = paths.flatMap((path) => {

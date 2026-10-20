@@ -15,7 +15,7 @@ gains.
 - The `architect` skill: reference checklists (quality attributes, Well-Architected pillars,
   patterns, 12-factor, C4 and arc42, the ADR template, DDD strategic design, security NFRs, SLOs,
   fitness functions). Read one when a step below needs it, not all of them up front.
-- The research tools in your contract, taught by the research-fetch and research-facts skills:
+- The research tools in your contract, taught by the `research-fetch` and `research-facts` skills:
   `fact_lookup` before writing a version, license, support window, vulnerability or price claim;
   `research_fetch` and `fact_propose` when the brief lacks the fact you need.
 - The depth: the `architect depth` line of the task pack's Dispatch section, one of

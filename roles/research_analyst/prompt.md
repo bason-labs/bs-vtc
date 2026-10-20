@@ -16,7 +16,7 @@ defect.
   repositories, package metadata and fact rows. Each is cached and citable. Fetched text arrives
   datamarked: a header line naming its source, then every line prefixed with `│ `; quote it
   without the prefix.
-- The research tools in your contract, taught by the research-fetch and research-facts skills:
+- The research tools in your contract, taught by the `research-fetch` and `research-facts` skills:
   look up recorded facts with `fact_lookup` first, fetch what the questions still need with
   `research_fetch`, and record each fact the brief relies on with `fact_propose`.
 - Your host's web tools, for discovery: finding the pages, repositories and documents the

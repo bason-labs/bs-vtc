@@ -4916,17 +4916,19 @@ org.chromium.Chromium.MachPortRendezvousServer.<pid>: Permission denied (1100)` 
       `.vtc/state/packs/a-<n>.md` under `packRoot`; no other `..` ref resolves. Tests:
       `evidence-forms.test.ts`.
 275.  **A headless role reads its method skills from the checkout** (§5.3, AD-14 rule 5). _Lead
-      decision 2026-10-20, pending human review._ A headless Codex Designer stopped with "the
-      task requires design-craft, but that skill is unavailable": `codex exec` runs with plugins
-      off (`CODEX_ROLE_FEATURES_OFF`), and the method skills live in the plugin. For a headless
-      dispatch the engine now takes the method skills (`kind: "skill"`, no pack) whose name the
-      role's compiled prompt names in backticks (`PluginCatalog.methodSkills`, optional like
+      decision 2026-10-20, pending human review._ A headless Codex Designer stopped with "the task
+      requires design-craft, but that skill is unavailable": `codex exec` runs with plugins off
+      (`CODEX_ROLE_FEATURES_OFF`), and the method skills live in the plugin. For a headless dispatch
+      the engine now takes the method skills (`kind: "skill"`, no pack) whose name the role's
+      compiled prompt names in backticks (`PluginCatalog.methodSkills`, optional like
       `promptParts`), writes each one's plugin files (`SKILL.md`, `references/**`) to
       `.vtc/state/skills/<name>/` in the owner's checkout, gitignored with the packs, and adds one
       line per skill to the dispatch prompt, of the form
       ``Skill `<name>`: read <abs>/SKILL.md and the references it names``. A skill the bundle
       carries no `SKILL.md` for is left out. Subagent dispatches are unchanged, since their host
-      loads plugin skills. Tests: `headless-skills.test.ts`.
+      loads plugin skills. The Architect's and the Research Analyst's prompts name `research-fetch`
+      and `research-facts` in backticks, so a headless one gets them as well. Tests:
+      `headless-skills.test.ts`, `compiled-roles.test.ts` (on the real compiled prompts).
 276.  **A format rejection is fixed in the same session** (§4.2 step 3, §11, AD-3; contracts
       5.15.0). _Lead decision 2026-10-20, pending human review._ In the owner's runs every result
       the engine rejected for its form was retried as a brand-new run with `resume: null`, at the
